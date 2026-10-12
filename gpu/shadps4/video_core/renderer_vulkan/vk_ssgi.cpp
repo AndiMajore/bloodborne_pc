@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sys/stat.h>
+#include "common/path_util.h"
 
 #include "video_core/host_shaders/ssgi_apply_comp.h"
 #include "video_core/host_shaders/ssgi_gather_comp.h"
@@ -64,6 +67,12 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
     history = std::clamp(EnvFloat("BB_SSGI_HISTORY", 0.9f), 0.0f, 0.98f);
     std::printf("SSGI: on, strength %.2f, radius %.2f, %u directions x %u steps, history %.2f%s\n",
                 strength, radius, directions, steps, history, debug ? ", debug view" : "");
+    if (const char* file = std::getenv("BB_SSGI_FILE")) {
+        settings_path = file;
+    } else {
+        settings_path = (Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "ssgi.txt").string();
+    }
+    std::printf("SSGI: settings re-read from %s while the game runs\n", settings_path.c_str());
 
     const auto device = instance.GetDevice();
     const auto make_layouts = [&](std::span<const vk::DescriptorSetLayoutBinding> bindings,
@@ -136,6 +145,46 @@ void ScreenSpaceGI::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId n
 void ScreenSpaceGI::OnFrameStart() {
     done_this_frame = false;
     ++frame;
+    PollSettings();
+}
+
+void ScreenSpaceGI::PollSettings() {
+    if (!enabled && settings_path.empty()) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_poll < std::chrono::seconds(1)) {
+        return;
+    }
+    last_poll = now;
+    struct stat st{};
+    if (::stat(settings_path.c_str(), &st) != 0) {
+        return;
+    }
+    const long long mtime = static_cast<long long>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
+    if (mtime == settings_mtime) {
+        return;
+    }
+    settings_mtime = mtime;
+    std::ifstream file(settings_path);
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos || line[0] == '#') {
+            continue;
+        }
+        const std::string key = line.substr(0, eq);
+        const float value = std::strtof(line.c_str() + eq + 1, nullptr);
+        if (key == "strength") strength = value;
+        else if (key == "radius") radius = std::max(value, 0.05f);
+        else if (key == "history") history = std::clamp(value, 0.0f, 0.98f);
+        else if (key == "directions") directions = std::clamp(u32(value), 1u, 16u);
+        else if (key == "steps") steps = std::clamp(u32(value), 1u, 32u);
+        else if (key == "debug") debug = value != 0.0f;
+        else if (key == "enabled") enabled = value != 0.0f;
+    }
+    std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, debug %d\n",
+                enabled ? 1 : 0, strength, radius, directions, steps, history, debug ? 1 : 0);
 }
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color) {

@@ -6,6 +6,8 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <string>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
@@ -40,6 +42,9 @@ public:
     void OnOpaqueScene(VideoCore::ImageId color);
     /// Start of a frame.
     void OnFrameStart();
+    /// <user>/ssgi.txt (BB_SSGI_FILE): "key=value" lines (strength, radius, history, directions,
+    /// steps, debug, enabled) re-read within a second of a change: tuning while the game runs.
+    void PollSettings();
 
 private:
     bool EnsureResources(u32 width, u32 height);
@@ -65,6 +70,9 @@ private:
     bool done_this_frame = false;
     u32 frame = 0;
     u32 width = 0, height = 0;
+    std::string settings_path;
+    long long settings_mtime = -1;
+    std::chrono::steady_clock::time_point last_poll{};
     bool history_valid = false;
     u32 gi_index = 0;
 
