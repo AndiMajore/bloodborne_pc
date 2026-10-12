@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <fmt/format.h>
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -112,7 +113,9 @@ GcnInst GcnDecodeContext::decodeInstruction(GcnCodeSlice& code) {
     const uint32_t token = code.at(0);
 
     InstEncoding encoding = GetInstructionEncoding(token);
-    ASSERT_MSG(encoding != InstEncoding::ILLEGAL, "illegal encoding: {:#x}", token);
+    if (encoding == InstEncoding::ILLEGAL) {
+        throw TranslationError(fmt::format("illegal encoding {:#x}", token));
+    }
     uint32_t encodingLen = getEncodingLength(encoding);
 
     // Clear the instruction
@@ -264,11 +267,13 @@ void GcnDecodeContext::updateInstructionMeta(InstEncoding encoding) {
     uint32_t encodingOp = mapEncodingOp(encoding, m_instruction.opcode);
     InstFormat instFormat = InstructionFormat(encoding, encodingOp);
 
-    ASSERT_MSG(instFormat.src_type != ScalarType::Undefined &&
-                   instFormat.dst_type != ScalarType::Undefined,
-               "Instruction format table incomplete for opcode {} ({}, encoding = 0x{:x})",
-               magic_enum::enum_name(m_instruction.opcode), u32(m_instruction.opcode),
-               u32(encoding));
+    if (instFormat.src_type == ScalarType::Undefined ||
+        instFormat.dst_type == ScalarType::Undefined) {
+        throw TranslationError(
+            fmt::format("instruction format table incomplete for opcode {} ({}, encoding {:#x})",
+                        magic_enum::enum_name(m_instruction.opcode), u32(m_instruction.opcode),
+                        u32(encoding)));
+    }
 
     m_instruction.inst_class = instFormat.inst_class;
     m_instruction.category = instFormat.inst_category;

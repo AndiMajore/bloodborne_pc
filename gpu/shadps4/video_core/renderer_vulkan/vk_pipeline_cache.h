@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <unordered_map>
 #include <shared_mutex>
@@ -96,6 +97,7 @@ struct PipelineSelection {
     bool motion = false;
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
+    bool translation_failed = false; ///< bbport: a stage could not be translated: skip the draw
 };
 
 /// bbport: a draw-preparation worker's own program state (see vk_draw_prep.h).
@@ -152,7 +154,11 @@ public:
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
+    /// bbport: GetProgramUnchecked with a TranslationError turned into a skipped draw
+    /// (sel.translation_failed), reported once per shader hash.
     Result GetProgram(PipelineSelection& sel, Shader::HwStage stage, Shader::SwStage l_stage,
+                      const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
+    Result GetProgramUnchecked(PipelineSelection& sel, Shader::HwStage stage, Shader::SwStage l_stage,
                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
 
     /// bbport: BB_PATCH_SHADERS=1: a patch file written while the game runs replaces its shader
@@ -197,6 +203,10 @@ private:
     Shader::Profile profile{};
     Shader::Pools pools;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
+    /// bbport: shader hashes whose translation failed, with the time: not retried for a
+    /// second (the memory is read again on the next try), logged once per 10 s.
+    std::unordered_map<u64, std::chrono::steady_clock::time_point> failed_translations;
+    std::unordered_map<u64, std::chrono::steady_clock::time_point> failed_translations_logged;
     /// bbport: shader patches reloaded at runtime (ReplaceShader): the replaced modules and
     /// their pipelines are kept for the rest of the session, never destroyed (recorded commands
     /// and prepared draws may still name them; a few MB per reload, a development feature).

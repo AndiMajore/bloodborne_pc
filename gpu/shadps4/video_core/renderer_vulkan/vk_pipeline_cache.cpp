@@ -22,6 +22,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
@@ -918,6 +919,7 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
     sel.fetch_shader = std::nullopt;
+    sel.translation_failed = false;
 
     Shader::Backend::Bindings binding{};
     const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {
@@ -944,7 +946,7 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         if (fetch_shader_) {
             sel.fetch_shader = fetch_shader_;
         }
-        return true;
+        return !sel.translation_failed;
     };
 
     sel.infos.fill(nullptr);
@@ -1020,6 +1022,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         return false;
     }
 
+    if (sel.translation_failed) {
+        return false; // bbport: a stage's code was not translatable: no pipeline, draw skipped
+    }
     const auto* vs_info = sel.infos[static_cast<u32>(SwStage::Vertex)];
     if (vs_info && sel.fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
@@ -1042,9 +1047,10 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
+    sel.translation_failed = false;
     std::tie(sel.infos[0], sel.modules[0], sel.fetch_shader, compute_key.value) =
         GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding);
-    return true;
+    return !sel.translation_failed; // bbport: untranslatable code: the dispatch is skipped
 }
 
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
@@ -1087,6 +1093,46 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
+    using Clock = std::chrono::steady_clock;
+    if (!sel.worker) {
+        if (const auto it = failed_translations.find(params.hash);
+            it != failed_translations.end()) {
+            if (Clock::now() - it->second < std::chrono::seconds(1)) {
+                sel.translation_failed = true;
+                return {};
+            }
+            failed_translations.erase(it);
+        }
+    }
+    try {
+        return GetProgramUnchecked(sel, hw_stage, sw_stage, params, binding);
+    } catch (const Shader::TranslationError& error) {
+        // The shader's bytes in the game's memory are not GCN code right now (seen twice in
+        // 0.5/0.51 after block moves, decode.cpp:115 and :267): the draw is skipped and the
+        // memory read again a second later, instead of the assertion that ended the session.
+        sel.translation_failed = true;
+        if (sel.worker) {
+            sel.worker->failed = true;
+            return {};
+        }
+        const auto now = Clock::now();
+        failed_translations[params.hash] = now;
+        auto& logged = failed_translations_logged[params.hash];
+        if (logged == Clock::time_point{} || now - logged > std::chrono::seconds(10)) {
+            logged = now;
+            std::printf("GPU: shader %s 0x%llx at 0x%llx could not be translated (%s): its draws "
+                        "are skipped, retried in a second\n",
+                        fmt::format("{}", hw_stage).c_str(), (unsigned long long)params.hash,
+                        (unsigned long long)params.Base(), error.what());
+        }
+        return {};
+    }
+}
+
+PipelineCache::Result PipelineCache::GetProgramUnchecked(PipelineSelection& sel, HwStage hw_stage,
+                                                         SwStage sw_stage,
+                                                         const Shader::ShaderParams& params,
+                                                         Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (sel.worker) {
         // bbport: draw-preparation worker: look up only, with the worker's own Info copy.

@@ -3,7 +3,17 @@
 
 #pragma once
 
+#include <stdexcept>
 #include "shader_recompiler/frontend/instruction.h"
+
+namespace Shader {
+/// bbport: the code is not GCN (a stale or reused region behind a valid-looking header, read
+/// from the game's memory): the translation is abandoned and the draw skipped
+/// (PipelineCache::GetProgram) instead of stopping the port.
+struct TranslationError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+} // namespace Shader
 
 namespace Shader::Gcn {
 
