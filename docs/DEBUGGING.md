@@ -33,3 +33,8 @@ GLSL with the bindings a replacement must keep. A patch applies at startup, also
 restored from the pipeline cache, and while the game runs: a patch file written (atomically:
 write elsewhere, then rename) is picked up within a second, the pipelines using the shader are
 rebuilt. The log says `GPU: shader patch loaded` / `reloaded`.
+
+The launcher's *Experimental shaders* group makes this a setting: a shaders folder holds one
+folder per **shader pack** with such `.spv` files (and, by convention, their sources beside
+them); each pack has a switch, enabled packs are copied into `<user>/shader/patch` at launch and
+`BB_PATCH_SHADERS=1` is set. Files put into the patch folder by hand are not touched.
