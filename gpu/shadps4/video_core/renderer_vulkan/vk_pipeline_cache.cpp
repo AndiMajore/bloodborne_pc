@@ -395,6 +395,12 @@ public:
         }
         cv.notify_one();
     }
+    /// bbport: every submitted job done (a shader module is about to be replaced: no job may
+    /// still create a pipeline from the old one).
+    void WaitIdle() {
+        std::unique_lock lk{mutex};
+        idle_cv.wait(lk, [&] { return jobs.empty() && running == 0; });
+    }
 
 private:
     void Run() {
@@ -408,14 +414,22 @@ private:
                 }
                 job = std::move(jobs.front());
                 jobs.pop_front();
+                ++running;
             }
             job();
+            {
+                std::scoped_lock lk{mutex};
+                --running;
+            }
+            idle_cv.notify_all();
         }
     }
     std::mutex mutex;
     std::condition_variable cv;
+    std::condition_variable idle_cv;
     std::deque<std::function<void()>> jobs;
     std::vector<std::thread> workers;
+    u32 running = 0;
     bool stop = false;
 };
 
@@ -1247,12 +1261,19 @@ void PipelineCache::PollShaderPatches() {
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
                                                              std::span<const u32> spv_code) {
     std::optional<vk::ShaderModule> new_module{};
+    // bbport: no background job may still build a pipeline from the old module, and the old
+    // module and pipelines live on until the GPU has finished the current submission: the
+    // recording threads may still hold commands (descriptor pushes with a pipeline's layout)
+    // of pipelines a draw chose before the swap.
+    if (compiler) {
+        compiler->WaitIdle();
+    }
+    const auto device = instance.GetDevice();
     for (const auto& [_, program] : program_cache) {
         for (auto& m : program->modules) {
             if (m.module == module) {
-                const auto& d = instance.GetDevice();
-                d.destroyShaderModule(m.module);
-                m.module = CompileSPV(spv_code, d);
+                scheduler.DeferOperation([device, old = m.module] { device.destroyShaderModule(old); });
+                m.module = CompileSPV(spv_code, device);
                 new_module = m.module;
             }
         }
@@ -1262,12 +1283,20 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
         for (auto& key : pipeline_keys) {
             if (std::holds_alternative<GraphicsPipelineKey>(key)) {
                 auto& graphics_key = std::get<GraphicsPipelineKey>(key);
-                graphics_pipelines.erase(graphics_key);
+                if (auto it = graphics_pipelines.find(graphics_key); it != graphics_pipelines.end()) {
+                    scheduler.DeferOperation([old = std::move(it.value())] {});
+                    graphics_pipelines.erase(it);
+                }
+                pending_graphics.erase(graphics_key); // built from the old module, never used
             } else if (std::holds_alternative<ComputePipelineKey>(key)) {
                 auto& compute_key = std::get<ComputePipelineKey>(key);
-                compute_pipelines.erase(compute_key);
+                if (auto it = compute_pipelines.find(compute_key); it != compute_pipelines.end()) {
+                    scheduler.DeferOperation([old = std::move(it.value())] {});
+                    compute_pipelines.erase(it);
+                }
             }
         }
+        module_related_pipelines.erase(module);
     }
     return new_module;
 }
