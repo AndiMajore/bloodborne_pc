@@ -1049,6 +1049,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
+        std::printf("GPU: shader patch loaded for %s 0x%llx (BB_PATCH_SHADERS)\n",
+                    fmt::format("{}", info.hw_stage).c_str(), (unsigned long long)info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
     } else {
         module = CompileSPV(spv, instance.GetDevice());

@@ -279,6 +279,19 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         }
         return false;
     }
+    // bbport: BB_PATCH_SHADERS=1: a patch file replaces a cached translation as it replaces a
+    // fresh one (CompileModule).
+    if (EmulatorSettings.IsPatchShaders()) {
+        if (auto patch = GetShaderPatch(program->info.pgm_hash, program->info.hw_stage, perm_idx,
+                                        "spv")) {
+            LOG_INFO(Loader, "Loaded patch for {} shader {:#x} (cached pipeline)",
+                     program->info.hw_stage, program->info.pgm_hash);
+            std::printf("GPU: shader patch loaded for %s 0x%llx, cached pipeline (BB_PATCH_SHADERS)\n",
+                        fmt::format("{}", program->info.hw_stage).c_str(),
+                        (unsigned long long)program->info.pgm_hash);
+            spv = std::move(*patch);
+        }
+    }
 
     // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
     // at the exact position rather than append
