@@ -312,6 +312,8 @@ def game_environment(s):
                             settings_user_dir(s) / "shader" / "patch",
                             DATA_DIR / "shaders_installed.json"):
         env["BB_PATCH_SHADERS"] = "1"
+        # run.sh prints the names at startup (the log says which packs this session runs with).
+        env["BB_SHADER_PACKS"] = ", ".join(shader_patches.selected(shaders_dir(s), DATA_DIR / "shaders.json"))
     env["BB_PATCHES_DIR"] = str(patches_dir(s))
     env["BB_PATCHES_CONFIG"] = str(DATA_DIR / "patches.json")
     env["BB_LANGUAGE"] = s["language"]
