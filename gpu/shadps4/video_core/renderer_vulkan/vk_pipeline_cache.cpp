@@ -7,11 +7,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <ranges>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "common/hash.h"
@@ -610,7 +612,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
 
-        if (EmulatorSettings.IsShaderCollect()) {
+        if (EmulatorSettings.IsShaderCollect() || EmulatorSettings.IsPatchShaders()) {
             for (auto stage = 0; stage < MaxShaderStages; ++stage) {
                 if (sel.infos[stage]) {
                     auto& m = sel.modules[stage];
@@ -628,7 +630,7 @@ const GraphicsPipeline* PipelineCache::FinishPipeline(const GraphicsPipelineKey&
     const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(key);
     RegisterPipelineData(key, pipeline_hash, job.sdata);
     ++num_new_pipelines;
-    if (EmulatorSettings.IsShaderCollect()) {
+    if (EmulatorSettings.IsShaderCollect() || EmulatorSettings.IsPatchShaders()) {
         for (const vk::ShaderModule module : job.modules) {
             if (module) {
                 module_related_pipelines[module].emplace_back(key);
@@ -709,7 +711,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
-        if (EmulatorSettings.IsShaderCollect()) {
+        if (EmulatorSettings.IsShaderCollect() || EmulatorSettings.IsPatchShaders()) {
             auto& m = sel.modules[0];
             module_related_pipelines[m].emplace_back(compute_key);
         }
@@ -1173,6 +1175,73 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     }
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+}
+
+// bbport: BB_PATCH_SHADERS=1: a patch file (user/shader/patch/<stage>_<hash>_<perm>.spv) written
+// while the game runs replaces that shader at once: its module is swapped and the pipelines using
+// it are dropped and rebuilt (ReplaceShader). Edit, compile, look; no restart. GPU thread, the
+// owner of the pipeline maps; once a second. Files present at the first scan were loaded at
+// startup. The GPU is drained first, as the pipelines being dropped may be in flight.
+void PipelineCache::PollShaderPatches() {
+    if (!EmulatorSettings.IsPatchShaders()) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last_poll{};
+    static std::unordered_map<std::string, std::filesystem::file_time_type> seen;
+    static bool first_scan = true;
+    const auto now = Clock::now();
+    if (now - last_poll < std::chrono::seconds(1)) {
+        return;
+    }
+    last_poll = now;
+    using namespace Common::FS;
+    const auto patch_dir = GetUserPath(PathType::ShaderDir) / "patch";
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(patch_dir, ec)) {
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".spv") {
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+        const auto mtime = entry.last_write_time(ec);
+        const auto it = seen.find(name);
+        if (it == seen.end()) {
+            seen.emplace(name, mtime);
+            if (first_scan) {
+                continue;
+            }
+        } else if (it->second == mtime) {
+            continue;
+        } else {
+            it->second = mtime;
+        }
+        // <stage>_0x<hash>_<perm>.spv
+        const auto us1 = name.find('_');
+        const auto us2 = name.rfind('_');
+        if (us1 == std::string::npos || us2 == std::string::npos || us2 <= us1) {
+            continue;
+        }
+        const std::string stage_name = name.substr(0, us1);
+        const u64 hash = std::strtoull(name.substr(us1 + 1, us2 - us1 - 1).c_str(), nullptr, 16);
+        const size_t perm = std::strtoull(name.substr(us2 + 1).c_str(), nullptr, 10);
+        const auto found = program_cache.find(hash);
+        if (found == program_cache.end() || perm >= found->second->modules.size() ||
+            fmt::format("{}", found->second->info.hw_stage) != stage_name) {
+            std::printf("GPU: shader patch %s: no such shader is loaded\n", name.c_str());
+            continue;
+        }
+        const auto patch = GetShaderPatch(hash, found->second->info.hw_stage, perm, "spv");
+        if (!patch || patch->size() < 5 || (*patch)[0] != 0x07230203u) {
+            std::printf("GPU: shader patch %s: not a SPIR-V file (still being written?)\n",
+                        name.c_str());
+            continue;
+        }
+        scheduler.Finish();
+        if (ReplaceShader(found->second->modules[perm].module, *patch)) {
+            std::printf("GPU: shader patch reloaded: %s\n", name.c_str());
+        }
+    }
+    first_scan = false;
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

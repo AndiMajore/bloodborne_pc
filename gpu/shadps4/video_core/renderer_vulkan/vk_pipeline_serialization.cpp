@@ -175,6 +175,9 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     ASSERT(is_new);
     it.value() = std::move(pipeline);
+    // bbport: pipelines restored from the cache register with their modules too, so a shader
+    // patch written at runtime (PollShaderPatches -> ReplaceShader) drops them as well.
+    module_related_pipelines[sel.modules[0]].emplace_back(compute_key);
 
     sel.infos.fill(nullptr);
     sel.modules.fill(nullptr);
@@ -250,6 +253,11 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     ASSERT(is_new);
     it.value() = std::move(pipeline);
+    for (const auto& m : sel.modules) {
+        if (m) {
+            module_related_pipelines[m].emplace_back(sel.graphics_key);
+        }
+    }
 
     sel.infos.fill(nullptr);
     sel.modules.fill(nullptr);

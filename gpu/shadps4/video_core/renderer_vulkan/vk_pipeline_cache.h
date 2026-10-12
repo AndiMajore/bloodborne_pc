@@ -155,6 +155,9 @@ public:
     Result GetProgram(PipelineSelection& sel, Shader::HwStage stage, Shader::SwStage l_stage,
                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
 
+    /// bbport: BB_PATCH_SHADERS=1: a patch file written while the game runs replaces its shader
+    /// at once (GPU thread, once a second; see PollShaderPatches in the .cpp).
+    void PollShaderPatches();
     std::optional<vk::ShaderModule> ReplaceShader(vk::ShaderModule module,
                                                   std::span<const u32> spv_code);
 
