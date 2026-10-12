@@ -59,6 +59,14 @@ public:
         return render_size;
     }
     /// Vertical field of view and near/far planes of the current camera.
+    /// bbport: the committed frame camera for other passes (SSGI): world -> view rows and
+    /// the projection scales/offsets as in camera_motion.comp.
+    [[nodiscard]] std::array<float, 12> View() const noexcept {
+        return current.view;
+    }
+    [[nodiscard]] std::array<float, 4> Projection() const noexcept {
+        return current.proj;
+    }
     [[nodiscard]] float VerticalFov() const noexcept;
     [[nodiscard]] float Near() const noexcept;
     // Current projection, previous projection, and row Z of previous-view * inverse-view.
