@@ -1261,10 +1261,10 @@ void PipelineCache::PollShaderPatches() {
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
                                                              std::span<const u32> spv_code) {
     std::optional<vk::ShaderModule> new_module{};
-    // bbport: no background job may still build a pipeline from the old module, and the old
-    // module and pipelines live on until the GPU has finished the current submission: the
-    // recording threads may still hold commands (descriptor pushes with a pipeline's layout)
-    // of pipelines a draw chose before the swap.
+    // bbport: no background job may still build a pipeline from the old module; the old module
+    // and pipelines are retired, not destroyed (recorded commands, prepared draws and the render
+    // state memo may still name them: destroying them at once or a submission later crashed the
+    // driver in a descriptor push with a dead pipeline layout).
     if (compiler) {
         compiler->WaitIdle();
     }
@@ -1272,7 +1272,7 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
     for (const auto& [_, program] : program_cache) {
         for (auto& m : program->modules) {
             if (m.module == module) {
-                scheduler.DeferOperation([device, old = m.module] { device.destroyShaderModule(old); });
+                retired_modules.push_back(m.module);
                 m.module = CompileSPV(spv_code, device);
                 new_module = m.module;
             }
@@ -1284,14 +1284,14 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
             if (std::holds_alternative<GraphicsPipelineKey>(key)) {
                 auto& graphics_key = std::get<GraphicsPipelineKey>(key);
                 if (auto it = graphics_pipelines.find(graphics_key); it != graphics_pipelines.end()) {
-                    scheduler.DeferOperation([old = std::move(it.value())] {});
+                    retired_graphics_pipelines.push_back(std::move(it.value()));
                     graphics_pipelines.erase(it);
                 }
                 pending_graphics.erase(graphics_key); // built from the old module, never used
             } else if (std::holds_alternative<ComputePipelineKey>(key)) {
                 auto& compute_key = std::get<ComputePipelineKey>(key);
                 if (auto it = compute_pipelines.find(compute_key); it != compute_pipelines.end()) {
-                    scheduler.DeferOperation([old = std::move(it.value())] {});
+                    retired_compute_pipelines.push_back(std::move(it.value()));
                     compute_pipelines.erase(it);
                 }
             }
