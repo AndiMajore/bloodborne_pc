@@ -105,6 +105,9 @@ private:
     float history = 0.5f; // 0.85 lagged visibly behind the camera (the Doll's cap)
     bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
     bool replace_mask = false; // settings "replace=1": the game's AO (or the GTAO pack) is ignored
+    bool build_fast_trace = false; // settings "build=1": BVH built for trace speed
+    float snap_far = 30.0f;
+    float ao_far = 40.0f;     // settings "far=": no AO and no BVH beyond (0 = everything); 40 m saves ~2 ms   // settings "snap=": the surface snap up to this depth (0 = off)
     float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
     u32 rays = 6; // 8 cost 4.3 ms at 1.5M triangles (below 60 FPS)
     u32 max_triangles = 3000000; // 1.5M dropped ~10 draws per frame in the Hunter's Dream (blinking occluders)

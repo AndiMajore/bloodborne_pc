@@ -28,6 +28,8 @@ layout(push_constant) uniform Constants {
     uint frame;
     uint mode;        // 2: primary-ray test t/|P| (0 = miss); 3: facing ratio of the normal;
                       // 4: AO with the rays starting 0.1 further out (self-hit test)
+    float snap_far;   // the surface snap runs up to this view depth (0 = never)
+    float ao_far;     // no AO beyond this view depth (the BVH ends a radius later)
 };
 
 const float PI = 3.14159265;
@@ -53,6 +55,10 @@ void main() {
         return;
     }
     const vec3 P = ViewPos(vec2(fp) + 0.5, depth);
+    if (ao_far > 0.0 && P.z > ao_far) {
+        imageStore(out_img, hp, vec4(1.0, P.z, 0.0, 0.0));
+        return;
+    }
     const vec3 nw = normalize(texelFetch(normal_tex, fp, 0).xyz * 2.0 - 1.0);
     vec3 N = normalize(vec3(dot(view[0].xyz, nw), dot(view[1].xyz, nw), dot(view[2].xyz, nw)));
     if (any(isnan(N)) || any(isnan(P)) || any(isinf(P))) { // no normal (sky, UI): nothing to trace
@@ -87,16 +93,20 @@ void main() {
     // Snap the origin onto the BVH: the depth surface and the triangles disagree by a few
     // centimetres where the game draws with a depth bias (floor tiles), and rays that start
     // below their own surface hit it at once. One camera ray per pixel finds the real surface.
+    // The ray only searches a short window around the depth (the bias is centimetres): a ray
+    // from the camera with t_min 0.8 |P| still walked the BVH over metres of foliage.
     vec3 origin = P;
-    {
+    if (P.z < snap_far) {
         const float len = length(P);
+        const vec3 dir = P / len;
+        const float window = 0.1 + 0.01 * len;
         rayQueryEXT snap;
         rayQueryInitializeEXT(snap, scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF,
-                              vec3(0.0), len * 0.8, P / len, len * 1.1);
+                              P - dir * window, 0.0, dir, 2.0 * window);
         while (rayQueryProceedEXT(snap)) {
         }
         if (rayQueryGetIntersectionTypeEXT(snap, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-            origin = P / len * rayQueryGetIntersectionTEXT(snap, true);
+            origin = P + dir * (rayQueryGetIntersectionTEXT(snap, true) - window);
             // The triangle's own normal for the hemisphere: the shading normal (normal maps)
             // tilts rays into flat walls and floors.
             vec3 tri[3];

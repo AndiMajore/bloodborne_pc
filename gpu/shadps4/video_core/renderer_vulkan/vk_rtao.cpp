@@ -37,6 +37,8 @@ struct ExpandConstants {
     std::array<float, 4> proj;
     u32 num_geometries;
     u32 total_triangles;
+    float far_cut;
+    u32 pad1;
 };
 struct TraceConstants {
     std::array<float, 12> view;
@@ -49,6 +51,8 @@ struct TraceConstants {
     u32 rays;
     u32 frame;
     u32 mode; // 0 ao, 2 primary-ray test
+    float snap_far;
+    float ao_far;
 };
 struct ApplyConstants {
     std::array<float, 4> proj;
@@ -61,8 +65,8 @@ struct ApplyConstants {
     u32 replace;
     u32 pad1;
 };
-static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
-static_assert(sizeof(TraceConstants) == 108 && offsetof(TraceConstants, mode) == 104);
+static_assert(sizeof(ExpandConstants) == 48 && offsetof(ExpandConstants, far_cut) == 40);
+static_assert(sizeof(TraceConstants) == 116 && offsetof(TraceConstants, ao_far) == 112);
 struct BlurConstants {
     std::array<float, 2> half_size;
     std::array<s32, 2> dir;
@@ -220,12 +224,16 @@ void RayTracedAO::PollSettings() {
         else if (key == "blur") blur = value != 0.0f;
         else if (key == "sigma") sigma = std::clamp(value, 0.0f, 4.0f);
         else if (key == "replace") replace_mask = value != 0.0f;
+        else if (key == "snap") snap_far = std::max(value, 0.0f);
+        else if (key == "build") build_fast_trace = value != 0.0f;
+        else if (key == "far") ao_far = std::max(value, 0.0f);
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
     std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, power %.2f, history %.2f, "
-                "sigma %.2f, blur %d, replace %d, debug %u, stage %u, alpha %d, decals %d\n",
+                "sigma %.2f, blur %d, replace %d, snap %.0f m, far %.0f m, build %s, debug %u, stage %u, alpha %d, decals %d\n",
                 active ? 1 : 0, rays, radius, strength, power, history, sigma, blur ? 1 : 0, replace_mask ? 1 : 0,
+                snap_far, ao_far, build_fast_trace ? "fast trace" : "fast build",
                 debug, stage, include_alpha ? 1 : 0, include_nowrite ? 1 : 0);
 }
 
@@ -330,8 +338,16 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .geometryCount = 1,
         .pGeometries = &blas_geometry,
     };
-    const auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
+    // Sized for both build preferences ("build=" in the settings switches them live).
+    auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
         vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
+    blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
+                      vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess;
+    const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
+        vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
+    blas_sizes.accelerationStructureSize =
+        std::max(blas_sizes.accelerationStructureSize, trace_sizes.accelerationStructureSize);
+    blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
     if (!CreateBuffer(blas_buffer, blas_sizes.accelerationStructureSize,
                       BU::eAccelerationStructureStorageKHR, false) ||
         !CreateBuffer(blas_scratch, blas_sizes.buildScratchSize, BU::eStorageBuffer, false,
@@ -759,6 +775,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .proj = camera_motion.Projection(),
         .num_geometries = num_geometries,
         .total_triangles = total_triangles,
+        .far_cut = ao_far > 0.0f ? ao_far + radius : 0.0f,
     };
     const auto jitter = camera_motion.Jitter();
     const TraceConstants trace{
@@ -772,6 +789,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .rays = rays,
         .frame = frame,
         .mode = debug,
+        .snap_far = snap_far,
+        .ao_far = ao_far,
     };
     const ApplyConstants apply{
         .proj = expand.proj,
@@ -802,6 +821,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
 
     // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
     const u32 last_stage = stage;
+    const bool fast_trace = build_fast_trace;
     const auto memory_barrier = [](vk::CommandBuffer cmdbuf, vk::PipelineStageFlags2 src_stage,
                                    vk::AccessFlags2 src, vk::PipelineStageFlags2 dst_stage,
                                    vk::AccessFlags2 dst) {
@@ -877,7 +897,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         };
         const vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
             .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild |
+            .flags = (fast_trace ? vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace
+                                 : vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild) |
                      vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
             .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
             .dstAccelerationStructure = blas,
