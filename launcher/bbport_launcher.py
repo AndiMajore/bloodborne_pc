@@ -125,6 +125,9 @@ DEFAULTS = {
     "mods_dir": "",
     "mods_enabled": True,
     "shaders_dir": "",
+    "ssgi": False,
+    "ssgi_strength": 8.0,
+    "ssgi_adaptive": 4.0,
     "patches_dir": "",
     "language": "1",
     "fullscreen": False,
@@ -245,6 +248,29 @@ def settings_user_dir(settings):
     return Path(settings["user_dir"]).expanduser() if settings.get("user_dir") else DATA_DIR / "user"
 
 
+def write_ssgi_settings(path, values):
+    """Updates key=value lines of the SSGI live settings file, keeping the other keys."""
+    lines = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        pass
+    seen = set()
+    out = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in values:
+            out.append(f"{key}={values[key]:g}" if isinstance(values[key], float) else f"{key}={values[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for key, value in values.items():
+        if key not in seen:
+            out.append(f"{key}={value:g}" if isinstance(value, float) else f"{key}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 # DLSS (vk_dlss.cpp): the bridge (libbbport_dlss.so) and NVIDIA's runtime library
 # libnvidia-ngx-dlss.so.<version>, beside bb-probe (the package, a build with DLSS_SDK_ROOT) or the
 # player's own in <user>/dlss, which the game prefers. Linux needs the .so from NVIDIA's DLSS SDK
@@ -314,6 +340,13 @@ def game_environment(s):
         env["BB_PATCH_SHADERS"] = "1"
         # run.sh prints the names at startup (the log says which packs this session runs with).
         env["BB_SHADER_PACKS"] = ", ".join(shader_patches.selected(shaders_dir(s), DATA_DIR / "shaders.json"))
+    # Screen-space GI (vk_ssgi.cpp): on by BB_SSGI=1; strength and adaptive damping go through
+    # the live settings file the pass re-reads while the game runs (other keys there are kept).
+    if s.get("ssgi"):
+        env["BB_SSGI"] = "1"
+        write_ssgi_settings(settings_user_dir(s) / "ssgi.txt",
+                            {"strength": float(s.get("ssgi_strength", 8.0)),
+                             "adaptive": float(s.get("ssgi_adaptive", 4.0)), "enabled": 1})
     env["BB_PATCHES_DIR"] = str(patches_dir(s))
     env["BB_PATCHES_CONFIG"] = str(DATA_DIR / "patches.json")
     env["BB_LANGUAGE"] = s["language"]
@@ -643,6 +676,28 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.shader_list = FolderList(self.shaders_group)
         self.refresh_shaders()
         page.add(self.shaders_group)
+
+        ssgi = Adw.PreferencesGroup(
+            title=tr("Экспериментальное освещение"),
+            description=tr("Отражённый свет в экранном пространстве (SSGI): один отскок от освещённых "
+                           "поверхностей, добавляется к сцене перед прозрачными объектами. "
+                           "Экспериментально; значения меняются и на лету через user/ssgi.txt."))
+        self.ssgi_row = Adw.SwitchRow(title=tr("Отражённый свет (SSGI)"),
+                                      subtitle="BB_SSGI", active=self.settings.get("ssgi", False))
+        ssgi.add(self.ssgi_row)
+        self.ssgi_strength_row = Adw.SpinRow.new_with_range(0.0, 16.0, 0.5)
+        self.ssgi_strength_row.set_title(tr("Сила отражённого света"))
+        self.ssgi_strength_row.set_subtitle(tr("8 — подобрано для Bloodborne; 12 уже окрашивает"))
+        self.ssgi_strength_row.set_digits(1)
+        self.ssgi_strength_row.set_value(float(self.settings.get("ssgi_strength", 8.0)))
+        ssgi.add(self.ssgi_strength_row)
+        self.ssgi_adaptive_row = Adw.SpinRow.new_with_range(0.0, 16.0, 0.5)
+        self.ssgi_adaptive_row.set_title(tr("Ослабление на светлых поверхностях"))
+        self.ssgi_adaptive_row.set_subtitle(tr("0 — везде одинаково; 4 — яркие сцены почти без изменений"))
+        self.ssgi_adaptive_row.set_digits(1)
+        self.ssgi_adaptive_row.set_value(float(self.settings.get("ssgi_adaptive", 4.0)))
+        ssgi.add(self.ssgi_adaptive_row)
+        page.add(ssgi)
 
         screen = Adw.PreferencesGroup(title=tr("Экран"))
         self.output_row = combo_row(tr("Разрешение вывода"),
@@ -1075,6 +1130,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["extra_env"] = self.extra_row.get_text().strip()
         s["mods_enabled"] = self.mods_enabled_row.get_active()
         self.save_shader_profile()
+        s["ssgi"] = self.ssgi_row.get_active()
+        s["ssgi_strength"] = float(self.ssgi_strength_row.get_value())
+        s["ssgi_adaptive"] = float(self.ssgi_adaptive_row.get_value())
         s["online"] = self.online_row.get_active()
         s["online_community"] = self.community_row.get_text().strip()
         s["online_server"] = self.server_row.get_text().strip()

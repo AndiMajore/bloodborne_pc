@@ -22,6 +22,20 @@ EN = {
     "Выбрать папку шейдеров": "Choose the shaders folder",
     "Открыть папку шейдеров": "Open the shaders folder",
     "Наборов шейдеров нет": "No shader packs",
+    # Screen-space GI
+    "Экспериментальное освещение": "Experimental lighting",
+    "Отражённый свет в экранном пространстве (SSGI): один отскок от освещённых "
+    "поверхностей, добавляется к сцене перед прозрачными объектами. "
+    "Экспериментально; значения меняются и на лету через user/ssgi.txt.":
+        "Screen-space global illumination (SSGI): one bounce of light from lit surfaces, added to the "
+        "scene before the transparents. Experimental; the values can also be changed while the game "
+        "runs through user/ssgi.txt.",
+    "Отражённый свет (SSGI)": "Bounce light (SSGI)",
+    "Сила отражённого света": "Bounce strength",
+    "8 — подобрано для Bloodborne; 12 уже окрашивает": "8 is tuned for Bloodborne; 12 already tints",
+    "Ослабление на светлых поверхностях": "Damping on bright surfaces",
+    "0 — везде одинаково; 4 — яркие сцены почти без изменений":
+        "0: the same everywhere; 4: bright scenes almost unchanged",
     # Window, pages, buttons
     "Запустить": "Play",
     "Остановить": "Stop",
