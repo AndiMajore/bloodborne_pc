@@ -1773,7 +1773,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .first_instance = first_instance,
                 .vertices = range,
             });
-            if (rtao->Enabled() && push_data.motion_param && is_indexed &&
+            if (rtao->Enabled() && push_data.motion_param &&
                 object_motion->LastAllocation().store) {
                 const auto& alloc = object_motion->LastAllocation();
                 rtao->AddGeometry({
@@ -1781,12 +1781,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     .vertices = alloc.vertices,
                     .instances = alloc.instances,
                     .first_vertex = alloc.first_vertex,
-                    .index_address = index_bind.address,
+                    .index_address = is_indexed ? index_bind.address : 0,
                     .index_count = regs.num_indices,
-                    .index16 = index_size == 2,
+                    .index16 = is_indexed && index_size == 2,
                     .base_vertex = s32(base_vertex),
-                    .restart = regs.enable_primitive_restart != 0,
+                    .restart = is_indexed && regs.enable_primitive_restart != 0,
                     .triangle_list = regs.primitive_type == AmdGpu::PrimitiveType::TriangleList,
+                    .non_indexed = !is_indexed,
                 });
             }
         }

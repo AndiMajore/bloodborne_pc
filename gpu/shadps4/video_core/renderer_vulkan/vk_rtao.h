@@ -41,6 +41,7 @@ public:
         s32 base_vertex;
         bool restart;
         bool triangle_list;
+        bool non_indexed; // index_address 0, vertex i of the draw is index i
     };
 
     explicit RayTracedAO(const Instance& instance, Scheduler& scheduler,
@@ -95,7 +96,7 @@ private:
     ObjectMotion& object_motion;
 
     bool enabled = false;
-    u32 debug = 0; // 1: raw AO into the mask, 2: primary-ray test (white = BVH hit at the pixel)
+    u32 debug = 0; // 1: raw AO into the mask, 2: primary-ray test, 3: normal facing, 4: AO with t_min 0.1
     float strength = 1.0f;
     float radius = 1.5f;
     float history = 0.85f;
@@ -107,6 +108,7 @@ private:
     std::vector<GpuGeometry> geometries;
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
+    u32 skipped_topology = 0, skipped_no_address = 0;
     bool readback_pending = false;
     u32 readback_frame = 0;
     Buffer dump_buffer;       // host: the half-res AO image (rg16f), "dump=" in the settings

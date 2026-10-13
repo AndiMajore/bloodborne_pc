@@ -87,7 +87,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
     }
-    debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 2u);
+    debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 4u);
     strength = std::clamp(EnvFloat("BB_RTAO_STRENGTH", 1.0f), 0.0f, 1.0f);
     radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
     history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.85f), 0.0f, 0.98f);
@@ -190,7 +190,7 @@ void RayTracedAO::PollSettings() {
         else if (key == "radius") radius = std::max(value, 0.05f);
         else if (key == "history") history = std::clamp(value, 0.0f, 0.98f);
         else if (key == "rays") rays = std::clamp(u32(value), 1u, 32u);
-        else if (key == "debug") debug = std::clamp(u32(value), 0u, 2u);
+        else if (key == "debug") debug = std::clamp(u32(value), 0u, 4u);
         else if (key == "enabled") active = value != 0.0f;
         else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
         else if (key == "dump") dump_request = value;
@@ -434,10 +434,10 @@ void RayTracedAO::OnFrameStart() {
                     v[3], v[4], v[5], v[6], v[7], v[8]);
     }
     if (frame % 600 == 0 && frame) {
-        std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u), "
-                    "%u passes recorded in 600 frames\n",
+        std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u; "
+                    "%u strips/other skipped, %u without index address), %u passes recorded in 600 frames\n",
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
-                    max_triangles, recorded);
+                    max_triangles, skipped_topology, skipped_no_address, recorded);
         recorded = 0;
         ++reports;
     }
@@ -445,6 +445,8 @@ void RayTracedAO::OnFrameStart() {
     frame_triangles = 0;
     dropped_triangles = 0;
     dropped_draws = 0;
+    skipped_topology = 0;
+    skipped_no_address = 0;
     done_this_frame = false;
     last_color = {};
     mask_candidate = {};
@@ -458,11 +460,23 @@ void RayTracedAO::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId nor
 }
 
 void RayTracedAO::AddGeometry(const Geometry& g) {
-    if (!enabled || !g.triangle_list || !g.index_address || g.index_count < 3 || !g.vertices ||
-        !g.instances) {
+    if (!enabled || g.index_count < 3 || !g.vertices || !g.instances) {
+        return;
+    }
+    if (!g.triangle_list) { // strips and the rest: not expanded (yet), counted
+        ++skipped_topology;
+        return;
+    }
+    if (g.index_address == 0 && !g.non_indexed) {
+        ++skipped_no_address; // an index buffer without a device address
         return;
     }
     const u32 tris = (g.index_count / 3) * g.instances;
+    if (g.non_indexed && g.index_count > g.vertices) {
+        ++dropped_draws; // the capture holds fewer vertices than the draw
+        dropped_triangles += tris;
+        return;
+    }
     // The positions must lie inside the capture (two halves of the object-motion buffer).
     const u64 last = u64(g.store) + u64(g.vertices) * g.instances;
     if (last > 1 + 2ull * object_motion.PositionsCapacity()) {

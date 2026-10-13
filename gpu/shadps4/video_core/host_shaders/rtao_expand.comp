@@ -70,7 +70,8 @@ void main() {
     vec3 out_pos[3];
     bool valid = true;
     for (uint k = 0u; k < 3u; ++k) {
-        const uint index = ReadIndex(words, g.index16, tri * 3u + k);
+        const uint i = tri * 3u + k;
+        const uint index = g.index_address != 0ul ? ReadIndex(words, g.index16, i) : i;
         if (g.restart != 0u && index == restart_value) {
             valid = false;
             break;

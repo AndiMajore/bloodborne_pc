@@ -25,7 +25,8 @@ layout(push_constant) uniform Constants {
     float history;
     uint rays;
     uint frame;
-    uint mode;        // 2: primary-ray test, the output is t/|P| of a camera ray (0 = miss)
+    uint mode;        // 2: primary-ray test t/|P| (0 = miss); 3: facing ratio of the normal;
+                      // 4: AO with the rays starting 0.1 further out (self-hit test)
 };
 
 const float PI = 3.14159265;
@@ -57,6 +58,10 @@ void main() {
         imageStore(out_img, hp, vec4(1.0, 1e9, 0.0, 0.0));
         return;
     }
+    if (mode == 3u) { // how much the stored normal faces the camera: ~1 expected on visible surfaces
+        imageStore(out_img, hp, vec4(0.5 + 0.5 * dot(N, -normalize(P)), P.z, 0.0, 0.0));
+        return;
+    }
     if (dot(N, -P) < 0.0) {
         N = -N;
     }
@@ -79,6 +84,7 @@ void main() {
     const vec3 T = normalize(cross(up, N));
     const vec3 B = cross(N, T);
     const vec3 origin = P + N * (0.02 + 0.002 * P.z);
+    const float t_min = mode == 4u ? 0.1 : 0.0;
     const float n0 = IGN(vec2(fp) + float(frame % 8u) * 5.588238);
     const float n1 = IGN(vec2(fp.yx) + float(frame % 8u) * 1.618034);
 
@@ -95,7 +101,7 @@ void main() {
         rayQueryInitializeEXT(query, scene,
                               gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT |
                                   gl_RayFlagsSkipClosestHitShaderEXT,
-                              0xFF, origin, 0.0, dir, radius);
+                              0xFF, origin, t_min, dir, radius);
         while (rayQueryProceedEXT(query)) {
         }
         if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
