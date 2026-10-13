@@ -144,8 +144,8 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         layout = Check(device.createPipelineLayoutUnique({
             .setLayoutCount = 1,
             .pSetLayouts = &*desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges = &range,
+            .pushConstantRangeCount = push_size ? 1u : 0u,
+            .pPushConstantRanges = push_size ? &range : nullptr,
         }));
     };
     const auto make_pipeline = [&](std::span<const u32> code, vk::PipelineLayout layout) {
@@ -171,11 +171,12 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     const std::array trace_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eSampledImage), binding(3, DT::eSampledImage),
                                        binding(4, DT::eStorageImage),
-                                       binding(5, DT::eAccelerationStructureKHR)};
+                                       binding(5, DT::eAccelerationStructureKHR),
+                                       binding(6, DT::eUniformBuffer)};
     const std::array apply_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eStorageImage)};
     make_layouts(expand_bindings, sizeof(ExpandConstants), expand_desc_layout, expand_layout);
-    make_layouts(trace_bindings, sizeof(TraceConstants), trace_desc_layout, trace_layout);
+    make_layouts(trace_bindings, 0, trace_desc_layout, trace_layout); // constants: a uniform buffer
     const std::array blur_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eStorageImage)};
     make_layouts(apply_bindings, sizeof(ApplyConstants), apply_desc_layout, apply_layout);
     make_layouts(blur_bindings, sizeof(BlurConstants), blur_desc_layout, blur_layout);
@@ -244,6 +245,7 @@ void RayTracedAO::PollSettings() {
         else if (key == "cache") cache_enabled = value != 0.0f;
         else if (key == "promote") promote_after = std::clamp(u32(value), 2u, 600u);
         else if (key == "maxsize") cache_max_size = std::max(value, 0.0f);
+        else if (key == "ringtest") ring_test = value != 0.0f;
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
@@ -277,7 +279,7 @@ RayTracedAO::~RayTracedAO() {
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
                          &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
-                         &promo_scratch}) {
+                         &promo_scratch, &constants_buffer}) {
         DestroyBuffer(*buffer);
     }
 }
@@ -342,6 +344,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
                       BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
         !CreateBuffer(probe_buffer, vk::DeviceSize(ProbeSlots) * max_geometries * sizeof(ProbeStats),
                       BU::eStorageBuffer, true) ||
+        !CreateBuffer(constants_buffer, vk::DeviceSize(TableSlots) * ConstantsStride, BU::eUniformBuffer, true) ||
         !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
                       BU::eTransferDst, true)) {
         return false;
@@ -444,7 +447,7 @@ void RayTracedAO::OnFrameStart() {
         return;
     }
     static u32 reports = 0;
-    if (dump_pending && frame >= dump_frame + 120 && dump_buffer.mapped) {
+    if (dump_pending && dump_buffer.mapped && scheduler.IsFree(dump_tick)) {
         dump_pending = false;
         vmaInvalidateAllocation(instance.GetAllocator(), dump_buffer.allocation, 0, VK_WHOLE_SIZE);
         const u32 dw = (width + 1) / 2, dh = (height + 1) / 2;
@@ -480,7 +483,7 @@ void RayTracedAO::OnFrameStart() {
                         100.0 * ones / (double(dw) * dh));
         }
     }
-    if (readback_pending && frame >= readback_frame + 120) {
+    if (readback_pending && scheduler.IsFree(readback_tick)) {
         // Copied 120 frames ago: long finished. How do the expanded triangles look?
         readback_pending = false;
         vmaInvalidateAllocation(instance.GetAllocator(), readback_buffer.allocation, 0, VK_WHOLE_SIZE);
@@ -514,10 +517,15 @@ void RayTracedAO::OnFrameStart() {
     if (frame % 600 == 0 && frame) {
         std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u; "
                     "%u strips/other, %u alpha-tested, %u without depth write, %u without index address "
-                    "skipped), %u passes recorded in 600 frames\n",
+                    "skipped), %u passes recorded in 600 frames, %u skipped (ring slot still in use)\n",
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
                     max_triangles, skipped_topology, skipped_alpha, skipped_nowrite, skipped_no_address,
-                    recorded);
+                    recorded, skipped_busy);
+        if (history_resets) {
+            std::printf("RTAO: history reset %u times (gaps or camera jumps) in 600 frames\n", history_resets);
+            history_resets = 0;
+        }
+        skipped_busy = 0;
         std::printf("RTAO: cache: %zu draws known, %u instanced (%u triangles), %llu MiB of BLASes; "
                     "%u built, %u evicted in 600 frames; probes %u read, %u not written, %u same, %u reordered, "
                     "%u changed; camera (%.1f %.1f %.1f)\n",
@@ -528,9 +536,11 @@ void RayTracedAO::OnFrameStart() {
         probes_read = probes_stale = probes_matched = probes_changed = probes_reordered = 0;
         promotions = 0;
         evictions_total = 0;
-        if (recorded == 0 && !draws.empty() && active) {
-            std::puts("RTAO: geometry captured but no pass recorded: the game's AO pass (its R8 mask) was not "
-                      "seen. Is the \"Disable SSAO\" game patch on? RTAO writes into that pass's mask.");
+        if (recorded == 0 && !draws.empty() && active && !missing_pass_reported) {
+            missing_pass_reported = true;
+            std::puts("RTAO: OFF in practice: the game's AO pass never ran, so there is no AO mask to "
+                      "write into. The \"Disable SSAO\" game patch (launcher: Game effects, SSAO "
+                      "unchecked) removes it; RTAO needs that pass. (Reported once.)");
         }
         recorded = 0;
         ++reports;
@@ -765,20 +775,41 @@ void RayTracedAO::TrimCache() {
     }
 }
 
-void RayTracedAO::OnColorTarget(VideoCore::ImageId color) {
-    if (!enabled || color == last_color) {
+void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
+    if (!enabled) {
         return;
     }
-    // The previous pass ended. Was it the game's AO upsample (into the R8 mask)?
-    if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && active &&
-        !draws.empty()) {
-        done_this_frame = true;
-        Record(mask_candidate);
+    if (color != last_color) {
+        // The previous pass ended. Was it the game's AO upsample (into the R8 mask)?
+        if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && active &&
+            !draws.empty()) {
+            done_this_frame = true;
+            static bool reported_heuristic = false;
+            if (mask_by_heuristic && !reported_heuristic) {
+                reported_heuristic = true;
+                std::puts("RTAO: the AO mask was found by its format (R8, scene size): the game's "
+                          "upsample shader was not seen yet");
+            }
+            Record(mask_candidate);
+        }
+        last_color = color;
+        mask_candidate = {};
+        mask_by_heuristic = false;
     }
-    last_color = color;
-    mask_candidate = {};
-    if (!color || !depth_id) {
+    if (!color || !depth_id || mask_candidate) {
         return;
+    }
+    if (ps_hash == AoUpsampleShader) {
+        if (!upsample_seen) {
+            upsample_seen = true;
+            std::printf("RTAO: the game's AO pass found by its upsample shader 0x%llx\n",
+                        (unsigned long long)AoUpsampleShader);
+        }
+        mask_candidate = color;
+        return;
+    }
+    if (upsample_seen) {
+        return; // the shader identifies the pass; the format heuristic is not needed
     }
     const auto& image = texture_cache.GetImage(color);
     const auto& depth = texture_cache.GetImage(depth_id);
@@ -786,6 +817,7 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color) {
         image.info.size.width == depth.info.size.width &&
         image.info.size.height == depth.info.size.height) {
         mask_candidate = color;
+        mask_by_heuristic = true;
     }
 }
 
@@ -879,7 +911,12 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (normal.info.size.width != w || normal.info.size.height != h || !EnsureResources(w, h)) {
         return;
     }
-    const u32 slot = frame % TableSlots;
+    // The host ring slot (geometry table, instances, constants): only once the GPU is done with it.
+    const u32 slot = ring_test ? 0u : frame % TableSlots;
+    if (slot_ticks[slot] && !scheduler.IsFree(slot_ticks[slot])) {
+        ++skipped_busy; // the game's own AO stays this frame
+        return;
+    }
 
     const auto depth_view = CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
     const auto normal_view = CachedView(normal, normal.info.pixel_format, vk::ImageAspectFlagBits::eColor);
@@ -892,8 +929,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     runtime.Transit(&mask, vk::ImageLayout::eGeneral, Compute, rw);
     runtime.FlushBarriers();
 
+    // The history pair swaps once the trace is recorded (the stage limiter may stop before it).
     const u32 read = ao_index, write = ao_index ^ 1;
-    ao_index = write;
     const auto image_barrier = [&](vk::Image image, vk::ImageLayout old_layout,
                                    vk::AccessFlags2 src_access, vk::AccessFlags2 dst_access) {
         const vk::ImageMemoryBarrier2 b{
@@ -936,10 +973,25 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     // the same for promote_after observations get their BLAS built this frame.
     const u32 probe_id = recorded_total;
     const u32 ring = probe_id % ProbeSlots;
+    if (probe_ids[ring] && probe_ticks[ring] && !scheduler.IsFree(probe_ticks[ring])) {
+        probe_ids[ring] = 0; // not finished: those results are dropped, not read half-written
+    }
     ReadProbes(ring);
     const auto view = camera_motion.View();
     const auto inv_view = camera_motion.InvView();
     camera_world = {inv_view[3], inv_view[7], inv_view[11]};
+    // Cuts the upscaler does not report: frames without this pass (loading screens, menus) or a
+    // camera jump no walk or sprint makes in one frame (warps, scripted cuts).
+    {
+        const float dx = camera_world[0] - last_camera_world[0], dy = camera_world[1] - last_camera_world[1],
+                    dz = camera_world[2] - last_camera_world[2];
+        if (history_valid && (frame != last_recorded_frame + 1 || dx * dx + dy * dy + dz * dz > 1.0f)) {
+            history_valid = false;
+            ++history_resets;
+        }
+        last_recorded_frame = frame;
+        last_camera_world = camera_world;
+    }
     const bool use_cache = cache_enabled && stage >= 3;
     const float cull = ao_far > 0.0f ? ao_far + radius : 0.0f;
     const auto device = instance.GetDevice();
@@ -1156,6 +1208,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         probe_keys[ring].push_back(verify_keys[i]);
     }
     probe_ids[ring] = probe_id;
+    // This pass's commands go out with the current tick: the slots are busy until it is reached.
+    slot_ticks[slot] = scheduler.CurrentTick();
+    probe_ticks[ring] = slot_ticks[slot];
     auto* table = static_cast<GpuGeometry*>(table_buffer.mapped) + size_t(slot) * max_geometries;
     std::memcpy(table, geometries.data(), geometries.size() * sizeof(GpuGeometry));
     vmaFlushAllocation(instance.GetAllocator(), table_buffer.allocation,
@@ -1183,12 +1238,14 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         readback_pending = true;
         readback_frame = frame;
         readback_triangles = total_triangles;
+        readback_tick = scheduler.CurrentTick();
     }
     const bool do_dump = dump_request != dump_done && !dump_pending && stage >= 4 && dump_buffer.mapped;
     if (do_dump) {
         dump_pending = true;
         dump_frame = frame;
         dump_done = dump_request;
+        dump_tick = scheduler.CurrentTick();
     }
     const vk::Buffer dump_handle = dump_buffer.buffer;
     if (recorded_total <= 2) {
@@ -1239,6 +1296,10 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .snap_far = snap_far,
         .ao_far = ao_far,
     };
+    const vk::DeviceSize constants_offset = vk::DeviceSize(slot) * ConstantsStride;
+    std::memcpy(static_cast<u8*>(constants_buffer.mapped) + constants_offset, &trace, sizeof(trace));
+    vmaFlushAllocation(instance.GetAllocator(), constants_buffer.allocation, constants_offset, sizeof(trace));
+    const vk::Buffer constants_handle = constants_buffer.buffer;
     const ApplyConstants apply{
         .proj = expand.proj,
         .full_size = trace.full_size,
@@ -1249,7 +1310,6 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .blur = blur ? 1u : 0u,
         .replace = replace_mask ? 1u : 0u,
     };
-    history_valid = true;
 
     const vk::Buffer table_handle = table_buffer.buffer;
     const vk::DeviceSize table_offset = vk::DeviceSize(slot) * max_geometries * sizeof(GpuGeometry);
@@ -1298,9 +1358,14 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         {.name = "rtao expand"},
         [=, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout,
          probe_pipeline = *probe_pipeline, probe_layout = *probe_layout](vk::CommandBuffer cmdbuf) {
-            memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eAllCommands,
-                           vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eHostWrite, Compute,
-                           vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+            // The inputs: captured positions (vertex shaders), index buffers (uploads, or game
+            // compute), the table and constants (host). Not ALL_COMMANDS: no render-target writes.
+            memory_barrier(cmdbuf,
+                           vk::PipelineStageFlagBits2::eVertexShader | Compute |
+                               vk::PipelineStageFlagBits2::eTransfer | vk::PipelineStageFlagBits2::eHost,
+                           vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
+                               vk::AccessFlagBits2::eHostWrite,
+                           Compute, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
             if (dispatch_triangles) {
                 const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
                 const vk::DescriptorBufferInfo tri_info{triangles_handle, 0, triangles_bytes};
@@ -1458,6 +1523,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                        o = info(ao_write);
             const vk::WriteDescriptorSetAccelerationStructureKHR as_write{
                 .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
+            const vk::DescriptorBufferInfo constants_info{constants_handle, constants_offset, sizeof(trace)};
             const std::array writes = {
                 vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
@@ -1470,10 +1536,12 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &o},
                 vk::WriteDescriptorSet{.pNext = &as_write, .dstBinding = 5, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eAccelerationStructureKHR}};
+                                       .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
+                vk::WriteDescriptorSet{.dstBinding = 6, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eUniformBuffer,
+                                       .pBufferInfo = &constants_info}};
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, trace_pipeline);
             cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, trace_layout, 0, writes);
-            cmdbuf.pushConstants(trace_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(trace), &trace);
             cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
             const vk::ImageMemoryBarrier2 ao_barrier{
                 .srcStageMask = Compute,
@@ -1495,6 +1563,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 cmdbuf.copyImageToBuffer(ao_image, vk::ImageLayout::eGeneral, dump_handle, region);
             }
         });
+
+    ao_index = write;
+    history_valid = true;
 
     // 4b. Separable depth-aware blur of the AO image (in place through blur_image).
     if (sigma > 0.0f) {

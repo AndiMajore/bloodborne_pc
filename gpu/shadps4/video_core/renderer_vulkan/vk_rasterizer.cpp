@@ -708,7 +708,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         }
     }
     if (rtao->Enabled()) {
-        rtao->OnColorTarget(cb_descs[0].first);
+        const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
+                                ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
+                                : 0;
+        rtao->OnColorTarget(cb_descs[0].first, ps_hash);
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -1638,6 +1641,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
+            rtao->InvalidateHistory();
         }
         camera_motion->SetJitter(upscaler->Jitter());
         object_motion->OnFrameStart();

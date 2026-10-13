@@ -16,7 +16,8 @@ layout(binding = 3) uniform texture2D prev_tex;    // half res, previous output
 layout(binding = 4, rg16f) uniform writeonly image2D out_img; // half res: ao, view z
 layout(binding = 5) uniform accelerationStructureEXT scene;
 
-layout(push_constant) uniform Constants {
+// Per-frame constants: a uniform buffer (the push-constant minimum is 128 bytes).
+layout(binding = 6, std140) uniform Constants {
     vec4 view[3];     // world -> view rows
     vec4 proj;
     vec2 full_size;
@@ -78,7 +79,7 @@ void main() {
     if (mode == 2u) {
         const float len = length(P);
         rayQueryEXT probe;
-        rayQueryInitializeEXT(probe, scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        rayQueryInitializeEXT(probe, scene, gl_RayFlagsOpaqueEXT,
                               0xFF, vec3(0.0), 0.0, P / len, len * 1.5);
         while (rayQueryProceedEXT(probe)) {
         }
@@ -104,7 +105,7 @@ void main() {
         const vec3 dir = P / len;
         const float window = 0.1 + 0.01 * len;
         rayQueryEXT snap;
-        rayQueryInitializeEXT(snap, scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF,
+        rayQueryInitializeEXT(snap, scene, gl_RayFlagsOpaqueEXT, 0xFF,
                               P - dir * window, 0.0, dir, 2.0 * window);
         while (rayQueryProceedEXT(snap)) {
         }
@@ -143,8 +144,7 @@ void main() {
         const vec3 dir = T * (cos(phi) * sin_theta) + B * (sin(phi) * sin_theta) + N * cos_theta;
         rayQueryEXT query;
         rayQueryInitializeEXT(query, scene,
-                              gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT |
-                                  gl_RayFlagsSkipClosestHitShaderEXT,
+                              gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
                               0xFF, origin, t_min, dir, radius);
         while (rayQueryProceedEXT(query)) {
         }

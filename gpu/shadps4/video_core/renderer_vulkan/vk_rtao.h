@@ -58,14 +58,20 @@ public:
         return enabled;
     }
     void OnFrameStart();
+    /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
+    void InvalidateHistory() {
+        history_valid = false;
+    }
     /// <user>/rtao.txt (BB_RTAO_FILE): key=value lines (strength, radius, rays, history, debug,
     /// enabled) re-read within a second of a change.
     void PollSettings();
     void OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal);
     void AddGeometry(const Geometry& geometry);
-    /// Every draw's first color target: the end of the game's AO upsample pass (an R8 target of
-    /// the scene size) is where the mask is rewritten.
-    void OnColorTarget(VideoCore::ImageId color);
+    /// Every draw's first color target and fragment shader: the end of the game's AO upsample
+    /// pass (pixel shader 0xc45c51cb into an R8 target of the scene size) is where the mask is
+    /// rewritten. Before that shader is seen, any R8 scene-size target qualifies.
+    void OnColorTarget(VideoCore::ImageId color, u64 ps_hash);
+    static constexpr u64 AoUpsampleShader = 0xc45c51cbull;
 
 private:
     struct GpuGeometry {
@@ -181,6 +187,12 @@ private:
     static constexpr u32 ProbeSlots = 4;
     std::array<std::vector<u64>, ProbeSlots> probe_keys; // table index -> key (0: not probed)
     std::array<u32, ProbeSlots> probe_ids{};
+    // Scheduler ticks of the last pass that used each host ring slot: a slot is reused (or read
+    // back) only once the GPU has passed that tick; otherwise the pass skips the frame.
+    std::array<u64, ProbeSlots> probe_ticks{};
+    u64 readback_tick = 0, dump_tick = 0;
+    u32 skipped_busy = 0;   // passes skipped because the slot was still in use (per report)
+    bool ring_test = false; // settings "ringtest=1": every pass on slot 0 (exercises the skip)
     static constexpr u32 MaxInstances = 8192;
     static constexpr u32 PromoTriangles = 400000; // world-space triangles built per frame at most
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
@@ -198,6 +210,9 @@ private:
     u32 recorded_total = 0;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};
+    bool upsample_seen = false;   // the game's upsample shader was seen: the heuristic is off
+    bool mask_by_heuristic = false;
+    bool missing_pass_reported = false;
     bool done_this_frame = false;
     u32 frame = 0;
     u32 width = 0, height = 0;
@@ -206,6 +221,9 @@ private:
     std::chrono::steady_clock::time_point last_poll{};
     bool active = true; // the file's "enabled" (the pass stays constructed)
     bool history_valid = false;
+    u32 last_recorded_frame = 0;            // frame of the previous traced pass
+    std::array<float, 3> last_camera_world{}; // its camera position (cuts: > 1 m between passes)
+    u32 history_resets = 0;
     u32 ao_index = 0;
 
     // Pipelines
@@ -215,12 +233,15 @@ private:
     vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline;
     // Geometry and acceleration structures
     static constexpr u32 TableSlots = 3;
+    std::array<u64, TableSlots> slot_ticks{};
     Buffer table_buffer;      // host: GpuGeometry[max_geometries] x TableSlots
     Buffer readback_buffer;   // host: the first ReadbackTriangles triangles of a frame
     static constexpr u32 ReadbackTriangles = 4096;
     Buffer triangle_buffer;   // device: float3 x 3 x (max_triangles + PromoTriangles)
     Buffer probe_buffer;      // host (read back): ProbeStats[max_geometries] x ProbeSlots
     Buffer promo_scratch;     // device: scratch for the frame's cache builds
+    Buffer constants_buffer;  // host: the trace's per-frame constants x TableSlots
+    static constexpr vk::DeviceSize ConstantsStride = 256; // >= minUniformBufferOffsetAlignment
     Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch;
     Buffer instance_buffer;   // host: AccelerationStructureInstanceKHR[MaxInstances] x TableSlots
     vk::DeviceAddress blas_address = 0;
