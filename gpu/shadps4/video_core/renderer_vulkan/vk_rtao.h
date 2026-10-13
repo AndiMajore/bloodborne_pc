@@ -95,7 +95,7 @@ private:
     ObjectMotion& object_motion;
 
     bool enabled = false;
-    bool debug = false;
+    u32 debug = 0; // 1: raw AO into the mask, 2: primary-ray test (white = BVH hit at the pixel)
     float strength = 1.0f;
     float radius = 1.5f;
     float history = 0.85f;
@@ -106,6 +106,8 @@ private:
 
     std::vector<GpuGeometry> geometries;
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
+    u32 recorded = 0;         // passes recorded since the last report
+    bool readback_pending = false;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};
     bool done_this_frame = false;
@@ -125,6 +127,8 @@ private:
     // Geometry and acceleration structures
     static constexpr u32 TableSlots = 3;
     Buffer table_buffer;      // host: GpuGeometry[max_geometries] x TableSlots
+    Buffer readback_buffer;   // host: the first ReadbackTriangles triangles of a frame
+    static constexpr u32 ReadbackTriangles = 64;
     Buffer triangle_buffer;   // device: float3 x 3 x max_triangles
     Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch, instance_buffer;
     vk::AccelerationStructureKHR blas{}, tlas{};

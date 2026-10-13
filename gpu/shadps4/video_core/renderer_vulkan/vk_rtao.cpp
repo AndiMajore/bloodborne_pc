@@ -43,6 +43,7 @@ struct TraceConstants {
     float history;
     u32 rays;
     u32 frame;
+    u32 mode; // 0 ao, 2 primary-ray test
 };
 struct ApplyConstants {
     std::array<float, 4> proj;
@@ -52,7 +53,7 @@ struct ApplyConstants {
     u32 debug;
 };
 static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
-static_assert(sizeof(TraceConstants) == 104 && offsetof(TraceConstants, frame) == 100);
+static_assert(sizeof(TraceConstants) == 108 && offsetof(TraceConstants, mode) == 104);
 static_assert(sizeof(ApplyConstants) == 40);
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
@@ -83,7 +84,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
     }
-    debug = EnvU32("BB_RTAO_DEBUG", 0) != 0;
+    debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 2u);
     strength = std::clamp(EnvFloat("BB_RTAO_STRENGTH", 1.0f), 0.0f, 1.0f);
     radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
     history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.85f), 0.0f, 0.98f);
@@ -186,13 +187,13 @@ void RayTracedAO::PollSettings() {
         else if (key == "radius") radius = std::max(value, 0.05f);
         else if (key == "history") history = std::clamp(value, 0.0f, 0.98f);
         else if (key == "rays") rays = std::clamp(u32(value), 1u, 32u);
-        else if (key == "debug") debug = value != 0.0f;
+        else if (key == "debug") debug = std::clamp(u32(value), 0u, 2u);
         else if (key == "enabled") active = value != 0.0f;
         else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
     }
-    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %d, "
+    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %u, "
                 "stage %u\n",
-                active ? 1 : 0, rays, radius, strength, history, debug ? 1 : 0, stage);
+                active ? 1 : 0, rays, radius, strength, history, debug, stage);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -270,7 +271,9 @@ bool RayTracedAO::CreateAccelerationStructures() {
         !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles) * 9 * sizeof(float),
                       BU::eStorageBuffer | BU::eAccelerationStructureBuildInputReadOnlyKHR, false) ||
         !CreateBuffer(instance_buffer, sizeof(vk::AccelerationStructureInstanceKHR),
-                      BU::eAccelerationStructureBuildInputReadOnlyKHR, true)) {
+                      BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
+        !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
+                      BU::eTransferDst, true)) {
         return false;
     }
 
@@ -362,9 +365,35 @@ void RayTracedAO::OnFrameStart() {
     }
     static u32 reports = 0;
     if (frame % 600 == 0 && frame) {
-        std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u)\n",
+        std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u), "
+                    "%u passes recorded in 600 frames\n",
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
-                    max_triangles);
+                    max_triangles, recorded);
+        recorded = 0;
+        if (readback_pending) {
+            // Copied 600 frames ago: long finished. How do the expanded triangles look?
+            readback_pending = false;
+            vmaInvalidateAllocation(instance.GetAllocator(), readback_buffer.allocation, 0, VK_WHOLE_SIZE);
+            const float* v = static_cast<const float*>(readback_buffer.mapped);
+            u32 valid = 0;
+            float zmin = 1e30f, zmax = -1e30f, xymax = 0.0f;
+            for (u32 i = 0; i < ReadbackTriangles; ++i) {
+                const float* tri = v + i * 9;
+                bool nonzero = false;
+                for (u32 k = 0; k < 9; ++k) nonzero |= tri[k] != 0.0f;
+                if (!nonzero) continue;
+                ++valid;
+                for (u32 k = 0; k < 3; ++k) {
+                    zmin = std::min(zmin, tri[k * 3 + 2]);
+                    zmax = std::max(zmax, tri[k * 3 + 2]);
+                    xymax = std::max({xymax, std::abs(tri[k * 3]), std::abs(tri[k * 3 + 1])});
+                }
+            }
+            std::printf("RTAO: readback: %u of the first %u triangles valid; z %.2f..%.2f, |xy| up to %.2f; "
+                        "first: (%.2f %.2f %.2f) (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n",
+                        valid, ReadbackTriangles, zmin, zmax, xymax, v[0], v[1], v[2], v[3], v[4], v[5],
+                        v[6], v[7], v[8]);
+        }
         ++reports;
     }
     geometries.clear();
@@ -573,6 +602,10 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     image_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
                   vk::AccessFlagBits2::eShaderRead);
 
+    ++recorded;
+    const bool do_readback = !readback_pending && frame % 600 == 300 && total_triangles > 0;
+    readback_pending |= do_readback;
+    const vk::Buffer readback_handle = readback_buffer.buffer;
     const ExpandConstants expand{
         .positions_address = instance.GetDevice().getBufferAddress({.buffer = object_motion.PositionsBuffer()}),
         .proj = camera_motion.Projection(),
@@ -590,6 +623,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .history = history_valid ? history : 0.0f,
         .rays = rays,
         .frame = frame,
+        .mode = debug,
     };
     const ApplyConstants apply{
         .proj = expand.proj,
@@ -654,8 +688,13 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                                      &expand);
                 cmdbuf.dispatch((total_triangles + 63) / 64, 1, 1);
             }
-            memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, AsBuild,
-                           vk::AccessFlagBits2::eShaderRead);
+            memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
+                           AsBuild | vk::PipelineStageFlagBits2::eTransfer,
+                           vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead);
+            if (do_readback) {
+                const vk::BufferCopy region{0, 0, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float)};
+                cmdbuf.copyBuffer(triangles_handle, readback_handle, region);
+            }
         });
 
     // 2. BLAS over the triangle list.

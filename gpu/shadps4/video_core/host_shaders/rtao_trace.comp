@@ -25,6 +25,7 @@ layout(push_constant) uniform Constants {
     float history;
     uint rays;
     uint frame;
+    uint mode;        // 2: primary-ray test, the output is t/|P| of a camera ray (0 = miss)
 };
 
 const float PI = 3.14159265;
@@ -58,6 +59,20 @@ void main() {
     }
     if (dot(N, -P) < 0.0) {
         N = -N;
+    }
+    if (mode == 2u) {
+        const float len = length(P);
+        rayQueryEXT probe;
+        rayQueryInitializeEXT(probe, scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                              0xFF, vec3(0.0), 0.0, P / len, len * 1.5);
+        while (rayQueryProceedEXT(probe)) {
+        }
+        float hit = 0.0;
+        if (rayQueryGetIntersectionTypeEXT(probe, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+            hit = rayQueryGetIntersectionTEXT(probe, true) / len; // ~1 when the BVH matches the depth
+        }
+        imageStore(out_img, hp, vec4(hit, P.z, 0.0, 0.0));
+        return;
     }
     // Tangent frame around N.
     const vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
