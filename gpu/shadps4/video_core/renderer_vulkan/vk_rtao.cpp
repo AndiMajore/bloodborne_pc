@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
+#include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -759,12 +760,19 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const auto info = [](vk::ImageView view) {
         return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
     };
+    // BB_GPU_PROFILE=1: one segment per stage.
+    const auto profile = [](u64 key, const char* name) {
+        if (auto* profiler = GpuProfiler::Get()) {
+            profiler->Mark(key, [name] { return std::string{name}; });
+        }
+    };
 
     // 1. Expand: the vertex shaders wrote the positions (vertex stage), the table was written by
     // the host, the index buffers by uploads: wait for all of it.
     if (last_stage < 1) {
         return;
     }
+    profile(0x47A01ull, "rtao expand");
     scheduler.RecordCrumb(
         {.name = "rtao expand"},
         [=, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout](vk::CommandBuffer cmdbuf) {
@@ -800,6 +808,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (last_stage < 2) {
         return;
     }
+    profile(0x47A02ull, "rtao blas");
     scheduler.RecordCrumb({.name = "rtao blas"}, [=, blas = blas](vk::CommandBuffer cmdbuf) {
         vk::AccelerationStructureGeometryKHR blas_geometry{
             .geometryType = vk::GeometryTypeKHR::eTriangles,
@@ -831,6 +840,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (last_stage < 3) {
         return;
     }
+    profile(0x47A03ull, "rtao tlas");
     scheduler.RecordCrumb({.name = "rtao tlas"}, [=, tlas = tlas](vk::CommandBuffer cmdbuf) {
         vk::AccelerationStructureGeometryKHR tlas_geometry{
             .geometryType = vk::GeometryTypeKHR::eInstances,
@@ -858,6 +868,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (last_stage < 4) {
         return;
     }
+    profile(0x47A04ull, "rtao trace");
     scheduler.RecordCrumb(
         {.name = "rtao trace"},
         [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
@@ -908,6 +919,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (last_stage < 5) {
         return;
     }
+    profile(0x47A05ull, "rtao apply");
     scheduler.RecordCrumb(
         {.name = "rtao apply"},
         [=, apply_pipeline = *apply_pipeline, apply_layout = *apply_layout](vk::CommandBuffer cmdbuf) {
