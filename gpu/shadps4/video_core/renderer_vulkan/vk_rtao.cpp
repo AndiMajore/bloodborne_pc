@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <sys/stat.h>
@@ -27,6 +28,7 @@ namespace Vulkan {
 namespace {
 struct ExpandConstants {
     u64 positions_address;
+    u64 pad; // std430: the vec4 below is 16-byte aligned in the shader's push block
     std::array<float, 4> proj;
     u32 num_geometries;
     u32 total_triangles;
@@ -49,6 +51,9 @@ struct ApplyConstants {
     float strength;
     u32 debug;
 };
+static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
+static_assert(sizeof(TraceConstants) == 104 && offsetof(TraceConstants, frame) == 100);
+static_assert(sizeof(ApplyConstants) == 40);
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
     return value ? std::strtof(value, nullptr) : fallback;
