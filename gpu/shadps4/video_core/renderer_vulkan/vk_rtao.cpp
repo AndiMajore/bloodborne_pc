@@ -58,6 +58,8 @@ struct ApplyConstants {
     u32 debug;
     float power;
     u32 blur;
+    u32 replace;
+    u32 pad1;
 };
 static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
 static_assert(sizeof(TraceConstants) == 108 && offsetof(TraceConstants, mode) == 104);
@@ -67,7 +69,7 @@ struct BlurConstants {
     float sigma;
     u32 pad;
 };
-static_assert(sizeof(ApplyConstants) == 48);
+static_assert(sizeof(ApplyConstants) == 56);
 static_assert(sizeof(BlurConstants) == 24);
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
@@ -217,13 +219,14 @@ void RayTracedAO::PollSettings() {
         else if (key == "power") power = std::clamp(value, 0.1f, 8.0f);
         else if (key == "blur") blur = value != 0.0f;
         else if (key == "sigma") sigma = std::clamp(value, 0.0f, 4.0f);
+        else if (key == "replace") replace_mask = value != 0.0f;
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
     std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, power %.2f, history %.2f, "
-                "sigma %.2f, blur %d, debug %u, stage %u, alpha %d, decals %d\n",
-                active ? 1 : 0, rays, radius, strength, power, history, sigma, blur ? 1 : 0, debug, stage,
-                include_alpha ? 1 : 0, include_nowrite ? 1 : 0);
+                "sigma %.2f, blur %d, replace %d, debug %u, stage %u, alpha %d, decals %d\n",
+                active ? 1 : 0, rays, radius, strength, power, history, sigma, blur ? 1 : 0, replace_mask ? 1 : 0,
+                debug, stage, include_alpha ? 1 : 0, include_nowrite ? 1 : 0);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -774,6 +777,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .debug = debug ? 1u : 0u,
         .power = power,
         .blur = blur ? 1u : 0u,
+        .replace = replace_mask ? 1u : 0u,
     };
     history_valid = true;
 

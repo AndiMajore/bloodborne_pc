@@ -18,6 +18,8 @@ layout(push_constant) uniform Constants {
     uint debug;
     float power;      // ao = pow(ao, power)
     uint blur;        // 0: 2x2 bilinear upsample, 1: 4x4 tent (a small denoise)
+    uint replace;     // 1: the mask becomes ours alone (the game's AO ignored)
+    uint pad1;
 };
 
 float ViewZ(float depth) { return proj.w / min(depth - proj.z, -1e-8); }
@@ -57,5 +59,5 @@ void main() {
     ao = pow(clamp(ao, 0.0, 1.0), power);
     const float game = imageLoad(mask_img, fp).r;
     const float ours = mix(1.0, ao, strength);
-    imageStore(mask_img, fp, vec4(debug != 0u ? ao : min(game, ours), 0.0, 0.0, 0.0));
+    imageStore(mask_img, fp, vec4(debug != 0u ? ao : (replace != 0u ? ours : min(game, ours)), 0.0, 0.0, 0.0));
 }

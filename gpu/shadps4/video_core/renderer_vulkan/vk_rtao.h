@@ -104,6 +104,7 @@ private:
     float radius = 1.5f;
     float history = 0.5f; // 0.85 lagged visibly behind the camera (the Doll's cap)
     bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
+    bool replace_mask = false; // settings "replace=1": the game's AO (or the GTAO pack) is ignored
     float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
     u32 rays = 8;
     u32 max_triangles = 1500000;
