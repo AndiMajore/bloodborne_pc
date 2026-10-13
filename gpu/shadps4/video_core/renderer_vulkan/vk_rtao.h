@@ -2,7 +2,8 @@
 // bbport: ray-traced ambient occlusion (BB_RTAO=1). The G-buffer draws' clip positions, captured
 // by the object-motion feature, are expanded into a view-space triangle list, built into an
 // acceleration structure every frame, and traced with ray queries at half resolution; the result
-// replaces the game's own SSAO in its R8 mask (min of both). Plan: .scratch/debug-session/rt/PLAN.md.
+// replaces the game's own SSAO in its R8 mask (min of both). Design, settings, measurements and
+// the debugging procedure: docs/rtao.md.
 
 #pragma once
 
@@ -155,7 +156,7 @@ private:
     bool enabled = false;
     u32 debug = 0; // 1: raw AO into the mask, 2: primary-ray test, 3: normal facing, 4: AO with t_min 0.1
     float strength = 1.0f;
-    float power = 2.0f; // ao^power before the apply (Andreas: 2 at radius 1.5; 1 = faithful)
+    float power = 2.0f; // ao^power before the apply (the chosen look: 2 at radius 1.5; 1 = plain)
     float radius = 1.5f;
     float history = 0.5f; // 0.85 lagged visibly behind the camera (the Doll's cap)
     bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
