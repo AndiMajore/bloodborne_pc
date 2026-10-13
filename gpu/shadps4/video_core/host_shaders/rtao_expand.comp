@@ -87,6 +87,10 @@ void main() {
         }
         // The game's projection: clip.w is the view-space depth, clip.xy = view.xy * |scale|.
         out_pos[k] = vec3(clip.x / abs(proj.x), clip.y / abs(proj.y), clip.w);
+        if (any(isnan(out_pos[k])) || any(isinf(out_pos[k])) || any(greaterThan(abs(out_pos[k]), vec3(1e5)))) {
+            valid = false; // keeps infinities and absurd extents out of the BVH bounds
+            break;
+        }
     }
     const uint base = t * 9u;
     for (uint k = 0u; k < 3u; ++k) {

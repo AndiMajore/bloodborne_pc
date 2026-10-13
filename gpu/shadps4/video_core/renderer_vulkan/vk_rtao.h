@@ -108,6 +108,8 @@ private:
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
     bool readback_pending = false;
+    u32 readback_frame = 0;
+    u32 recorded_total = 0;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};
     bool done_this_frame = false;

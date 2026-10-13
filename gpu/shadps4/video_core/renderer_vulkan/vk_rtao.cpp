@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -364,36 +365,41 @@ void RayTracedAO::OnFrameStart() {
         return;
     }
     static u32 reports = 0;
+    if (readback_pending && frame >= readback_frame + 120) {
+        // Copied 120 frames ago: long finished. How do the expanded triangles look?
+        readback_pending = false;
+        vmaInvalidateAllocation(instance.GetAllocator(), readback_buffer.allocation, 0, VK_WHOLE_SIZE);
+        const float* v = static_cast<const float*>(readback_buffer.mapped);
+        u32 valid = 0, finite = 0;
+        float zmin = 1e30f, zmax = -1e30f, xymax = 0.0f;
+        for (u32 i = 0; i < ReadbackTriangles; ++i) {
+            const float* tri = v + i * 9;
+            bool nonzero = false, all_finite = true;
+            for (u32 k = 0; k < 9; ++k) {
+                nonzero |= tri[k] != 0.0f;
+                all_finite &= std::isfinite(tri[k]);
+            }
+            if (!nonzero) continue;
+            ++valid;
+            if (!all_finite) continue;
+            ++finite;
+            for (u32 k = 0; k < 3; ++k) {
+                zmin = std::min(zmin, tri[k * 3 + 2]);
+                zmax = std::max(zmax, tri[k * 3 + 2]);
+                xymax = std::max({xymax, std::abs(tri[k * 3]), std::abs(tri[k * 3 + 1])});
+            }
+        }
+        std::printf("RTAO: readback (frame %u): %u of the first %u triangles non-zero, %u finite; z %.2f..%.2f, "
+                    "|xy| up to %.2f; first: (%.2f %.2f %.2f) (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n",
+                    readback_frame, valid, ReadbackTriangles, finite, zmin, zmax, xymax, v[0], v[1], v[2],
+                    v[3], v[4], v[5], v[6], v[7], v[8]);
+    }
     if (frame % 600 == 0 && frame) {
         std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u), "
                     "%u passes recorded in 600 frames\n",
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
                     max_triangles, recorded);
         recorded = 0;
-        if (readback_pending) {
-            // Copied 600 frames ago: long finished. How do the expanded triangles look?
-            readback_pending = false;
-            vmaInvalidateAllocation(instance.GetAllocator(), readback_buffer.allocation, 0, VK_WHOLE_SIZE);
-            const float* v = static_cast<const float*>(readback_buffer.mapped);
-            u32 valid = 0;
-            float zmin = 1e30f, zmax = -1e30f, xymax = 0.0f;
-            for (u32 i = 0; i < ReadbackTriangles; ++i) {
-                const float* tri = v + i * 9;
-                bool nonzero = false;
-                for (u32 k = 0; k < 9; ++k) nonzero |= tri[k] != 0.0f;
-                if (!nonzero) continue;
-                ++valid;
-                for (u32 k = 0; k < 3; ++k) {
-                    zmin = std::min(zmin, tri[k * 3 + 2]);
-                    zmax = std::max(zmax, tri[k * 3 + 2]);
-                    xymax = std::max({xymax, std::abs(tri[k * 3]), std::abs(tri[k * 3 + 1])});
-                }
-            }
-            std::printf("RTAO: readback: %u of the first %u triangles valid; z %.2f..%.2f, |xy| up to %.2f; "
-                        "first: (%.2f %.2f %.2f) (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n",
-                        valid, ReadbackTriangles, zmin, zmax, xymax, v[0], v[1], v[2], v[3], v[4], v[5],
-                        v[6], v[7], v[8]);
-        }
         ++reports;
     }
     geometries.clear();
@@ -602,9 +608,32 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     image_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
                   vk::AccessFlagBits2::eShaderRead);
 
+    const auto cam_proj = camera_motion.Projection();
+    if (cam_proj[0] == 0.0f || cam_proj[1] == 0.0f || cam_proj[3] == 0.0f) {
+        return; // no camera this frame (menus): nothing sensible to build
+    }
     ++recorded;
-    const bool do_readback = !readback_pending && frame % 600 == 300 && total_triangles > 0;
-    readback_pending |= do_readback;
+    ++recorded_total;
+    const bool do_readback = !readback_pending && total_triangles > 0 &&
+                             (recorded_total == 1 || frame % 600 == 300);
+    if (do_readback) {
+        readback_pending = true;
+        readback_frame = frame;
+    }
+    if (recorded_total <= 2) {
+        std::printf("RTAO: pass %u: proj %g %g %g %g, %u geometries, %u triangles, %ux%u\n",
+                    recorded_total, cam_proj[0], cam_proj[1], cam_proj[2], cam_proj[3], num_geometries,
+                    total_triangles, w, h);
+        for (u32 i = 0; i < std::min<u32>(num_geometries, 4); ++i) {
+            const auto& g = geometries[i];
+            std::printf("RTAO:   geometry %u: store %u, %u vertices x %u instances, first %u, indices 0x%llx "
+                        "count %u %s base %d restart %u, triangles %u at %u\n",
+                        i, g.store, g.vertices, g.instances, g.first_vertex,
+                        (unsigned long long)g.index_address, g.index_count,
+                        (g.index16 & 1) ? "16-bit" : "32-bit", g.base_vertex, g.restart, g.triangles,
+                        g.triangle_offset);
+        }
+    }
     const vk::Buffer readback_handle = readback_buffer.buffer;
     const ExpandConstants expand{
         .positions_address = instance.GetDevice().getBufferAddress({.buffer = object_motion.PositionsBuffer()}),
