@@ -23,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -187,6 +188,12 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     expand_pipeline = make_pipeline(RTAO_EXPAND_COMP, *expand_layout);
     trace_pipeline = make_pipeline(RTAO_TRACE_COMP, *trace_layout);
     apply_pipeline = make_pipeline(RTAO_APPLY_COMP, *apply_layout);
+    // Names for validation messages and captures.
+    SetObjectName(device, *expand_pipeline, "rtao expand");
+    SetObjectName(device, *probe_pipeline, "rtao probe");
+    SetObjectName(device, *trace_pipeline, "rtao trace");
+    SetObjectName(device, *blur_pipeline, "rtao blur");
+    SetObjectName(device, *apply_pipeline, "rtao apply");
 
     if (!CreateAccelerationStructures()) {
         std::puts("RTAO: acceleration structure setup failed, off");
@@ -338,7 +345,9 @@ bool RayTracedAO::CreateAccelerationStructures() {
     if (!CreateBuffer(table_buffer, vk::DeviceSize(TableSlots) * max_geometries * sizeof(GpuGeometry),
                       BU::eStorageBuffer, true) ||
         !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles + PromoTriangles) * 9 * sizeof(float),
-                      BU::eStorageBuffer | BU::eAccelerationStructureBuildInputReadOnlyKHR, false) ||
+                      BU::eStorageBuffer | BU::eAccelerationStructureBuildInputReadOnlyKHR |
+                          BU::eTransferSrc, // the debug readback copies from it
+                      false) ||
         !CreateBuffer(instance_buffer,
                       vk::DeviceSize(TableSlots) * MaxInstances * sizeof(vk::AccelerationStructureInstanceKHR),
                       BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
@@ -435,6 +444,17 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .size = tlas_sizes.accelerationStructureSize,
         .type = vk::AccelerationStructureTypeKHR::eTopLevel,
     }));
+    for (const auto& [buffer, name] : std::initializer_list<std::pair<const Buffer*, const char*>>{
+             {&table_buffer, "rtao table"}, {&triangle_buffer, "rtao triangles"},
+             {&instance_buffer, "rtao instances"}, {&probe_buffer, "rtao probe results"},
+             {&constants_buffer, "rtao constants"}, {&blas_buffer, "rtao per-frame BLAS"},
+             {&blas_scratch, "rtao BLAS scratch"}, {&promo_scratch, "rtao cache scratch"},
+             {&tlas_buffer, "rtao TLAS"}, {&tlas_scratch, "rtao TLAS scratch"},
+             {&readback_buffer, "rtao readback"}}) {
+        SetObjectName(device, buffer->buffer, name);
+    }
+    SetObjectName(device, blas, "rtao per-frame BLAS");
+    SetObjectName(device, tlas, "rtao TLAS");
     std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
                 (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
                 (unsigned long long)(blas_sizes.buildScratchSize >> 20),
@@ -839,7 +859,8 @@ bool RayTracedAO::EnsureResources(u32 w, u32 h) {
             .arrayLayers = 1,
             .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                     vk::ImageUsageFlagBits::eTransferSrc, // the dump= copy
             .initialLayout = vk::ImageLayout::eUndefined,
         });
         view = Check(device.createImageViewUnique({
@@ -855,6 +876,10 @@ bool RayTracedAO::EnsureResources(u32 w, u32 h) {
     }
     make_image(motion_image, motion_view, vk::Format::eR16G16Sfloat, w, h);
     make_image(blur_image, blur_view, vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
+    SetObjectName(device, vk::Image(ao_images[0]), "rtao ao 0");
+    SetObjectName(device, vk::Image(ao_images[1]), "rtao ao 1");
+    SetObjectName(device, vk::Image(motion_image), "rtao motion");
+    SetObjectName(device, vk::Image(blur_image), "rtao blur");
     if (dump_buffer.buffer) {
         vmaDestroyBuffer(allocator, dump_buffer.buffer, dump_buffer.allocation);
         dump_buffer = {};
@@ -1170,6 +1195,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             continue;
         }
         e.blas = as.value;
+        SetObjectName(device, e.blas, "rtao cached BLAS");
         e.buffer = storage.buffer;
         e.allocation = storage.allocation;
         e.address = device.getAccelerationStructureAddressKHR({.accelerationStructure = e.blas});
