@@ -109,6 +109,10 @@ private:
     u32 recorded = 0;         // passes recorded since the last report
     bool readback_pending = false;
     u32 readback_frame = 0;
+    Buffer dump_buffer;       // host: the half-res AO image (rg16f), "dump=" in the settings
+    bool dump_pending = false;
+    u32 dump_frame = 0;
+    float dump_request = 0.0f, dump_done = 0.0f;
     u32 recorded_total = 0;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};

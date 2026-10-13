@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <string>
+#include <vector>
 #include <fstream>
 #include <sys/stat.h>
 #include "common/path_util.h"
@@ -191,6 +193,7 @@ void RayTracedAO::PollSettings() {
         else if (key == "debug") debug = std::clamp(u32(value), 0u, 2u);
         else if (key == "enabled") active = value != 0.0f;
         else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
+        else if (key == "dump") dump_request = value;
     }
     std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %u, "
                 "stage %u\n",
@@ -211,7 +214,7 @@ RayTracedAO::~RayTracedAO() {
         device.destroyAccelerationStructureKHR(blas);
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
-                         &tlas_scratch, &instance_buffer}) {
+                         &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer}) {
         DestroyBuffer(*buffer);
     }
 }
@@ -365,6 +368,42 @@ void RayTracedAO::OnFrameStart() {
         return;
     }
     static u32 reports = 0;
+    if (dump_pending && frame >= dump_frame + 120 && dump_buffer.mapped) {
+        dump_pending = false;
+        vmaInvalidateAllocation(instance.GetAllocator(), dump_buffer.allocation, 0, VK_WHOLE_SIZE);
+        const u32 dw = (width + 1) / 2, dh = (height + 1) / 2;
+        const auto* texels = static_cast<const u16*>(dump_buffer.mapped);
+        const auto half_to_float = [](u16 hf) {
+            const u32 sign = (hf >> 15) & 1, exp = (hf >> 10) & 0x1f, mant = hf & 0x3ff;
+            float value;
+            if (exp == 0) value = std::ldexp(float(mant), -24);
+            else if (exp == 31) value = mant ? NAN : INFINITY;
+            else value = std::ldexp(float(mant | 0x400), int(exp) - 25);
+            return sign ? -value : value;
+        };
+        const std::string path = "out/rtao_dump_" + std::to_string(dump_frame) + ".pgm";
+        if (FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fprintf(f, "P5\n%u %u\n255\n", dw, dh);
+            std::vector<u8> row(dw);
+            double sum = 0.0;
+            u32 zeros = 0, ones = 0;
+            for (u32 y = 0; y < dh; ++y) {
+                for (u32 x = 0; x < dw; ++x) {
+                    const float r = half_to_float(texels[(size_t(y) * dw + x) * 2]);
+                    const float c = std::isfinite(r) ? std::clamp(r, 0.0f, 2.0f) : 0.0f;
+                    row[x] = u8(c * 127.5f + 0.5f); // 1.0 -> 128
+                    sum += c;
+                    zeros += c == 0.0f;
+                    ones += std::abs(c - 1.0f) < 0.1f;
+                }
+                std::fwrite(row.data(), 1, dw, f);
+            }
+            std::fclose(f);
+            std::printf("RTAO: dumped %s (%ux%u, 1.0 = 128): mean %.3f, %.1f%% zero, %.1f%% within 0.1 of 1\n",
+                        path.c_str(), dw, dh, sum / (double(dw) * dh), 100.0 * zeros / (double(dw) * dh),
+                        100.0 * ones / (double(dw) * dh));
+        }
+    }
     if (readback_pending && frame >= readback_frame + 120) {
         // Copied 120 frames ago: long finished. How do the expanded triangles look?
         readback_pending = false;
@@ -509,6 +548,13 @@ bool RayTracedAO::EnsureResources(u32 w, u32 h) {
         make_image(ao_images[i], ao_views[i], vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
     }
     make_image(motion_image, motion_view, vk::Format::eR16G16Sfloat, w, h);
+    if (dump_buffer.buffer) {
+        vmaDestroyBuffer(allocator, dump_buffer.buffer, dump_buffer.allocation);
+        dump_buffer = {};
+    }
+    CreateBuffer(dump_buffer, vk::DeviceSize((w + 1) / 2) * ((h + 1) / 2) * 4, vk::BufferUsageFlagBits::eTransferDst,
+                 true);
+    dump_pending = false;
     width = w;
     height = h;
     history_valid = false;
@@ -620,6 +666,13 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         readback_pending = true;
         readback_frame = frame;
     }
+    const bool do_dump = dump_request != dump_done && !dump_pending && stage >= 4 && dump_buffer.mapped;
+    if (do_dump) {
+        dump_pending = true;
+        dump_frame = frame;
+        dump_done = dump_request;
+    }
+    const vk::Buffer dump_handle = dump_buffer.buffer;
     if (recorded_total <= 2) {
         std::printf("RTAO: pass %u: proj %g %g %g %g, %u geometries, %u triangles, %ux%u\n",
                     recorded_total, cam_proj[0], cam_proj[1], cam_proj[2], cam_proj[3], num_geometries,
@@ -816,14 +869,22 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             const vk::ImageMemoryBarrier2 ao_barrier{
                 .srcStageMask = Compute,
                 .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                .dstStageMask = Compute,
-                .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+                .dstStageMask = Compute | vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead,
                 .oldLayout = vk::ImageLayout::eGeneral,
                 .newLayout = vk::ImageLayout::eGeneral,
                 .image = ao_image,
                 .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
             };
             cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ao_barrier});
+            if (do_dump) {
+                const vk::BufferImageCopy region{
+                    .bufferOffset = 0,
+                    .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                    .imageExtent = {(w + 1) / 2, (h + 1) / 2, 1},
+                };
+                cmdbuf.copyImageToBuffer(ao_image, vk::ImageLayout::eGeneral, dump_handle, region);
+            }
         });
 
     // 5. Into the game's mask.
