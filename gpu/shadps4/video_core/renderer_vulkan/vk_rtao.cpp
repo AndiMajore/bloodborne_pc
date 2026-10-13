@@ -55,10 +55,12 @@ struct ApplyConstants {
     std::array<float, 2> half_size;
     float strength;
     u32 debug;
+    float power;
+    u32 pad;
 };
 static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
 static_assert(sizeof(TraceConstants) == 108 && offsetof(TraceConstants, mode) == 104);
-static_assert(sizeof(ApplyConstants) == 40);
+static_assert(sizeof(ApplyConstants) == 48);
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
     return value ? std::strtof(value, nullptr) : fallback;
@@ -199,12 +201,14 @@ void RayTracedAO::PollSettings() {
         else if (key == "enabled") active = value != 0.0f;
         else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
         else if (key == "dump") dump_request = value;
+        else if (key == "power") power = std::clamp(value, 0.1f, 8.0f);
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
-    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %u, "
-                "stage %u\n",
-                active ? 1 : 0, rays, radius, strength, history, debug, stage);
+    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, power %.2f, history %.2f, "
+                "debug %u, stage %u, alpha %d, decals %d\n",
+                active ? 1 : 0, rays, radius, strength, power, history, debug, stage, include_alpha ? 1 : 0,
+                include_nowrite ? 1 : 0);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -750,6 +754,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .half_size = trace.half_size,
         .strength = strength,
         .debug = debug ? 1u : 0u,
+        .power = power,
     };
     history_valid = true;
 

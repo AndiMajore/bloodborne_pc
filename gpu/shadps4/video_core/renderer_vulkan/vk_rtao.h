@@ -100,6 +100,7 @@ private:
     bool enabled = false;
     u32 debug = 0; // 1: raw AO into the mask, 2: primary-ray test, 3: normal facing, 4: AO with t_min 0.1
     float strength = 1.0f;
+    float power = 1.0f; // ao^power before the apply (judging: 2-3 exaggerates)
     float radius = 1.5f;
     float history = 0.85f;
     u32 rays = 4;
