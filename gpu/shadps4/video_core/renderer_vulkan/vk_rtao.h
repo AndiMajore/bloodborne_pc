@@ -104,6 +104,7 @@ private:
     float radius = 1.5f;
     float history = 0.5f; // 0.85 lagged visibly behind the camera (the Doll's cap)
     bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
+    float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
     u32 rays = 8;
     u32 max_triangles = 1500000;
     u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply
@@ -136,9 +137,9 @@ private:
     u32 ao_index = 0;
 
     // Pipelines
-    vk::UniqueDescriptorSetLayout expand_desc_layout, trace_desc_layout, apply_desc_layout;
-    vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout;
-    vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline;
+    vk::UniqueDescriptorSetLayout expand_desc_layout, trace_desc_layout, apply_desc_layout, blur_desc_layout;
+    vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout;
+    vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline;
     // Geometry and acceleration structures
     static constexpr u32 TableSlots = 3;
     Buffer table_buffer;      // host: GpuGeometry[max_geometries] x TableSlots
@@ -153,6 +154,8 @@ private:
     std::array<vk::UniqueImageView, 2> ao_views;
     VideoCore::UniqueImage motion_image;
     vk::UniqueImageView motion_view;
+    VideoCore::UniqueImage blur_image; // half res, the horizontal blur pass
+    vk::UniqueImageView blur_view;
     struct ViewEntry {
         vk::Image image{};
         u64 uid = 0;

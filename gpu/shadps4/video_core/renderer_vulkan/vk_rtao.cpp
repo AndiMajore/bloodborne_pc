@@ -16,6 +16,7 @@
 #include <vk_mem_alloc.h>
 
 #include "video_core/host_shaders/rtao_apply_comp.h"
+#include "video_core/host_shaders/rtao_blur_comp.h"
 #include "video_core/host_shaders/rtao_expand_comp.h"
 #include "video_core/host_shaders/rtao_trace_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
@@ -60,7 +61,14 @@ struct ApplyConstants {
 };
 static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
 static_assert(sizeof(TraceConstants) == 108 && offsetof(TraceConstants, mode) == 104);
+struct BlurConstants {
+    std::array<float, 2> half_size;
+    std::array<s32, 2> dir;
+    float sigma;
+    u32 pad;
+};
 static_assert(sizeof(ApplyConstants) == 48);
+static_assert(sizeof(BlurConstants) == 24);
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
     return value ? std::strtof(value, nullptr) : fallback;
@@ -99,6 +107,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
     power = std::clamp(EnvFloat("BB_RTAO_POWER", 2.0f), 0.1f, 8.0f);
     history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.5f), 0.0f, 0.98f);
+    sigma = std::clamp(EnvFloat("BB_RTAO_SIGMA", 1.5f), 0.0f, 4.0f);
     rays = std::clamp(EnvU32("BB_RTAO_RAYS", 8), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 1500000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
@@ -150,7 +159,10 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
                                        binding(2, DT::eStorageImage)};
     make_layouts(expand_bindings, sizeof(ExpandConstants), expand_desc_layout, expand_layout);
     make_layouts(trace_bindings, sizeof(TraceConstants), trace_desc_layout, trace_layout);
+    const std::array blur_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eStorageImage)};
     make_layouts(apply_bindings, sizeof(ApplyConstants), apply_desc_layout, apply_layout);
+    make_layouts(blur_bindings, sizeof(BlurConstants), blur_desc_layout, blur_layout);
+    blur_pipeline = make_pipeline(RTAO_BLUR_COMP, *blur_layout);
     expand_pipeline = make_pipeline(RTAO_EXPAND_COMP, *expand_layout);
     trace_pipeline = make_pipeline(RTAO_TRACE_COMP, *trace_layout);
     apply_pipeline = make_pipeline(RTAO_APPLY_COMP, *apply_layout);
@@ -204,13 +216,14 @@ void RayTracedAO::PollSettings() {
         else if (key == "dump") dump_request = value;
         else if (key == "power") power = std::clamp(value, 0.1f, 8.0f);
         else if (key == "blur") blur = value != 0.0f;
+        else if (key == "sigma") sigma = std::clamp(value, 0.0f, 4.0f);
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
     std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, power %.2f, history %.2f, "
-                "debug %u, stage %u, alpha %d, decals %d\n",
-                active ? 1 : 0, rays, radius, strength, power, history, debug, stage, include_alpha ? 1 : 0,
-                include_nowrite ? 1 : 0);
+                "sigma %.2f, blur %d, debug %u, stage %u, alpha %d, decals %d\n",
+                active ? 1 : 0, rays, radius, strength, power, history, sigma, blur ? 1 : 0, debug, stage,
+                include_alpha ? 1 : 0, include_nowrite ? 1 : 0);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -590,6 +603,7 @@ bool RayTracedAO::EnsureResources(u32 w, u32 h) {
         make_image(ao_images[i], ao_views[i], vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
     }
     make_image(motion_image, motion_view, vk::Format::eR16G16Sfloat, w, h);
+    make_image(blur_image, blur_view, vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
     if (dump_buffer.buffer) {
         vmaDestroyBuffer(allocator, dump_buffer.buffer, dump_buffer.allocation);
         dump_buffer = {};
@@ -689,6 +703,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                   vk::AccessFlagBits2::eShaderWrite);
     image_barrier(vk::Image(ao_images[write]), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
                   vk::AccessFlagBits2::eShaderWrite);
+    image_barrier(vk::Image(blur_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                  vk::AccessFlagBits2::eShaderWrite);
     image_barrier(vk::Image(ao_images[read]),
                   history_valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined, rw,
                   vk::AccessFlagBits2::eShaderRead);
@@ -771,6 +787,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const vk::DeviceAddress tlas_scratch_address = tlas_scratch.address;
     const vk::DeviceAddress instances_address = instance_buffer.address;
     const vk::ImageView ao_read = *ao_views[read], ao_write = *ao_views[write];
+    const vk::ImageView blur_rw = *blur_view;
+    const BlurConstants blur_h{.half_size = {float((w + 1) / 2), float((h + 1) / 2)}, .dir = {1, 0}, .sigma = sigma};
+    const BlurConstants blur_v{.half_size = blur_h.half_size, .dir = {0, 1}, .sigma = sigma};
     const vk::ImageView motion = *motion_view;
 
     // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
@@ -942,6 +961,46 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 cmdbuf.copyImageToBuffer(ao_image, vk::ImageLayout::eGeneral, dump_handle, region);
             }
         });
+
+    // 4b. Separable depth-aware blur of the AO image (in place through blur_image).
+    if (sigma > 0.0f) {
+        profile(0x47A06ull, "rtao blur");
+        scheduler.RecordCrumb(
+            {.name = "rtao blur"},
+            [=, blur_pipeline = *blur_pipeline, blur_layout = *blur_layout, ao_image = vk::Image(ao_images[write]),
+             blur_img = vk::Image(blur_image)](vk::CommandBuffer cmdbuf) {
+                const auto barrier = [&](vk::Image image) {
+                    const vk::ImageMemoryBarrier2 b{
+                        .srcStageMask = Compute,
+                        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                        .dstStageMask = Compute,
+                        .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+                        .oldLayout = vk::ImageLayout::eGeneral,
+                        .newLayout = vk::ImageLayout::eGeneral,
+                        .image = image,
+                        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+                    };
+                    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+                };
+                const auto pass = [&](vk::ImageView src, vk::ImageView dst, const BlurConstants& constants) {
+                    const auto si = info(src), di = info(dst);
+                    const std::array writes = {
+                        vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                               .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &si},
+                        vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
+                                               .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &di}};
+                    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, blur_pipeline);
+                    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, blur_layout, 0, writes);
+                    cmdbuf.pushConstants(blur_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants),
+                                         &constants);
+                    cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+                };
+                pass(ao_write, blur_rw, blur_h);
+                barrier(blur_img);
+                pass(blur_rw, ao_write, blur_v);
+                barrier(ao_image);
+            });
+    }
 
     // 5. Into the game's mask.
     if (last_stage < 5) {
