@@ -96,7 +96,12 @@ void main() {
         }
     }
     // Far geometry: its huge boxes enclose the whole scene and every ray had to descend into them.
-    if (valid && far_cut > 0.0 && min(out_pos[0].z, min(out_pos[1].z, out_pos[2].z)) > far_cut) {
+    // By distance to the triangle's nearest point bound: its closest vertex, or its centre for
+    // big triangles whose vertices all lie far away while the face passes close.
+    const vec3 centre = (out_pos[0] + out_pos[1] + out_pos[2]) / 3.0;
+    const float near_d = min(min(length(out_pos[0]), length(out_pos[1])), min(length(out_pos[2]), length(centre)));
+    const float extent = max(max(distance(out_pos[0], centre), distance(out_pos[1], centre)), distance(out_pos[2], centre));
+    if (valid && far_cut > 0.0 && near_d - extent > far_cut) {
         valid = false;
     }
     const uint base = t * 9u;

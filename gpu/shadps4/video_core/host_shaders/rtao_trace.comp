@@ -55,7 +55,10 @@ void main() {
         return;
     }
     const vec3 P = ViewPos(vec2(fp) + 0.5, depth);
-    if (ao_far > 0.0 && P.z > ao_far) {
+    // Distance from the camera, not view depth: a depth cut is a plane that slid across distant
+    // walls as the camera turned.
+    const float dist = length(P);
+    if (ao_far > 0.0 && dist > ao_far) {
         imageStore(out_img, hp, vec4(1.0, P.z, 0.0, 0.0));
         return;
     }
@@ -149,6 +152,9 @@ void main() {
         }
     }
     float ao = 1.0 - occlusion / float(rays);
+    if (ao_far > 0.0) { // fade out over the last quarter: no visible edge
+        ao = mix(ao, 1.0, smoothstep(0.75 * ao_far, ao_far, dist));
+    }
 
     // Temporal: last frame's value where this pixel was. Bilinear over the four half-res
     // texels around the reprojected position, each accepted only where its depth agrees
