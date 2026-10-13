@@ -1790,8 +1790,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     .restart = is_indexed && regs.enable_primitive_restart != 0,
                     .triangle_list = regs.primitive_type == AmdGpu::PrimitiveType::TriangleList,
                     .non_indexed = !is_indexed,
-                    .alpha_test = pipeline->HasStage(Shader::SwStage::Fragment) &&
-                                  pipeline->GetStage(Shader::SwStage::Fragment).has_discard,
+                    .alpha_test = (pipeline->HasStage(Shader::SwStage::Fragment) &&
+                                   pipeline->GetStage(Shader::SwStage::Fragment).has_discard) ||
+                                  regs.depth_shader_control.kill_enable != 0,
                     .depth_write = regs.depth_control.depth_enable && regs.depth_control.depth_write_enable,
                 });
             }
