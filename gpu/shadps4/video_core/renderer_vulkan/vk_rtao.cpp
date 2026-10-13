@@ -98,8 +98,8 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     strength = std::clamp(EnvFloat("BB_RTAO_STRENGTH", 1.0f), 0.0f, 1.0f);
     radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
     power = std::clamp(EnvFloat("BB_RTAO_POWER", 2.0f), 0.1f, 8.0f);
-    history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.6f), 0.0f, 0.98f);
-    rays = std::clamp(EnvU32("BB_RTAO_RAYS", 4), 1u, 32u);
+    history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.5f), 0.0f, 0.98f);
+    rays = std::clamp(EnvU32("BB_RTAO_RAYS", 8), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 1500000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
 

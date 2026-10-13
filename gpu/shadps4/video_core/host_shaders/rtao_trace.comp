@@ -140,17 +140,33 @@ void main() {
     }
     float ao = 1.0 - occlusion / float(rays);
 
-    // Temporal: last frame's value where this pixel was.
+    // Temporal: last frame's value where this pixel was. Bilinear over the four half-res
+    // texels around the reprojected position, each accepted only where its depth agrees
+    // (nearest-texel fetches smeared sharp shadows into a trail), and the result is kept within
+    // a band around this frame's value so a stale history cannot linger.
     const vec2 motion = texelFetch(motion_tex, fp, 0).rg;
-    const ivec2 prev_hp = ivec2(floor((vec2(fp) + 0.5 + motion) / 2.0));
-    if (all(greaterThanEqual(prev_hp, ivec2(0))) && all(lessThan(prev_hp, ivec2(half_size)))) {
-        const vec2 prev = texelFetch(prev_tex, prev_hp, 0).rg;
-        if (abs(prev.g - P.z) < 0.03 * P.z) {
-            // Less history where the image moves fast (8 px of motion halves it): the shading
-            // lagged behind the camera at 0.85.
-            const float h = history * (1.0 - 0.5 * clamp(length(motion) / 8.0, 0.0, 1.0));
-            ao = mix(ao, prev.r, h);
+    const vec2 prev_hpf = (vec2(fp) + 0.5 + motion) / 2.0 - 0.5;
+    const ivec2 p0 = ivec2(floor(prev_hpf));
+    const vec2 pf = prev_hpf - vec2(p0);
+    float hist = 0.0, hist_w = 0.0;
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const ivec2 pp = p0 + ivec2(i, j);
+            if (any(lessThan(pp, ivec2(0))) || any(greaterThanEqual(pp, ivec2(half_size)))) {
+                continue;
+            }
+            const vec2 prev = texelFetch(prev_tex, pp, 0).rg;
+            const float wb = (i == 0 ? 1.0 - pf.x : pf.x) * (j == 0 ? 1.0 - pf.y : pf.y);
+            const float wd = abs(prev.g - P.z) < 0.03 * P.z ? 1.0 : 0.0;
+            hist += prev.r * wb * wd;
+            hist_w += wb * wd;
         }
+    }
+    if (hist_w > 0.5) {
+        hist = clamp(hist / hist_w, ao - 0.3, ao + 0.3);
+        // Less history where the image moves fast (8 px of motion halves it).
+        const float h = history * (1.0 - 0.5 * clamp(length(motion) / 8.0, 0.0, 1.0));
+        ao = mix(ao, hist, h);
     }
     imageStore(out_img, hp, vec4(ao, P.z, 0.0, 0.0));
 }
