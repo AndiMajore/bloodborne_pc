@@ -17,7 +17,7 @@ layout(push_constant) uniform Constants {
     float strength;
     uint debug;
     float power;      // ao = pow(ao, power)
-    uint pad;
+    uint blur;        // 0: 2x2 bilinear upsample, 1: 4x4 tent (a small denoise)
 };
 
 float ViewZ(float depth) { return proj.w / min(depth - proj.z, -1e-8); }
@@ -36,12 +36,15 @@ void main() {
     const ivec2 h0 = ivec2(floor(hpf));
     const vec2 f = hpf - vec2(h0);
     float ao = 0.0, wsum = 0.0;
-    for (int j = 0; j < 2; ++j) {
-        for (int i = 0; i < 2; ++i) {
+    const int lo = blur != 0u ? -1 : 0, hi = blur != 0u ? 2 : 1;
+    const float reach = blur != 0u ? 1.5 : 1.0; // tent radius in half-res texels
+    for (int j = lo; j <= hi; ++j) {
+        for (int i = lo; i <= hi; ++i) {
             const ivec2 hp = clamp(h0 + ivec2(i, j), ivec2(0), ivec2(half_size) - 1);
             const vec2 s = texelFetch(ao_tex, hp, 0).rg;
-            const float wb = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
-            const float wd = exp(-abs(s.g - z) / (0.05 * z));
+            const vec2 d = abs(vec2(h0 + ivec2(i, j)) - hpf);
+            const float wb = max(reach - d.x, 0.0) * max(reach - d.y, 0.0);
+            const float wd = exp(-abs(s.g - z) / (0.05 * z)); // depth-aware: no bleeding across edges
             const float w = wb * wd + 1e-5;
             ao += s.r * w;
             wsum += w;

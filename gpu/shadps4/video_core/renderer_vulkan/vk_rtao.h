@@ -102,7 +102,8 @@ private:
     float strength = 1.0f;
     float power = 2.0f; // ao^power before the apply (Andreas: 2 at radius 1.5; 1 = faithful)
     float radius = 1.5f;
-    float history = 0.85f;
+    float history = 0.6f; // 0.85 lagged visibly behind the camera
+    bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
     u32 rays = 4;
     u32 max_triangles = 1500000;
     u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply

@@ -56,7 +56,7 @@ struct ApplyConstants {
     float strength;
     u32 debug;
     float power;
-    u32 pad;
+    u32 blur;
 };
 static_assert(sizeof(ExpandConstants) == 40 && offsetof(ExpandConstants, proj) == 16);
 static_assert(sizeof(TraceConstants) == 108 && offsetof(TraceConstants, mode) == 104);
@@ -98,7 +98,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     strength = std::clamp(EnvFloat("BB_RTAO_STRENGTH", 1.0f), 0.0f, 1.0f);
     radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
     power = std::clamp(EnvFloat("BB_RTAO_POWER", 2.0f), 0.1f, 8.0f);
-    history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.85f), 0.0f, 0.98f);
+    history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.6f), 0.0f, 0.98f);
     rays = std::clamp(EnvU32("BB_RTAO_RAYS", 4), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 1500000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
@@ -203,6 +203,7 @@ void RayTracedAO::PollSettings() {
         else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
         else if (key == "dump") dump_request = value;
         else if (key == "power") power = std::clamp(value, 0.1f, 8.0f);
+        else if (key == "blur") blur = value != 0.0f;
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
@@ -756,6 +757,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .strength = strength,
         .debug = debug ? 1u : 0u,
         .power = power,
+        .blur = blur ? 1u : 0u,
     };
     history_valid = true;
 

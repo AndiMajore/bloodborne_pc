@@ -145,8 +145,11 @@ void main() {
     const ivec2 prev_hp = ivec2(floor((vec2(fp) + 0.5 + motion) / 2.0));
     if (all(greaterThanEqual(prev_hp, ivec2(0))) && all(lessThan(prev_hp, ivec2(half_size)))) {
         const vec2 prev = texelFetch(prev_tex, prev_hp, 0).rg;
-        if (abs(prev.g - P.z) < 0.05 * P.z) {
-            ao = mix(ao, prev.r, history);
+        if (abs(prev.g - P.z) < 0.03 * P.z) {
+            // Less history where the image moves fast (8 px of motion halves it): the shading
+            // lagged behind the camera at 0.85.
+            const float h = history * (1.0 - 0.5 * clamp(length(motion) / 8.0, 0.0, 1.0));
+            ao = mix(ao, prev.r, h);
         }
     }
     imageStore(out_img, hp, vec4(ao, P.z, 0.0, 0.0));
