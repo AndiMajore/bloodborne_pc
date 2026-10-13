@@ -218,6 +218,10 @@ public:
     }
 
     /// Returns true when VK_EXT_primitive_topology_list_restart is supported for regular lists.
+    /// bbport: ray queries and acceleration structures (ray-traced AO).
+    bool IsRayQuerySupported() const {
+        return ray_query;
+    }
     bool IsListRestartSupported() const {
         return list_restart && list_restart_features.primitiveTopologyListRestart;
     }
@@ -602,6 +606,7 @@ private:
     bool shader_atomic_float2{};
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
+    bool ray_query{}; // bbport: VK_KHR_ray_query + acceleration structures (vk_rtao.cpp)
     bool maintenance_8{};
     bool buffer_marker{};
     bool attachment_feedback_loop{};

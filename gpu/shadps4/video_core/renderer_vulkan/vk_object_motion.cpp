@@ -91,6 +91,10 @@ ObjectMotion::~ObjectMotion() {
     }
 }
 
+u32 ObjectMotion::PositionsCapacity() const noexcept {
+    return PositionsPerFrame;
+}
+
 void ObjectMotion::OnFrameStart() {
     if (!enabled) {
         return;
@@ -144,6 +148,7 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
         return 0;
     }
     const auto allocation = history.Prepare(draw);
+    last_allocation = allocation;
     u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
                 (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
     if (!flags) {

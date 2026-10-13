@@ -72,6 +72,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     camera_motion->SetObjectMotion(object_motion.get());
     ssgi = std::make_unique<ScreenSpaceGI>(instance, scheduler, texture_cache, runtime,
                                            *camera_motion, *scene_targets);
+    rtao = std::make_unique<RayTracedAO>(instance, scheduler, texture_cache, runtime,
+                                         *camera_motion, *object_motion);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets);
     if (!EmulatorSettings.IsNullGPU()) {
@@ -701,6 +703,12 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         if (ssgi->Enabled() && cb_descs[0].first && cb_descs[2].first) {
             ssgi->OnGBufferPass(db_desc.first, cb_descs[0].first, cb_descs[2].first);
         }
+        if (rtao->Enabled() && cb_descs[0].first) {
+            rtao->OnGBufferPass(db_desc.first, cb_descs[0].first);
+        }
+    }
+    if (rtao->Enabled()) {
+        rtao->OnColorTarget(cb_descs[0].first);
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -1626,6 +1634,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         ssgi->OnFrameStart();
+        rtao->OnFrameStart();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
@@ -1693,10 +1702,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // Without a character-size skeleton the draw is gated on its bone palette changing
         // since last frame (model constants follow the camera, the palette does not). The
         // check comes first: most gated draws are static world pieces with long index lists.
-        static const bool all_motion = [] {
+        static const bool all_motion_env = [] {
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
+        // bbport: the ray-traced AO needs every G-buffer draw's positions (vk_rtao.cpp).
+        const bool all_motion = all_motion_env || rtao->Enabled();
         bool gated = !all_motion;
         u64 palette = 0;
         for (const auto& resource : vs.buffers) {
@@ -1762,6 +1773,22 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .first_instance = first_instance,
                 .vertices = range,
             });
+            if (rtao->Enabled() && push_data.motion_param && is_indexed &&
+                object_motion->LastAllocation().store) {
+                const auto& alloc = object_motion->LastAllocation();
+                rtao->AddGeometry({
+                    .store = alloc.store,
+                    .vertices = alloc.vertices,
+                    .instances = alloc.instances,
+                    .first_vertex = alloc.first_vertex,
+                    .index_address = index_bind.address,
+                    .index_count = regs.num_indices,
+                    .index16 = index_size == 2,
+                    .base_vertex = s32(base_vertex),
+                    .restart = regs.enable_primitive_restart != 0,
+                    .triangle_list = regs.primitive_type == AmdGpu::PrimitiveType::TriangleList,
+                });
+            }
         }
     }
     {
@@ -2756,7 +2783,8 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     // ResetBindings tracks graphics reads after the draw. Without this, an upload into a
     // mirrored index range could overtake the previous draw's fixed-function index fetches.
     bound_buffers.emplace_back(buffer, offset, index_buffer_size, false);
-    index_bind = {buffer->Handle(), offset, index_type};
+    index_bind = {buffer->Handle(), offset, index_type,
+                  buffer->HasBufferDeviceAddress() ? buffer->BufferDeviceAddress() + offset : 0};
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {

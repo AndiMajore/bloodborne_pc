@@ -31,6 +31,14 @@ public:
 
     using DrawInfo = Motion::Draw;
     u32 PrepareDraw(const DrawInfo& draw);
+    /// bbport: the allocation of the last PrepareDraw (store base etc.; RTAO reads the positions).
+    const Motion::History::Allocation& LastAllocation() const noexcept {
+        return last_allocation;
+    }
+    vk::Buffer PositionsBuffer() const noexcept {
+        return positions_buffer;
+    }
+    u32 PositionsCapacity() const noexcept;
     /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
     bool Moving(const Motion::History::GateKey& key, u64 palette) {
         return history.Moving(key, palette);
@@ -105,6 +113,7 @@ private:
     VmaAllocation params_allocation{};
     u32* params_mapped{};
     vk::Buffer positions_buffer{};
+    Motion::History::Allocation last_allocation{};
     VmaAllocation positions_allocation{};
 
     u64 frame = 0;

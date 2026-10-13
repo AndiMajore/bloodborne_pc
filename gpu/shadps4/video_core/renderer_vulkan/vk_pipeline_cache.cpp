@@ -847,8 +847,10 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         }
         // Keep the old broad path available for visual A/B tests.
         static const bool all_motion = [] {
+            // bbport: the ray-traced AO (vk_rtao.cpp) needs every G-buffer draw captured.
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
-            return value && value[0] == '1';
+            const char* rtao = std::getenv("BB_RTAO");
+            return (value && value[0] == '1') || (rtao && rtao[0] == '1');
         }();
         if (all_motion) {
             sel.motion = true;
