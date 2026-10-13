@@ -107,7 +107,7 @@ private:
     bool replace_mask = false; // settings "replace=1": the game's AO (or the GTAO pack) is ignored
     float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
     u32 rays = 6; // 8 cost 4.3 ms at 1.5M triangles (below 60 FPS)
-    u32 max_triangles = 1500000;
+    u32 max_triangles = 3000000; // 1.5M dropped ~10 draws per frame in the Hunter's Dream (blinking occluders)
     u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply
     u32 max_geometries = 8192;
 

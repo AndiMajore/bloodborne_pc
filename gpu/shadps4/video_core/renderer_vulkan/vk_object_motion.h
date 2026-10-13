@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <cstdlib>
+
 #include <array>
 #include "video_core/renderer_vulkan/motion_history.h"
 
@@ -105,7 +107,13 @@ private:
     static constexpr u32 FrameSlots = 4;
     static constexpr u32 ParamsPerFrame = 8192;
     // Positions (device local): two halves (current/previous frame) of vec4; element 0 is reserved.
-    static constexpr u32 PositionsPerFrame = 4u << 20;
+    // bbport: twice the room with the ray-traced AO, which needs every G-buffer draw's positions
+    // (at 4M the capture was full in the Hunter's Dream and skipped draws changed per frame).
+    static u32 ChoosePositionsPerFrame() noexcept {
+        const char* rtao = std::getenv("BB_RTAO");
+        return (rtao && rtao[0] == '1') ? (8u << 20) : (4u << 20);
+    }
+    const u32 PositionsPerFrame = ChoosePositionsPerFrame();
     Motion::History history{PositionsPerFrame};
     Motion::IndexRangeCache index_ranges;
     std::array<u64, FrameSlots> params_ticks{};
