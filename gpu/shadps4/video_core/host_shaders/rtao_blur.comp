@@ -34,7 +34,7 @@ void main() {
         const ivec2 sp = clamp(hp + dir * k, ivec2(0), ivec2(half_size) - 1);
         const vec2 s = texelFetch(src_tex, sp, 0).rg;
         const float wg = exp(-float(k * k) / (2.0 * sigma * sigma));
-        const float wd = exp(-abs(s.g - c.g) / (0.03 * c.g)); // same surface only
+        const float wd = exp(-abs(s.g - c.g) / (0.03 * c.g + 0.1)); // same surface only
         const float w = wg * wd;
         ao += s.r * w;
         wsum += w;

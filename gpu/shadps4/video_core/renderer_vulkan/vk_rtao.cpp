@@ -110,7 +110,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     power = std::clamp(EnvFloat("BB_RTAO_POWER", 2.0f), 0.1f, 8.0f);
     history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.5f), 0.0f, 0.98f);
     sigma = std::clamp(EnvFloat("BB_RTAO_SIGMA", 1.5f), 0.0f, 4.0f);
-    rays = std::clamp(EnvU32("BB_RTAO_RAYS", 8), 1u, 32u);
+    rays = std::clamp(EnvU32("BB_RTAO_RAYS", 6), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 1500000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
 
