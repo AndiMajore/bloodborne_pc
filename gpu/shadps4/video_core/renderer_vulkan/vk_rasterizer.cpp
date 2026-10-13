@@ -1773,7 +1773,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .first_instance = first_instance,
                 .vertices = range,
             });
-            if (rtao->Enabled() && push_data.motion_param &&
+            // Only the G-buffer draws: other passes (shadow maps) store positions in another
+            // projection, which would collapse into a sheet in front of the camera.
+            if (rtao->Enabled() && gbuffer_draw && push_data.motion_param &&
                 object_motion->LastAllocation().store) {
                 const auto& alloc = object_motion->LastAllocation();
                 rtao->AddGeometry({
