@@ -472,6 +472,10 @@ void RayTracedAO::OnFrameStart() {
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
                     max_triangles, skipped_topology, skipped_alpha, skipped_nowrite, skipped_no_address,
                     recorded);
+        if (recorded == 0 && !geometries.empty() && active) {
+            std::puts("RTAO: geometry captured but no pass recorded: the game's AO pass (its R8 mask) was not "
+                      "seen. Is the \"Disable SSAO\" game patch on? RTAO writes into that pass's mask.");
+        }
         recorded = 0;
         ++reports;
     }
