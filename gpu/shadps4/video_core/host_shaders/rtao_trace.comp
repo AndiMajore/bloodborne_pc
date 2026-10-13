@@ -52,6 +52,10 @@ void main() {
     const vec3 P = ViewPos(vec2(fp) + 0.5, depth);
     const vec3 nw = normalize(texelFetch(normal_tex, fp, 0).xyz * 2.0 - 1.0);
     vec3 N = normalize(vec3(dot(view[0].xyz, nw), dot(view[1].xyz, nw), dot(view[2].xyz, nw)));
+    if (any(isnan(N)) || any(isnan(P)) || any(isinf(P))) { // no normal (sky, UI): nothing to trace
+        imageStore(out_img, hp, vec4(1.0, 1e9, 0.0, 0.0));
+        return;
+    }
     if (dot(N, -P) < 0.0) {
         N = -N;
     }

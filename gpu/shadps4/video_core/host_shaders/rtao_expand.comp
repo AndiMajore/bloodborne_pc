@@ -37,8 +37,9 @@ layout(push_constant) uniform Constants {
 
 uint ReadIndex(Words words, uint index16, uint i) {
     if (index16 != 0u) {
-        const uint word = words.w[i >> 1];
-        return (i & 1u) != 0u ? (word >> 16) : (word & 0xffffu);
+        const uint j = i + ((index16 & 2u) != 0u ? 1u : 0u); // bit 1: the buffer starts mid-word
+        const uint word = words.w[j >> 1];
+        return (j & 1u) != 0u ? (word >> 16) : (word & 0xffffu);
     }
     return words.w[i];
 }
@@ -65,7 +66,7 @@ void main() {
     const uint tri = local - instance * tris_per_instance;
     Words words = Words(g.index_address);
     Positions positions = Positions(positions_address);
-    const uint restart_value = g.index16 != 0u ? 0xffffu : 0xffffffffu;
+    const uint restart_value = (g.index16 & 1u) != 0u ? 0xffffu : 0xffffffffu;
     vec3 out_pos[3];
     bool valid = true;
     for (uint k = 0u; k < 3u; ++k) {

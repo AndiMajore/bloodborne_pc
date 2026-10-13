@@ -84,6 +84,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.85f), 0.0f, 0.98f);
     rays = std::clamp(EnvU32("BB_RTAO_RAYS", 4), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 1500000), 10000u, 16000000u);
+    stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
 
     const auto device = instance.GetDevice();
     const auto make_layouts = [&](std::span<const vk::DescriptorSetLayoutBinding> bindings,
@@ -182,9 +183,11 @@ void RayTracedAO::PollSettings() {
         else if (key == "rays") rays = std::clamp(u32(value), 1u, 32u);
         else if (key == "debug") debug = value != 0.0f;
         else if (key == "enabled") active = value != 0.0f;
+        else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
     }
-    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %d\n",
-                active ? 1 : 0, rays, radius, strength, history, debug ? 1 : 0);
+    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %d, "
+                "stage %u\n",
+                active ? 1 : 0, rays, radius, strength, history, debug ? 1 : 0, stage);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -219,6 +222,9 @@ bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsage
                             VMA_ALLOCATION_CREATE_MAPPED_BIT
                       : VmaAllocationCreateFlags{},
         .usage = host ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .requiredFlags = host ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                              : VkMemoryPropertyFlags{},
     };
     VkBuffer raw{};
     VmaAllocationInfo info{};
@@ -337,6 +343,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
     as_instance.transform.matrix[1][1] = 1.0f;
     as_instance.transform.matrix[2][2] = 1.0f;
     std::memcpy(instance_buffer.mapped, &as_instance, sizeof(as_instance));
+    vmaFlushAllocation(instance.GetAllocator(), instance_buffer.allocation, 0, VK_WHOLE_SIZE);
     std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
                 (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
                 (unsigned long long)(blas_sizes.buildScratchSize >> 20),
@@ -377,6 +384,13 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
         return;
     }
     const u32 tris = (g.index_count / 3) * g.instances;
+    // The positions must lie inside the capture (two halves of the object-motion buffer).
+    const u64 last = u64(g.store) + u64(g.vertices) * g.instances;
+    if (last > 1 + 2ull * object_motion.PositionsCapacity()) {
+        ++dropped_draws;
+        dropped_triangles += tris;
+        return;
+    }
     if (geometries.size() >= max_geometries || frame_triangles + tris > max_triangles) {
         ++dropped_draws;
         dropped_triangles += tris;
@@ -386,9 +400,11 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
                           .vertices = g.vertices,
                           .instances = g.instances,
                           .first_vertex = g.first_vertex,
-                          .index_address = g.index_address,
+                          // 16-bit index buffers may start 2 bytes into a word: read words
+                          // from the aligned address and skip the first half-word.
+                          .index_address = g.index16 ? (g.index_address & ~u64(3)) : g.index_address,
                           .index_count = g.index_count,
-                          .index16 = g.index16 ? 1u : 0u,
+                          .index16 = g.index16 ? (1u | u32((g.index_address & 2) ? 2u : 0u)) : 0u,
                           .base_vertex = g.base_vertex,
                           .restart = g.restart ? 1u : 0u,
                           .triangle_offset = frame_triangles,
@@ -506,6 +522,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const u32 slot = frame % TableSlots;
     auto* table = static_cast<GpuGeometry*>(table_buffer.mapped) + size_t(slot) * max_geometries;
     std::memcpy(table, geometries.data(), geometries.size() * sizeof(GpuGeometry));
+    vmaFlushAllocation(instance.GetAllocator(), table_buffer.allocation,
+                       vk::DeviceSize(slot) * max_geometries * sizeof(GpuGeometry),
+                       std::max<vk::DeviceSize>(geometries.size(), 1) * sizeof(GpuGeometry));
     const u32 num_geometries = u32(geometries.size());
     const u32 total_triangles = frame_triangles;
 
@@ -588,22 +607,30 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const vk::ImageView ao_read = *ao_views[read], ao_write = *ao_views[write];
     const vk::ImageView motion = *motion_view;
 
+    // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
+    const u32 last_stage = stage;
+    const auto memory_barrier = [](vk::CommandBuffer cmdbuf, vk::PipelineStageFlags2 src_stage,
+                                   vk::AccessFlags2 src, vk::PipelineStageFlags2 dst_stage,
+                                   vk::AccessFlags2 dst) {
+        const vk::MemoryBarrier2 b{.srcStageMask = src_stage,
+                                   .srcAccessMask = src,
+                                   .dstStageMask = dst_stage,
+                                   .dstAccessMask = dst};
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
+    };
+    const auto info = [](vk::ImageView view) {
+        return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
+    };
+
+    // 1. Expand: the vertex shaders wrote the positions (vertex stage), the table was written by
+    // the host, the index buffers by uploads: wait for all of it.
+    if (last_stage < 1) {
+        return;
+    }
     scheduler.RecordCrumb(
-        {.name = "rtao"},
-        [=, blas = blas, tlas = tlas, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout,
-         trace_pipeline = *trace_pipeline, trace_layout = *trace_layout, apply_pipeline = *apply_pipeline,
-         apply_layout = *apply_layout, ao_image = vk::Image(ao_images[write])](vk::CommandBuffer cmdbuf) {
-            const auto memory_barrier = [&](vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src,
-                                            vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst) {
-                const vk::MemoryBarrier2 b{.srcStageMask = src_stage,
-                                           .srcAccessMask = src,
-                                           .dstStageMask = dst_stage,
-                                           .dstAccessMask = dst};
-                cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
-            };
-            // 1. Expand: the vertex shaders wrote the positions (vertex stage), the table was
-            // written by the host, the index buffers by uploads: wait for all of it.
-            memory_barrier(vk::PipelineStageFlagBits2::eAllCommands,
+        {.name = "rtao expand"},
+        [=, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout](vk::CommandBuffer cmdbuf) {
+            memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eAllCommands,
                            vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eHostWrite, Compute,
                            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
             if (total_triangles) {
@@ -622,80 +649,97 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                                      &expand);
                 cmdbuf.dispatch((total_triangles + 63) / 64, 1, 1);
             }
-            memory_barrier(Compute, vk::AccessFlagBits2::eShaderWrite, AsBuild,
+            memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, AsBuild,
                            vk::AccessFlagBits2::eShaderRead);
-            // 2. BLAS over the triangle list, then the TLAS.
-            vk::AccelerationStructureGeometryKHR blas_geometry{
-                .geometryType = vk::GeometryTypeKHR::eTriangles,
-                .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                                 .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                                 .vertexData = {.deviceAddress = triangles_address},
-                                 .vertexStride = 3 * sizeof(float),
-                                 .maxVertex = std::max<u32>(total_triangles * 3, 1) - 1,
-                                 .indexType = vk::IndexType::eNoneKHR,
-                             }},
-                .flags = vk::GeometryFlagBitsKHR::eOpaque,
-            };
-            const vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
-                .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
-                .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-                .dstAccelerationStructure = blas,
-                .geometryCount = 1,
-                .pGeometries = &blas_geometry,
-                .scratchData = {.deviceAddress = blas_scratch_address},
-            };
-            const vk::AccelerationStructureBuildRangeInfoKHR blas_range{.primitiveCount = total_triangles};
-            cmdbuf.buildAccelerationStructuresKHR(blas_info, &blas_range);
-            memory_barrier(AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
-                           vk::AccessFlagBits2::eAccelerationStructureReadKHR);
-            vk::AccelerationStructureGeometryKHR tlas_geometry{
-                .geometryType = vk::GeometryTypeKHR::eInstances,
-                .geometry = {.instances = vk::AccelerationStructureGeometryInstancesDataKHR{
-                                 .arrayOfPointers = false,
-                                 .data = {.deviceAddress = instances_address},
-                             }},
-            };
-            const vk::AccelerationStructureBuildGeometryInfoKHR tlas_info{
-                .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
-                .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-                .dstAccelerationStructure = tlas,
-                .geometryCount = 1,
-                .pGeometries = &tlas_geometry,
-                .scratchData = {.deviceAddress = tlas_scratch_address},
-            };
-            const vk::AccelerationStructureBuildRangeInfoKHR tlas_range{.primitiveCount = 1};
-            cmdbuf.buildAccelerationStructuresKHR(tlas_info, &tlas_range);
-            memory_barrier(AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, Compute,
-                           vk::AccessFlagBits2::eAccelerationStructureReadKHR);
-            // 3. Trace at half resolution.
-            const auto info = [](vk::ImageView view) {
-                return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
-            };
-            {
-                const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
-                           o = info(ao_write);
-                const vk::WriteDescriptorSetAccelerationStructureKHR as_write{
-                    .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
-                const std::array writes = {
-                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
-                    vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &n},
-                    vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &m},
-                    vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &p},
-                    vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &o},
-                    vk::WriteDescriptorSet{.pNext = &as_write, .dstBinding = 5, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eAccelerationStructureKHR}};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, trace_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, trace_layout, 0, writes);
-                cmdbuf.pushConstants(trace_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(trace), &trace);
-                cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
-            }
+        });
+
+    // 2. BLAS over the triangle list.
+    if (last_stage < 2) {
+        return;
+    }
+    scheduler.RecordCrumb({.name = "rtao blas"}, [=, blas = blas](vk::CommandBuffer cmdbuf) {
+        vk::AccelerationStructureGeometryKHR blas_geometry{
+            .geometryType = vk::GeometryTypeKHR::eTriangles,
+            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                             .vertexData = {.deviceAddress = triangles_address},
+                             .vertexStride = 3 * sizeof(float),
+                             .maxVertex = std::max<u32>(total_triangles * 3, 1) - 1,
+                             .indexType = vk::IndexType::eNoneKHR,
+                         }},
+            .flags = vk::GeometryFlagBitsKHR::eOpaque,
+        };
+        const vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
+            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+            .dstAccelerationStructure = blas,
+            .geometryCount = 1,
+            .pGeometries = &blas_geometry,
+            .scratchData = {.deviceAddress = blas_scratch_address},
+        };
+        const vk::AccelerationStructureBuildRangeInfoKHR blas_range{.primitiveCount = total_triangles};
+        cmdbuf.buildAccelerationStructuresKHR(blas_info, &blas_range);
+        memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
+                       vk::AccessFlagBits2::eAccelerationStructureReadKHR);
+    });
+
+    // 3. TLAS: the one instance.
+    if (last_stage < 3) {
+        return;
+    }
+    scheduler.RecordCrumb({.name = "rtao tlas"}, [=, tlas = tlas](vk::CommandBuffer cmdbuf) {
+        vk::AccelerationStructureGeometryKHR tlas_geometry{
+            .geometryType = vk::GeometryTypeKHR::eInstances,
+            .geometry = {.instances = vk::AccelerationStructureGeometryInstancesDataKHR{
+                             .arrayOfPointers = false,
+                             .data = {.deviceAddress = instances_address},
+                         }},
+        };
+        const vk::AccelerationStructureBuildGeometryInfoKHR tlas_info{
+            .type = vk::AccelerationStructureTypeKHR::eTopLevel,
+            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+            .dstAccelerationStructure = tlas,
+            .geometryCount = 1,
+            .pGeometries = &tlas_geometry,
+            .scratchData = {.deviceAddress = tlas_scratch_address},
+        };
+        const vk::AccelerationStructureBuildRangeInfoKHR tlas_range{.primitiveCount = 1};
+        cmdbuf.buildAccelerationStructuresKHR(tlas_info, &tlas_range);
+        memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, Compute,
+                       vk::AccessFlagBits2::eAccelerationStructureReadKHR);
+    });
+
+    // 4. Trace at half resolution.
+    if (last_stage < 4) {
+        return;
+    }
+    scheduler.RecordCrumb(
+        {.name = "rtao trace"},
+        [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
+         ao_image = vk::Image(ao_images[write])](vk::CommandBuffer cmdbuf) {
+            const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
+                       o = info(ao_write);
+            const vk::WriteDescriptorSetAccelerationStructureKHR as_write{
+                .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
+            const std::array writes = {
+                vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
+                vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &n},
+                vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &m},
+                vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &p},
+                vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &o},
+                vk::WriteDescriptorSet{.pNext = &as_write, .dstBinding = 5, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eAccelerationStructureKHR}};
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, trace_pipeline);
+            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, trace_layout, 0, writes);
+            cmdbuf.pushConstants(trace_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(trace), &trace);
+            cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
             const vk::ImageMemoryBarrier2 ao_barrier{
                 .srcStageMask = Compute,
                 .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
@@ -707,21 +751,27 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
             };
             cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ao_barrier});
-            // 4. Into the game's mask.
-            {
-                const auto a = info(ao_write), d = info(depth_view), mk = info(mask_view);
-                const std::array writes = {
-                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &a},
-                    vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
-                    vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &mk}};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, apply_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, apply_layout, 0, writes);
-                cmdbuf.pushConstants(apply_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(apply), &apply);
-                cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
-            }
+        });
+
+    // 5. Into the game's mask.
+    if (last_stage < 5) {
+        return;
+    }
+    scheduler.RecordCrumb(
+        {.name = "rtao apply"},
+        [=, apply_pipeline = *apply_pipeline, apply_layout = *apply_layout](vk::CommandBuffer cmdbuf) {
+            const auto a = info(ao_write), d = info(depth_view), mk = info(mask_view);
+            const std::array writes = {
+                vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &a},
+                vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
+                vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &mk}};
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, apply_pipeline);
+            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, apply_layout, 0, writes);
+            cmdbuf.pushConstants(apply_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(apply), &apply);
+            cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
         });
 }
 

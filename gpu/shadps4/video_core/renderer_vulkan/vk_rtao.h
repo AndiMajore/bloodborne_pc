@@ -101,6 +101,7 @@ private:
     float history = 0.85f;
     u32 rays = 4;
     u32 max_triangles = 1500000;
+    u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply
     u32 max_geometries = 8192;
 
     std::vector<GpuGeometry> geometries;
