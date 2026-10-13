@@ -111,6 +111,7 @@ private:
     u32 skipped_topology = 0, skipped_no_address = 0;
     bool readback_pending = false;
     u32 readback_frame = 0;
+    u32 readback_triangles = 0;
     Buffer dump_buffer;       // host: the half-res AO image (rg16f), "dump=" in the settings
     bool dump_pending = false;
     u32 dump_frame = 0;
@@ -136,7 +137,7 @@ private:
     static constexpr u32 TableSlots = 3;
     Buffer table_buffer;      // host: GpuGeometry[max_geometries] x TableSlots
     Buffer readback_buffer;   // host: the first ReadbackTriangles triangles of a frame
-    static constexpr u32 ReadbackTriangles = 64;
+    static constexpr u32 ReadbackTriangles = 4096;
     Buffer triangle_buffer;   // device: float3 x 3 x max_triangles
     Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch, instance_buffer;
     vk::AccelerationStructureKHR blas{}, tlas{};

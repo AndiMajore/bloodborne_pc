@@ -410,8 +410,9 @@ void RayTracedAO::OnFrameStart() {
         vmaInvalidateAllocation(instance.GetAllocator(), readback_buffer.allocation, 0, VK_WHOLE_SIZE);
         const float* v = static_cast<const float*>(readback_buffer.mapped);
         u32 valid = 0, finite = 0;
+        const u32 count = std::min<u32>(ReadbackTriangles, readback_triangles);
         float zmin = 1e30f, zmax = -1e30f, xymax = 0.0f;
-        for (u32 i = 0; i < ReadbackTriangles; ++i) {
+        for (u32 i = 0; i < count; ++i) {
             const float* tri = v + i * 9;
             bool nonzero = false, all_finite = true;
             for (u32 k = 0; k < 9; ++k) {
@@ -428,9 +429,10 @@ void RayTracedAO::OnFrameStart() {
                 xymax = std::max({xymax, std::abs(tri[k * 3]), std::abs(tri[k * 3 + 1])});
             }
         }
-        std::printf("RTAO: readback (frame %u): %u of the first %u triangles non-zero, %u finite; z %.2f..%.2f, "
-                    "|xy| up to %.2f; first: (%.2f %.2f %.2f) (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n",
-                    readback_frame, valid, ReadbackTriangles, finite, zmin, zmax, xymax, v[0], v[1], v[2],
+        std::printf("RTAO: readback (frame %u): of the first %u triangles %u non-zero, %u valid (finite), "
+                    "%u invalid (NaN); z %.2f..%.2f, |xy| up to %.2f; first: (%.2f %.2f %.2f) (%.2f %.2f %.2f) "
+                    "(%.2f %.2f %.2f)\n",
+                    readback_frame, count, valid, finite, valid - finite, zmin, zmax, xymax, v[0], v[1], v[2],
                     v[3], v[4], v[5], v[6], v[7], v[8]);
     }
     if (frame % 600 == 0 && frame) {
@@ -679,6 +681,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (do_readback) {
         readback_pending = true;
         readback_frame = frame;
+        readback_triangles = total_triangles;
     }
     const bool do_dump = dump_request != dump_done && !dump_pending && stage >= 4 && dump_buffer.mapped;
     if (do_dump) {
@@ -788,7 +791,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                            AsBuild | vk::PipelineStageFlagBits2::eTransfer,
                            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead);
             if (do_readback) {
-                const vk::BufferCopy region{0, 0, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float)};
+                const vk::BufferCopy region{0, 0, vk::DeviceSize(std::min(ReadbackTriangles, total_triangles)) * 9 * sizeof(float)};
                 cmdbuf.copyBuffer(triangles_handle, readback_handle, region);
             }
         });

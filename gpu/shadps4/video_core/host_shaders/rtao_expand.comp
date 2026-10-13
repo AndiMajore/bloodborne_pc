@@ -95,7 +95,9 @@ void main() {
     }
     const uint base = t * 9u;
     for (uint k = 0u; k < 3u; ++k) {
-        const vec3 v = valid ? out_pos[k] : vec3(0.0); // degenerate: no hits
+        // Invalid: NaN makes the triangle inactive, the build drops it (zeros would pile up
+        // thousands of degenerate triangles at the camera, where the primary-ray test starts).
+        const vec3 v = valid ? out_pos[k] : vec3(uintBitsToFloat(0x7fc00000u));
         vertices[base + k * 3u + 0u] = v.x;
         vertices[base + k * 3u + 1u] = v.y;
         vertices[base + k * 3u + 2u] = v.z;
