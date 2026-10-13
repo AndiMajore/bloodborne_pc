@@ -83,7 +83,22 @@ void main() {
     const vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     const vec3 T = normalize(cross(up, N));
     const vec3 B = cross(N, T);
-    const vec3 origin = P + N * (0.02 + 0.002 * P.z);
+    // Snap the origin onto the BVH: the depth surface and the triangles disagree by a few
+    // centimetres where the game draws with a depth bias (floor tiles), and rays that start
+    // below their own surface hit it at once. One camera ray per pixel finds the real surface.
+    vec3 origin = P;
+    {
+        const float len = length(P);
+        rayQueryEXT snap;
+        rayQueryInitializeEXT(snap, scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF,
+                              vec3(0.0), len * 0.8, P / len, len * 1.1);
+        while (rayQueryProceedEXT(snap)) {
+        }
+        if (rayQueryGetIntersectionTypeEXT(snap, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+            origin = P / len * rayQueryGetIntersectionTEXT(snap, true);
+        }
+    }
+    origin += N * (0.01 + 0.001 * P.z);
     const float t_min = mode == 4u ? 0.1 : 0.0;
     const float n0 = IGN(vec2(fp) + float(frame % 8u) * 5.588238);
     const float n1 = IGN(vec2(fp.yx) + float(frame % 8u) * 1.618034);
