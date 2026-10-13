@@ -38,6 +38,7 @@ struct ApplyConstants {
     std::array<float, 2> half_size;
     float strength;
     u32 debug;
+    float adaptive;
 };
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
@@ -65,6 +66,7 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
     directions = std::clamp(EnvU32("BB_SSGI_DIRECTIONS", 4), 1u, 16u);
     steps = std::clamp(EnvU32("BB_SSGI_STEPS", 6), 1u, 32u);
     history = std::clamp(EnvFloat("BB_SSGI_HISTORY", 0.9f), 0.0f, 0.98f);
+    adaptive = std::max(EnvFloat("BB_SSGI_ADAPTIVE", 4.0f), 0.0f);
     std::printf("SSGI: on, strength %.2f, radius %.2f, %u directions x %u steps, history %.2f%s\n",
                 strength, radius, directions, steps, history, debug ? ", debug view" : "");
     if (const char* file = std::getenv("BB_SSGI_FILE")) {
@@ -182,9 +184,11 @@ void ScreenSpaceGI::PollSettings() {
         else if (key == "steps") steps = std::clamp(u32(value), 1u, 32u);
         else if (key == "debug") debug = value != 0.0f;
         else if (key == "enabled") enabled = value != 0.0f;
+        else if (key == "adaptive") adaptive = std::max(value, 0.0f);
     }
-    std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, debug %d\n",
-                enabled ? 1 : 0, strength, radius, directions, steps, history, debug ? 1 : 0);
+    std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, "
+                "adaptive %.2f, debug %d\n",
+                enabled ? 1 : 0, strength, radius, directions, steps, history, adaptive, debug ? 1 : 0);
 }
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color) {
@@ -384,6 +388,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .half_size = gather.half_size,
         .strength = strength,
         .debug = debug ? 1u : 0u,
+        .adaptive = adaptive,
     };
     history_valid = true;
 

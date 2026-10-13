@@ -65,6 +65,7 @@ private:
     float radius = 2.0f;
     u32 directions = 4, steps = 6;
     float history = 0.9f;
+    float adaptive = 4.0f;
 
     VideoCore::ImageId depth_id{}, normal_id{}, albedo_id{};
     bool done_this_frame = false;

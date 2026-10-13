@@ -17,6 +17,7 @@ layout(push_constant) uniform Constants {
     vec2 half_size;
     float strength;
     uint debug;
+    float adaptive; // damping of the bounce by the surface's own brightness: / (1 + adaptive * luma)
 };
 
 float ViewZ(float depth) {
@@ -53,6 +54,9 @@ void main() {
     gi /= wsum;
     const vec4 color = imageLoad(color_img, fp);
     const vec3 albedo = texelFetch(albedo_tex, fp, 0).rgb;
-    const vec3 bounce = albedo * gi * strength;
+    // Where the surface is already bright the bounce piles on and reads as a filter (a
+    // sky-lit garden); the eye would adapt, the tonemapper cannot: damp by the existing light.
+    const float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    const vec3 bounce = albedo * gi * strength / (1.0 + adaptive * luma);
     imageStore(color_img, fp, debug != 0u ? vec4(bounce, color.a) : vec4(color.rgb + bounce, color.a));
 }
