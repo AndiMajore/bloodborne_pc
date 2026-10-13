@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -44,6 +45,8 @@ public:
         bool non_indexed; // index_address 0, vertex i of the draw is index i
         bool alpha_test;  // the pixel shader discards (foliage, vines): solid quads in the BVH
         bool depth_write; // off: decals and overlays hugging other surfaces
+        u64 key;          // identity across frames (shader, buffers, ranges); the occurrence is added
+        bool skinned;     // a bone palette: never cached
     };
 
     explicit RayTracedAO(const Instance& instance, Scheduler& scheduler,
@@ -70,9 +73,51 @@ private:
         u64 index_address;
         u32 index_count, index16;
         s32 base_vertex;
-        u32 restart, triangle_offset, triangles, pad0, pad1;
+        u32 restart, triangle_offset, triangles;
+        u32 out_base; // first output triangle in the triangle buffer
+        u32 flags;    // GeoWorld: world space (a cache build); GeoProbe: measured for the cache
     };
     static_assert(sizeof(GpuGeometry) == 56);
+    static constexpr u32 GeoWorld = 1, GeoProbe = 2;
+
+    /// Per probed draw, written by rtao_probe.comp: world-space summary of its captured vertices.
+    struct ProbeStats {
+        u32 id, count;
+        float centroid[3], min[3], max[3], first[3];
+        u32 pad[2];
+    };
+    static_assert(sizeof(ProbeStats) == 64);
+
+    /// A draw seen over several frames: static ones get their own world-space BLAS.
+    struct CacheEntry {
+        u64 base = 0;          // the mesh (all copies of it share this)
+        u32 stable = 0;        // consecutive direct matching observations (stable draw order)
+        u32 evictions = 0;     // static, then changed: three times and the draw is never cached
+        bool have_stats = false;
+        ProbeStats stats{};
+        u32 last_seen = 0;     // frame
+        vk::AccelerationStructureKHR blas{};
+        VmaAllocation allocation{};
+        vk::Buffer buffer{};
+        vk::DeviceAddress address = 0;
+        u64 bytes = 0;
+        u32 triangles = 0;
+        u32 ready_from = 0;    // frame from which the BLAS may be instanced
+    };
+    /// One draw of the frame before classification (dynamic, cached instance or promotion).
+    struct Draw {
+        GpuGeometry gpu;
+        u64 key;  // base and occurrence
+        u64 base; // the mesh: copies drawn several times a frame share it (the game sorts them by
+                  // distance, so an occurrence is not one copy for good)
+        u32 occurrence;
+        bool skinned;
+    };
+    static u64 KeyOf(u64 base, u32 occurrence) {
+        u64 key = (base ^ (u64(occurrence + 1) * 0x9E3779B97F4A7C15ull)) * 0xBF58476D1CE4E5B9ull;
+        key ^= key >> 31;
+        return key ? key : 1;
+    }
 
     struct Buffer {
         vk::Buffer buffer{};
@@ -89,6 +134,10 @@ private:
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect);
     void Record(VideoCore::ImageId mask);
+    void ReadProbes(u32 ring);
+    bool StatsMatch(const ProbeStats& a, const ProbeStats& b) const;
+    void Evict(CacheEntry& entry);
+    void TrimCache();
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -114,7 +163,26 @@ private:
     u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply
     u32 max_geometries = 8192;
 
-    std::vector<GpuGeometry> geometries;
+    std::vector<GpuGeometry> geometries; // the frame's table (built in Record)
+    std::vector<Draw> draws;             // the frame's eligible draws (AddGeometry)
+    std::unordered_map<u64, u32> occurrences;
+    std::unordered_map<u64, u32> max_copies; // per mesh: the most copies seen in one frame
+    // Static cache
+    bool cache_enabled = true;           // settings "cache=0": everything per frame
+    u32 promote_after = 8;               // matching observations before a draw is cached
+    float cache_max_size = 20.0f;        // settings "maxsize=": bigger draws stay per frame (far cut)
+    u64 cache_budget = 1536ull << 20;    // bytes of cached BLASes (least recently seen go first)
+    std::unordered_map<u64, CacheEntry> cache;
+    u64 cache_bytes = 0;
+    u32 cache_instances = 0, cache_instance_tris = 0, promotions = 0, evictions_total = 0;
+    u32 probes_read = 0, probes_stale = 0, probes_matched = 0, probes_changed = 0, mismatch_prints = 0;
+    u32 probes_reordered = 0;
+    std::array<float, 3> camera_world{};
+    static constexpr u32 ProbeSlots = 4;
+    std::array<std::vector<u64>, ProbeSlots> probe_keys; // table index -> key (0: not probed)
+    std::array<u32, ProbeSlots> probe_ids{};
+    static constexpr u32 MaxInstances = 8192;
+    static constexpr u32 PromoTriangles = 400000; // world-space triangles built per frame at most
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
     u32 skipped_topology = 0, skipped_no_address = 0, skipped_alpha = 0, skipped_nowrite = 0;
@@ -141,16 +209,21 @@ private:
     u32 ao_index = 0;
 
     // Pipelines
-    vk::UniqueDescriptorSetLayout expand_desc_layout, trace_desc_layout, apply_desc_layout, blur_desc_layout;
-    vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout;
-    vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline;
+    vk::UniqueDescriptorSetLayout expand_desc_layout, trace_desc_layout, apply_desc_layout, blur_desc_layout,
+        probe_desc_layout;
+    vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout, probe_layout;
+    vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline;
     // Geometry and acceleration structures
     static constexpr u32 TableSlots = 3;
     Buffer table_buffer;      // host: GpuGeometry[max_geometries] x TableSlots
     Buffer readback_buffer;   // host: the first ReadbackTriangles triangles of a frame
     static constexpr u32 ReadbackTriangles = 4096;
-    Buffer triangle_buffer;   // device: float3 x 3 x max_triangles
-    Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch, instance_buffer;
+    Buffer triangle_buffer;   // device: float3 x 3 x (max_triangles + PromoTriangles)
+    Buffer probe_buffer;      // host (read back): ProbeStats[max_geometries] x ProbeSlots
+    Buffer promo_scratch;     // device: scratch for the frame's cache builds
+    Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch;
+    Buffer instance_buffer;   // host: AccelerationStructureInstanceKHR[MaxInstances] x TableSlots
+    vk::DeviceAddress blas_address = 0;
     vk::AccelerationStructureKHR blas{}, tlas{};
     vk::DeviceSize scratch_alignment = 256;
     // Images

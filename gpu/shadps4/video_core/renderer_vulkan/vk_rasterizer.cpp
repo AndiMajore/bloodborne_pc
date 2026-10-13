@@ -1709,6 +1709,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // bbport: the ray-traced AO needs every G-buffer draw's positions (vk_rtao.cpp).
         const bool all_motion = all_motion_env || rtao->Enabled();
         bool gated = !all_motion;
+        // A character-size skeleton: the RT cache never keeps such draws. Small palettes are on
+        // static world pieces too (the motion gate above); the cache's own check sorts them out.
+        bool skinned = false;
         u64 palette = 0;
         for (const auto& resource : vs.buffers) {
             if (resource.IsSpecial()) continue;
@@ -1718,6 +1721,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const auto role = Motion::ClassifyBuffer(size);
             if (role == Motion::BufferRole::Skeleton) {
                 gated = false;
+                skinned = true;
                 break;
             }
             const VAddr address = buffer.base_address;
@@ -1794,6 +1798,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                    pipeline->GetStage(Shader::SwStage::Fragment).has_discard) ||
                                   regs.depth_shader_control.kill_enable != 0,
                     .depth_write = regs.depth_control.depth_enable && regs.depth_control.depth_write_enable,
+                    // The draw's identity across frames (the occurrence is added by the RTAO).
+                    .key = XXH3_64bits_withSeed(&index_address, sizeof(index_address),
+                                                vs.pgm_hash ^ (motion_geometry * 0x9E3779B97F4A7C15ull) ^
+                                                    (u64(regs.num_indices) << 32) ^
+                                                    (u64(regs.num_instances.NumInstances()) << 8) ^
+                                                    u64(u32(base_vertex)) ^ (u64(first_instance) << 48)),
+                    .skinned = skinned,
                 });
             }
         }

@@ -20,7 +20,8 @@ struct Geometry {
     uint restart;        // 1: primitive restart on
     uint triangle_offset; // first output triangle of this geometry
     uint triangles;      // output triangles (index_count / 3 * instances)
-    uint pad0, pad1;
+    uint out_base;       // first output triangle in the triangle buffer
+    uint flags;          // 1: world space (a static-cache build), 2: probed
 };
 layout(binding = 0, std430) readonly buffer Geometries { Geometry geometries[]; };
 layout(binding = 1, std430) writeonly buffer Triangles { float vertices[]; }; // 9 floats per triangle
@@ -33,8 +34,9 @@ layout(push_constant) uniform Constants {
     vec4 proj;             // x scale, y scale, z scale, z offset (signed)
     uint num_geometries;
     uint total_triangles;
-    float far_cut;        // triangles entirely beyond this view depth stay out (sky, far terrain)
+    float far_cut;        // triangles entirely beyond this distance stay out (sky, far terrain)
     uint pad1;
+    vec4 inv_view[3];     // view -> world rows (world-space entries)
 };
 
 uint ReadIndex(Words words, uint index16, uint i) {
@@ -69,6 +71,7 @@ void main() {
     Words words = Words(g.index_address);
     Positions positions = Positions(positions_address);
     const uint restart_value = (g.index16 & 1u) != 0u ? 0xffffu : 0xffffffffu;
+    const bool world = (g.flags & 1u) != 0u;
     vec3 out_pos[3];
     bool valid = true;
     for (uint k = 0u; k < 3u; ++k) {
@@ -84,12 +87,17 @@ void main() {
             break;
         }
         const vec4 clip = positions.p[g.store + uint(vertex) + instance * g.vertices];
-        if (!(clip.w > 1e-4) || any(isnan(clip)) || any(isinf(clip))) {
+        // Behind the camera is fine for a world-space cache build (the BLAS outlives this view).
+        if ((!world && !(clip.w > 1e-4)) || any(isnan(clip)) || any(isinf(clip))) {
             valid = false;
             break;
         }
         // The game's projection: clip.w is the view-space depth, clip.xy = view.xy * |scale|.
         out_pos[k] = vec3(clip.x / abs(proj.x), clip.y / abs(proj.y), clip.w);
+        if (world) {
+            const vec4 v = vec4(out_pos[k], 1.0);
+            out_pos[k] = vec3(dot(inv_view[0], v), dot(inv_view[1], v), dot(inv_view[2], v));
+        }
         if (any(isnan(out_pos[k])) || any(isinf(out_pos[k])) || any(greaterThan(abs(out_pos[k]), vec3(1e5)))) {
             valid = false; // keeps infinities and absurd extents out of the BVH bounds
             break;
@@ -101,10 +109,10 @@ void main() {
     const vec3 centre = (out_pos[0] + out_pos[1] + out_pos[2]) / 3.0;
     const float near_d = min(min(length(out_pos[0]), length(out_pos[1])), min(length(out_pos[2]), length(centre)));
     const float extent = max(max(distance(out_pos[0], centre), distance(out_pos[1], centre)), distance(out_pos[2], centre));
-    if (valid && far_cut > 0.0 && near_d - extent > far_cut) {
+    if (valid && !world && far_cut > 0.0 && near_d - extent > far_cut) {
         valid = false;
     }
-    const uint base = t * 9u;
+    const uint base = (g.out_base + local) * 9u;
     for (uint k = 0u; k < 3u; ++k) {
         // Invalid: NaN makes the triangle inactive, the build drops it (zeros would pile up
         // thousands of degenerate triangles at the camera, where the primary-ray test starts).

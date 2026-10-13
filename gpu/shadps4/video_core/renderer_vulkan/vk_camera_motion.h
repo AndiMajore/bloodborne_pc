@@ -70,6 +70,10 @@ public:
     [[nodiscard]] std::array<float, 4> Projection() const noexcept {
         return current.proj;
     }
+    /// bbport: view -> world rows of the committed frame camera (the ray-traced AO's static cache).
+    [[nodiscard]] std::array<float, 12> InvView() const noexcept {
+        return current.inv_view;
+    }
     [[nodiscard]] float VerticalFov() const noexcept;
     [[nodiscard]] float Near() const noexcept;
     // Current projection, previous projection, and row Z of previous-view * inverse-view.

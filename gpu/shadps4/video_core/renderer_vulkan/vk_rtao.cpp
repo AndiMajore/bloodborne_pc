@@ -18,6 +18,7 @@
 #include "video_core/host_shaders/rtao_apply_comp.h"
 #include "video_core/host_shaders/rtao_blur_comp.h"
 #include "video_core/host_shaders/rtao_expand_comp.h"
+#include "video_core/host_shaders/rtao_probe_comp.h"
 #include "video_core/host_shaders/rtao_trace_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -39,7 +40,16 @@ struct ExpandConstants {
     u32 total_triangles;
     float far_cut;
     u32 pad1;
+    std::array<float, 12> inv_view; // view -> world rows (world-space entries)
 };
+struct ProbeConstants {
+    u64 positions_address;
+    u32 num_geometries;
+    u32 id;
+    std::array<float, 4> proj;
+    std::array<float, 12> inv_view;
+};
+static_assert(sizeof(ProbeConstants) == 80 && offsetof(ProbeConstants, proj) == 16);
 struct TraceConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -65,7 +75,7 @@ struct ApplyConstants {
     u32 replace;
     u32 pad1;
 };
-static_assert(sizeof(ExpandConstants) == 48 && offsetof(ExpandConstants, far_cut) == 40);
+static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
 static_assert(sizeof(TraceConstants) == 116 && offsetof(TraceConstants, ao_far) == 112);
 struct BlurConstants {
     std::array<float, 2> half_size;
@@ -117,6 +127,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     rays = std::clamp(EnvU32("BB_RTAO_RAYS", 6), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 3000000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
+    cache_enabled = EnvU32("BB_RTAO_CACHE", 1) != 0;
 
     const auto device = instance.GetDevice();
     const auto make_layouts = [&](std::span<const vk::DescriptorSetLayoutBinding> bindings,
@@ -169,6 +180,9 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     make_layouts(apply_bindings, sizeof(ApplyConstants), apply_desc_layout, apply_layout);
     make_layouts(blur_bindings, sizeof(BlurConstants), blur_desc_layout, blur_layout);
     blur_pipeline = make_pipeline(RTAO_BLUR_COMP, *blur_layout);
+    const std::array probe_bindings = {binding(0, DT::eStorageBuffer), binding(1, DT::eStorageBuffer)};
+    make_layouts(probe_bindings, sizeof(ProbeConstants), probe_desc_layout, probe_layout);
+    probe_pipeline = make_pipeline(RTAO_PROBE_COMP, *probe_layout);
     expand_pipeline = make_pipeline(RTAO_EXPAND_COMP, *expand_layout);
     trace_pipeline = make_pipeline(RTAO_TRACE_COMP, *trace_layout);
     apply_pipeline = make_pipeline(RTAO_APPLY_COMP, *apply_layout);
@@ -227,14 +241,19 @@ void RayTracedAO::PollSettings() {
         else if (key == "snap") snap_far = std::max(value, 0.0f);
         else if (key == "build") build_fast_trace = value != 0.0f;
         else if (key == "far") ao_far = std::max(value, 0.0f);
+        else if (key == "cache") cache_enabled = value != 0.0f;
+        else if (key == "promote") promote_after = std::clamp(u32(value), 2u, 600u);
+        else if (key == "maxsize") cache_max_size = std::max(value, 0.0f);
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
     std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, power %.2f, history %.2f, "
-                "sigma %.2f, blur %d, replace %d, snap %.0f m, far %.0f m, build %s, debug %u, stage %u, alpha %d, decals %d\n",
+                "sigma %.2f, blur %d, replace %d, snap %.0f m, far %.0f m, build %s, debug %u, stage %u, alpha %d, decals %d, "
+                "cache %d (after %u frames)\n",
                 active ? 1 : 0, rays, radius, strength, power, history, sigma, blur ? 1 : 0, replace_mask ? 1 : 0,
                 snap_far, ao_far, build_fast_trace ? "fast trace" : "fast build",
-                debug, stage, include_alpha ? 1 : 0, include_nowrite ? 1 : 0);
+                debug, stage, include_alpha ? 1 : 0, include_nowrite ? 1 : 0, cache_enabled ? 1 : 0,
+                promote_after);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -250,8 +269,15 @@ RayTracedAO::~RayTracedAO() {
     if (blas) {
         device.destroyAccelerationStructureKHR(blas);
     }
+    for (auto& [key, entry] : cache) {
+        if (entry.blas) {
+            device.destroyAccelerationStructureKHR(entry.blas);
+            vmaDestroyBuffer(instance.GetAllocator(), entry.buffer, entry.allocation);
+        }
+    }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
-                         &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer}) {
+                         &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
+                         &promo_scratch}) {
         DestroyBuffer(*buffer);
     }
 }
@@ -309,10 +335,13 @@ bool RayTracedAO::CreateAccelerationStructures() {
     using BU = vk::BufferUsageFlagBits;
     if (!CreateBuffer(table_buffer, vk::DeviceSize(TableSlots) * max_geometries * sizeof(GpuGeometry),
                       BU::eStorageBuffer, true) ||
-        !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles) * 9 * sizeof(float),
+        !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles + PromoTriangles) * 9 * sizeof(float),
                       BU::eStorageBuffer | BU::eAccelerationStructureBuildInputReadOnlyKHR, false) ||
-        !CreateBuffer(instance_buffer, sizeof(vk::AccelerationStructureInstanceKHR),
+        !CreateBuffer(instance_buffer,
+                      vk::DeviceSize(TableSlots) * MaxInstances * sizeof(vk::AccelerationStructureInstanceKHR),
                       BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
+        !CreateBuffer(probe_buffer, vk::DeviceSize(ProbeSlots) * max_geometries * sizeof(ProbeStats),
+                      BU::eStorageBuffer, true) ||
         !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
                       BU::eTransferDst, true)) {
         return false;
@@ -359,6 +388,21 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .size = blas_sizes.accelerationStructureSize,
         .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
     }));
+    blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = blas});
+    // The static cache's builds of a frame share one scratch (sized for PromoTriangles, built for
+    // trace speed: a cached BLAS is built once and traced for many frames).
+    {
+        blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
+                          vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess;
+        blas_geometry.geometry.triangles.maxVertex = PromoTriangles * 3 - 1;
+        const auto promo_sizes = device.getAccelerationStructureBuildSizesKHR(
+            vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, PromoTriangles);
+        // Room for the alignment of many small builds.
+        if (!CreateBuffer(promo_scratch, promo_sizes.buildScratchSize + 512 * scratch_alignment,
+                          BU::eStorageBuffer, false, scratch_alignment)) {
+            return false;
+        }
+    }
 
     // TLAS: one instance, identity (the triangles are already in view space).
     vk::AccelerationStructureGeometryKHR tlas_geometry{
@@ -376,7 +420,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .pGeometries = &tlas_geometry,
     };
     const auto tlas_sizes = device.getAccelerationStructureBuildSizesKHR(
-        vk::AccelerationStructureBuildTypeKHR::eDevice, tlas_info, 1u);
+        vk::AccelerationStructureBuildTypeKHR::eDevice, tlas_info, MaxInstances);
     if (!CreateBuffer(tlas_buffer, tlas_sizes.accelerationStructureSize,
                       BU::eAccelerationStructureStorageKHR, false) ||
         !CreateBuffer(tlas_scratch, tlas_sizes.buildScratchSize, BU::eStorageBuffer, false,
@@ -388,20 +432,6 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .size = tlas_sizes.accelerationStructureSize,
         .type = vk::AccelerationStructureTypeKHR::eTopLevel,
     }));
-    // The instance never changes: identity transform, the BLAS.
-    vk::AccelerationStructureInstanceKHR as_instance{
-        .instanceCustomIndex = 0,
-        .mask = 0xFF,
-        .instanceShaderBindingTableRecordOffset = 0,
-        .flags = VkGeometryInstanceFlagsKHR(vk::GeometryInstanceFlagBitsKHR::eTriangleFacingCullDisable),
-        .accelerationStructureReference =
-            device.getAccelerationStructureAddressKHR({.accelerationStructure = blas}),
-    };
-    as_instance.transform.matrix[0][0] = 1.0f;
-    as_instance.transform.matrix[1][1] = 1.0f;
-    as_instance.transform.matrix[2][2] = 1.0f;
-    std::memcpy(instance_buffer.mapped, &as_instance, sizeof(as_instance));
-    vmaFlushAllocation(instance.GetAllocator(), instance_buffer.allocation, 0, VK_WHOLE_SIZE);
     std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
                 (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
                 (unsigned long long)(blas_sizes.buildScratchSize >> 20),
@@ -488,15 +518,26 @@ void RayTracedAO::OnFrameStart() {
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
                     max_triangles, skipped_topology, skipped_alpha, skipped_nowrite, skipped_no_address,
                     recorded);
-        if (recorded == 0 && !geometries.empty() && active) {
+        std::printf("RTAO: cache: %zu draws known, %u instanced (%u triangles), %llu MiB of BLASes; "
+                    "%u built, %u evicted in 600 frames; probes %u read, %u not written, %u same, %u reordered, "
+                    "%u changed; camera (%.1f %.1f %.1f)\n",
+                    cache.size(), cache_instances, cache_instance_tris,
+                    (unsigned long long)(cache_bytes >> 20), promotions, evictions_total, probes_read,
+                    probes_stale, probes_matched, probes_reordered, probes_changed, camera_world[0],
+                    camera_world[1], camera_world[2]);
+        probes_read = probes_stale = probes_matched = probes_changed = probes_reordered = 0;
+        promotions = 0;
+        evictions_total = 0;
+        if (recorded == 0 && !draws.empty() && active) {
             std::puts("RTAO: geometry captured but no pass recorded: the game's AO pass (its R8 mask) was not "
                       "seen. Is the \"Disable SSAO\" game patch on? RTAO writes into that pass's mask.");
         }
         recorded = 0;
         ++reports;
     }
-    geometries.clear();
-    frame_triangles = 0;
+    TrimCache();
+    draws.clear();
+    occurrences.clear();
     dropped_triangles = 0;
     dropped_draws = 0;
     skipped_topology = 0;
@@ -548,12 +589,21 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
         dropped_triangles += tris;
         return;
     }
-    if (geometries.size() >= max_geometries || frame_triangles + tris > max_triangles) {
+    if (draws.size() >= max_geometries) {
         ++dropped_draws;
         dropped_triangles += tris;
         return;
     }
-    geometries.push_back({.store = g.store,
+    // The same buffers may be drawn more than once a frame: the occurrence keeps them apart.
+    const u32 occurrence = occurrences[g.key]++;
+    u32& copies = max_copies[g.key];
+    copies = std::max(copies, occurrence + 1);
+    Draw& draw = draws.emplace_back();
+    draw.key = KeyOf(g.key, occurrence);
+    draw.base = g.key;
+    draw.occurrence = occurrence;
+    draw.skinned = g.skinned;
+    draw.gpu = GpuGeometry{.store = g.store,
                           .vertices = g.vertices,
                           .instances = g.instances,
                           .first_vertex = g.first_vertex,
@@ -564,9 +614,155 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
                           .index16 = g.index16 ? (1u | u32((g.index_address & 2) ? 2u : 0u)) : 0u,
                           .base_vertex = g.base_vertex,
                           .restart = g.restart ? 1u : 0u,
-                          .triangle_offset = frame_triangles,
-                          .triangles = tris});
-    frame_triangles += tris;
+                          .triangle_offset = 0,
+                          .triangles = tris,
+                          .out_base = 0,
+                          .flags = 0};
+}
+
+bool RayTracedAO::StatsMatch(const ProbeStats& a, const ProbeStats& b) const {
+    if (a.count != b.count || a.count == 0) {
+        return false;
+    }
+    // World positions are rebuilt from clip space each frame: allow for the rounding, which grows
+    // with the distance from the camera.
+    const float dx = a.centroid[0] - camera_world[0], dy = a.centroid[1] - camera_world[1],
+                dz = a.centroid[2] - camera_world[2];
+    const float tol = 0.02f + 2e-4f * std::sqrt(dx * dx + dy * dy + dz * dz);
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(a.centroid[i] - b.centroid[i]) > tol || std::abs(a.min[i] - b.min[i]) > tol ||
+            std::abs(a.max[i] - b.max[i]) > tol || std::abs(a.first[i] - b.first[i]) > tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void RayTracedAO::Evict(CacheEntry& entry) {
+    if (entry.blas) {
+        const auto device = instance.GetDevice();
+        scheduler.DeferOperation([device, allocator = instance.GetAllocator(), blas = entry.blas,
+                                  buffer = entry.buffer, allocation = entry.allocation] {
+            device.destroyAccelerationStructureKHR(blas);
+            vmaDestroyBuffer(allocator, buffer, allocation);
+        });
+        cache_bytes -= entry.bytes;
+    }
+    entry.blas = vk::AccelerationStructureKHR{};
+    entry.buffer = vk::Buffer{};
+    entry.allocation = VmaAllocation{};
+    entry.address = 0;
+    entry.bytes = 0;
+    entry.triangles = 0;
+}
+
+void RayTracedAO::ReadProbes(u32 ring) {
+    const u32 id = probe_ids[ring];
+    if (!id) {
+        return;
+    }
+    probe_ids[ring] = 0;
+    vmaInvalidateAllocation(instance.GetAllocator(), probe_buffer.allocation,
+                            vk::DeviceSize(ring) * max_geometries * sizeof(ProbeStats),
+                            vk::DeviceSize(max_geometries) * sizeof(ProbeStats));
+    const auto* stats = static_cast<const ProbeStats*>(probe_buffer.mapped) + size_t(ring) * max_geometries;
+    const auto& keys = probe_keys[ring];
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (!keys[i]) {
+            continue;
+        }
+        if (stats[i].id != id) {
+            ++probes_stale; // the GPU has not written it (yet)
+            continue;
+        }
+        ++probes_read;
+        ProbeStats s;
+        std::memcpy(&s, &stats[i], sizeof(s));
+        if (s.id != id) {
+            continue;
+        }
+        const auto it = cache.find(keys[i]);
+        if (it == cache.end()) {
+            continue;
+        }
+        CacheEntry& e = it->second;
+        if (e.have_stats && StatsMatch(e.stats, s)) {
+            ++e.stable; // the reference stays the first observation: slow drift is not static
+            ++probes_matched;
+            continue;
+        }
+        if (e.have_stats) {
+            // Another copy of the same mesh in this slot (the draw order changed): not a change.
+            bool sibling = false;
+            const auto copies = max_copies.find(e.base);
+            for (u32 o = 0; copies != max_copies.end() && o < copies->second && !sibling; ++o) {
+                const auto other = cache.find(KeyOf(e.base, o));
+                sibling = other != cache.end() && &other->second != &e && other->second.have_stats &&
+                          StatsMatch(other->second.stats, s);
+            }
+            if (sibling) {
+                ++probes_reordered;
+                e.stable = 0; // the order is not stable: no promotion from this slot for now
+                continue;
+            }
+            ++probes_changed;
+            if (mismatch_prints < 6 || (frame % 600 < 3 && mismatch_prints < 600)) {
+                ++mismatch_prints;
+                float dmax = 0.0f;
+                for (int c = 0; c < 3; ++c) {
+                    dmax = std::max({dmax, std::abs(e.stats.min[c] - s.min[c]), std::abs(e.stats.max[c] - s.max[c])});
+                }
+                const float dist = std::sqrt((s.centroid[0] - camera_world[0]) * (s.centroid[0] - camera_world[0]) +
+                                             (s.centroid[1] - camera_world[1]) * (s.centroid[1] - camera_world[1]) +
+                                             (s.centroid[2] - camera_world[2]) * (s.centroid[2] - camera_world[2]));
+                std::printf("RTAO: probe change at %.1f m: bounds moved up to %.3f m, ", dist, dmax);
+                std::printf("RTAO: probe change: count %u -> %u, centroid (%.3f %.3f %.3f) -> (%.3f %.3f %.3f), "
+                            "first (%.3f %.3f %.3f) -> (%.3f %.3f %.3f), camera (%.1f %.1f %.1f)\n",
+                            e.stats.count, s.count, e.stats.centroid[0], e.stats.centroid[1], e.stats.centroid[2],
+                            s.centroid[0], s.centroid[1], s.centroid[2], e.stats.first[0], e.stats.first[1],
+                            e.stats.first[2], s.first[0], s.first[1], s.first[2], camera_world[0],
+                            camera_world[1], camera_world[2]);
+            }
+        }
+        if (e.blas) { // cached, then it moved (a door, a lift): back to per frame
+            Evict(e);
+            ++e.evictions;
+            ++evictions_total;
+        }
+        e.stats = s;
+        e.have_stats = true;
+        e.stable = 1;
+    }
+}
+
+void RayTracedAO::TrimCache() {
+    if (cache_bytes > cache_budget) {
+        std::vector<std::pair<u32, u64>> order; // last seen, key
+        for (const auto& [key, e] : cache) {
+            if (e.blas && e.last_seen != frame) {
+                order.emplace_back(e.last_seen, key);
+            }
+        }
+        std::sort(order.begin(), order.end());
+        for (const auto& [seen, key] : order) {
+            if (cache_bytes <= cache_budget * 9 / 10) {
+                break;
+            }
+            Evict(cache[key]);
+        }
+    }
+    if (frame % 600 == 0) { // forget draws not seen for a minute
+        for (auto it = cache.begin(); it != cache.end();) {
+            if (frame - it->second.last_seen > 3600) {
+                if (it->second.blas) {
+                    Evict(it->second);
+                }
+                it = cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 
 void RayTracedAO::OnColorTarget(VideoCore::ImageId color) {
@@ -575,7 +771,7 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color) {
     }
     // The previous pass ended. Was it the game's AO upsample (into the R8 mask)?
     if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && active &&
-        !geometries.empty()) {
+        !draws.empty()) {
         done_this_frame = true;
         Record(mask_candidate);
     }
@@ -683,15 +879,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     if (normal.info.size.width != w || normal.info.size.height != h || !EnsureResources(w, h)) {
         return;
     }
-    // The geometry table of this frame (a host ring slot; the GPU reads it this submission).
     const u32 slot = frame % TableSlots;
-    auto* table = static_cast<GpuGeometry*>(table_buffer.mapped) + size_t(slot) * max_geometries;
-    std::memcpy(table, geometries.data(), geometries.size() * sizeof(GpuGeometry));
-    vmaFlushAllocation(instance.GetAllocator(), table_buffer.allocation,
-                       vk::DeviceSize(slot) * max_geometries * sizeof(GpuGeometry),
-                       std::max<vk::DeviceSize>(geometries.size(), 1) * sizeof(GpuGeometry));
-    const u32 num_geometries = u32(geometries.size());
-    const u32 total_triangles = frame_triangles;
 
     const auto depth_view = CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
     const auto normal_view = CachedView(normal, normal.info.pixel_format, vk::ImageAspectFlagBits::eColor);
@@ -741,6 +929,254 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     }
     ++recorded;
     ++recorded_total;
+
+    // Static cache. The probes of the pass that last used this ring slot are read back first
+    // (four passes ago: long finished), then the frame's draws are sorted: cached ones become
+    // instances of their world-space BLAS, the rest is per-frame geometry, and draws that stayed
+    // the same for promote_after observations get their BLAS built this frame.
+    const u32 probe_id = recorded_total;
+    const u32 ring = probe_id % ProbeSlots;
+    ReadProbes(ring);
+    const auto view = camera_motion.View();
+    const auto inv_view = camera_motion.InvView();
+    camera_world = {inv_view[3], inv_view[7], inv_view[11]};
+    const bool use_cache = cache_enabled && stage >= 3;
+    const float cull = ao_far > 0.0f ? ao_far + radius : 0.0f;
+    const auto device = instance.GetDevice();
+    struct Promotion {
+        vk::AccelerationStructureKHR blas;
+        u32 out_base, triangles;
+        vk::DeviceAddress scratch;
+    };
+    std::vector<GpuGeometry> dynamic_list, verify_list, promo_list;
+    std::vector<u64> dynamic_keys, verify_keys;
+    std::vector<Promotion> promos;
+    std::vector<vk::AccelerationStructureInstanceKHR> instances;
+    u32 promo_used = 0;
+    vk::DeviceSize promo_scratch_used = 0;
+    frame_triangles = 0;
+    cache_instances = 0;
+    cache_instance_tris = 0;
+    const auto make_instance = [&](vk::DeviceAddress address, bool world) {
+        vk::AccelerationStructureInstanceKHR as_instance{
+            .instanceCustomIndex = world ? 1u : 0u,
+            .mask = 0xFF,
+            .instanceShaderBindingTableRecordOffset = 0,
+            .flags = VkGeometryInstanceFlagsKHR(vk::GeometryInstanceFlagBitsKHR::eTriangleFacingCullDisable),
+            .accelerationStructureReference = address,
+        };
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                as_instance.transform.matrix[r][c] = world ? view[r * 4 + c] : (r == c ? 1.0f : 0.0f);
+            }
+        }
+        return as_instance;
+    };
+    instances.push_back({}); // slot 0: the per-frame BLAS (filled once its size is known)
+    // A mesh leaves the per-frame BVH only when every copy drawn this frame is cached: which draw
+    // is which copy changes with the draw order, but the set of cached copies covers them all.
+    std::unordered_map<u64, bool> mesh_cached;
+    // Huge draws (terrain, building blocks) stay per frame: whole in a cached BLAS, their far
+    // triangles came back into the BVH (the far cut works per frame) and rays slowed down.
+    const auto too_big = [&](const CacheEntry& e) {
+        if (cache_max_size <= 0.0f || !e.have_stats) {
+            return false;
+        }
+        const float dx = e.stats.max[0] - e.stats.min[0], dy = e.stats.max[1] - e.stats.min[1],
+                    dz = e.stats.max[2] - e.stats.min[2];
+        return dx * dx + dy * dy + dz * dz > cache_max_size * cache_max_size;
+    };
+    for (const Draw& d : draws) {
+        CacheEntry& e = cache[d.key];
+        e.base = d.base;
+        e.last_seen = frame;
+        if (e.blas && too_big(e)) {
+            Evict(e);
+        }
+        auto [it, inserted] = mesh_cached.try_emplace(d.base, true);
+        it->second = it->second && use_cache && e.blas && frame >= e.ready_from;
+    }
+    // Probing costs a pass over the draw's indices: cached draws are rechecked every 8th pass,
+    // draws waiting for a build slot every 4th; characters and draws that kept changing never.
+    const auto probe_now = [&](const Draw& d, const CacheEntry& e) {
+        if (d.skinned || e.evictions >= 3) {
+            return false;
+        }
+        const u32 phase = u32(d.key >> 7) + probe_id;
+        if (e.blas) {
+            return phase % 8 == 0;
+        }
+        if (too_big(e)) {
+            return phase % 64 == 0; // it will stay per frame; an occasional look is enough
+        }
+        if (e.stable >= promote_after) {
+            return phase % 4 == 0;
+        }
+        return true;
+    };
+    for (const Draw& d : draws) {
+        CacheEntry& e = cache[d.key];
+        GpuGeometry gpu = d.gpu;
+        const u32 probe_flag = probe_now(d, e) ? GeoProbe : 0u;
+        if (mesh_cached[d.base]) {
+            bool far = false;
+            if (cull > 0.0f) { // distance from the camera to the draw's box
+                float d2 = 0.0f;
+                for (int i = 0; i < 3; ++i) {
+                    const float v = std::max({e.stats.min[i] - camera_world[i], 0.0f,
+                                              camera_world[i] - e.stats.max[i]});
+                    d2 += v * v;
+                }
+                far = d2 > cull * cull;
+            }
+            if (far || instances.size() < MaxInstances) {
+                if (!far) {
+                    instances.push_back(make_instance(e.address, true));
+                    ++cache_instances;
+                    cache_instance_tris += e.triangles;
+                }
+                if (probe_flag) { // still checked: a door that starts moving leaves the cache
+                    gpu.triangles = 0;
+                    gpu.flags = probe_flag;
+                    verify_list.push_back(gpu);
+                    verify_keys.push_back(d.key);
+                }
+                continue;
+            }
+        }
+        if (frame_triangles + gpu.triangles > max_triangles) {
+            ++dropped_draws;
+            dropped_triangles += gpu.triangles;
+            if (probe_flag) { // measured all the same: once cached it no longer needs budget
+                gpu.triangles = 0;
+                gpu.flags = probe_flag;
+                verify_list.push_back(gpu);
+                verify_keys.push_back(d.key);
+            }
+            continue;
+        }
+        gpu.triangle_offset = frame_triangles;
+        gpu.out_base = frame_triangles;
+        gpu.flags = probe_flag;
+        frame_triangles += gpu.triangles;
+        dynamic_list.push_back(gpu);
+        dynamic_keys.push_back(d.key);
+        if (!use_cache || d.skinned || e.blas || e.evictions >= 3 || e.stable < promote_after || too_big(e) ||
+            gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles || promos.size() >= 256) {
+            continue;
+        }
+        { // the same copy cached under another slot (before a reorder): not twice
+            bool duplicate = false;
+            const auto copies = max_copies.find(d.base);
+            for (u32 o = 0; copies != max_copies.end() && o < copies->second && !duplicate; ++o) {
+                const auto other = cache.find(KeyOf(d.base, o));
+                duplicate = other != cache.end() && &other->second != &e && other->second.blas &&
+                            StatsMatch(other->second.stats, e.stats);
+            }
+            if (duplicate) {
+                continue;
+            }
+        }
+        // Promotion: a world-space copy of the triangles, built into the draw's own BLAS.
+        vk::AccelerationStructureGeometryKHR geometry{
+            .geometryType = vk::GeometryTypeKHR::eTriangles,
+            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                             .vertexStride = 3 * sizeof(float),
+                             .maxVertex = gpu.triangles * 3 - 1,
+                             .indexType = vk::IndexType::eNoneKHR,
+                         }},
+            .flags = vk::GeometryFlagBitsKHR::eOpaque,
+        };
+        const vk::AccelerationStructureBuildGeometryInfoKHR info{
+            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
+                     vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
+            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+            .geometryCount = 1,
+            .pGeometries = &geometry,
+        };
+        const auto sizes = device.getAccelerationStructureBuildSizesKHR(
+            vk::AccelerationStructureBuildTypeKHR::eDevice, info, gpu.triangles);
+        const vk::DeviceSize scratch_at =
+            (promo_scratch_used + scratch_alignment - 1) / scratch_alignment * scratch_alignment;
+        if (scratch_at + sizes.buildScratchSize > promo_scratch.size) {
+            continue;
+        }
+        Buffer storage;
+        if (!CreateBuffer(storage, sizes.accelerationStructureSize,
+                          vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR, false)) {
+            continue;
+        }
+        const auto as = device.createAccelerationStructureKHR({
+            .buffer = storage.buffer,
+            .size = sizes.accelerationStructureSize,
+            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+        });
+        if (as.result != vk::Result::eSuccess) {
+            DestroyBuffer(storage);
+            continue;
+        }
+        e.blas = as.value;
+        e.buffer = storage.buffer;
+        e.allocation = storage.allocation;
+        e.address = device.getAccelerationStructureAddressKHR({.accelerationStructure = e.blas});
+        e.bytes = sizes.accelerationStructureSize;
+        e.triangles = gpu.triangles;
+        e.ready_from = frame + 1; // built in this pass, instanced from the next
+        cache_bytes += e.bytes;
+        ++promotions;
+        promo_scratch_used = scratch_at + sizes.buildScratchSize;
+        promos.push_back({e.blas, max_triangles + promo_used, gpu.triangles,
+                          promo_scratch.address + scratch_at});
+        GpuGeometry world = gpu;
+        world.out_base = max_triangles + promo_used;
+        world.flags = GeoWorld;
+        promo_list.push_back(world);
+        promo_used += gpu.triangles;
+    }
+    // The table: per-frame entries, then the world-space copies (expanded after them), then the
+    // entries that are only measured (no triangles; their offset lies past the expand range).
+    geometries.clear();
+    probe_keys[ring].clear();
+    geometries.insert(geometries.end(), dynamic_list.begin(), dynamic_list.end());
+    for (size_t i = 0; i < dynamic_list.size(); ++i) {
+        probe_keys[ring].push_back((dynamic_list[i].flags & GeoProbe) ? dynamic_keys[i] : 0);
+    }
+    u32 dispatch_triangles = frame_triangles;
+    for (auto& world : promo_list) {
+        world.triangle_offset = dispatch_triangles;
+        dispatch_triangles += world.triangles;
+        geometries.push_back(world);
+        probe_keys[ring].push_back(0);
+    }
+    for (size_t i = 0; i < verify_list.size() && geometries.size() < max_geometries; ++i) {
+        verify_list[i].triangle_offset = dispatch_triangles;
+        geometries.push_back(verify_list[i]);
+        probe_keys[ring].push_back(verify_keys[i]);
+    }
+    probe_ids[ring] = probe_id;
+    auto* table = static_cast<GpuGeometry*>(table_buffer.mapped) + size_t(slot) * max_geometries;
+    std::memcpy(table, geometries.data(), geometries.size() * sizeof(GpuGeometry));
+    vmaFlushAllocation(instance.GetAllocator(), table_buffer.allocation,
+                       vk::DeviceSize(slot) * max_geometries * sizeof(GpuGeometry),
+                       std::max<vk::DeviceSize>(geometries.size(), 1) * sizeof(GpuGeometry));
+    const u32 num_geometries = u32(geometries.size());
+    const u32 total_triangles = frame_triangles; // the per-frame BLAS
+    // Instances: the per-frame BLAS first (when it has triangles), then the cached ones.
+    if (total_triangles) {
+        instances[0] = make_instance(blas_address, false);
+    } else {
+        instances.erase(instances.begin());
+    }
+    const u32 num_instances = u32(instances.size());
+    const vk::DeviceSize instance_offset =
+        vk::DeviceSize(slot) * MaxInstances * sizeof(vk::AccelerationStructureInstanceKHR);
+    std::memcpy(static_cast<u8*>(instance_buffer.mapped) + instance_offset, instances.data(),
+                instances.size() * sizeof(vk::AccelerationStructureInstanceKHR));
+    vmaFlushAllocation(instance.GetAllocator(), instance_buffer.allocation, instance_offset,
+                       std::max<vk::DeviceSize>(instances.size(), 1) *
+                           sizeof(vk::AccelerationStructureInstanceKHR));
     const bool do_readback = !readback_pending && total_triangles > 0 &&
                              (recorded_total == 1 || frame % 600 == 300);
     if (do_readback) {
@@ -774,9 +1210,20 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .positions_address = instance.GetDevice().getBufferAddress({.buffer = object_motion.PositionsBuffer()}),
         .proj = camera_motion.Projection(),
         .num_geometries = num_geometries,
-        .total_triangles = total_triangles,
+        .total_triangles = dispatch_triangles,
         .far_cut = ao_far > 0.0f ? ao_far + radius : 0.0f,
+        .inv_view = inv_view,
     };
+    const ProbeConstants probe{
+        .positions_address = expand.positions_address,
+        .num_geometries = num_geometries,
+        .id = probe_id,
+        .proj = expand.proj,
+        .inv_view = inv_view,
+    };
+    const vk::Buffer probe_handle = probe_buffer.buffer;
+    const vk::DeviceSize probe_offset = vk::DeviceSize(ring) * max_geometries * sizeof(ProbeStats);
+    const vk::DeviceSize probe_bytes = vk::DeviceSize(max_geometries) * sizeof(ProbeStats);
     const auto jitter = camera_motion.Jitter();
     const TraceConstants trace{
         .view = camera_motion.View(),
@@ -812,7 +1259,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const vk::DeviceAddress triangles_address = triangle_buffer.address;
     const vk::DeviceAddress blas_scratch_address = blas_scratch.address;
     const vk::DeviceAddress tlas_scratch_address = tlas_scratch.address;
-    const vk::DeviceAddress instances_address = instance_buffer.address;
+    const vk::DeviceAddress instances_address = instance_buffer.address + instance_offset;
     const vk::ImageView ao_read = *ao_views[read], ao_write = *ao_views[write];
     const vk::ImageView blur_rw = *blur_view;
     const BlurConstants blur_h{.half_size = {float((w + 1) / 2), float((h + 1) / 2)}, .dir = {1, 0}, .sigma = sigma};
@@ -849,11 +1296,12 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     profile(0x47A01ull, "rtao expand");
     scheduler.RecordCrumb(
         {.name = "rtao expand"},
-        [=, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout](vk::CommandBuffer cmdbuf) {
+        [=, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout,
+         probe_pipeline = *probe_pipeline, probe_layout = *probe_layout](vk::CommandBuffer cmdbuf) {
             memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eAllCommands,
                            vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eHostWrite, Compute,
                            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
-            if (total_triangles) {
+            if (dispatch_triangles) {
                 const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
                 const vk::DescriptorBufferInfo tri_info{triangles_handle, 0, triangles_bytes};
                 const std::array writes = {
@@ -867,7 +1315,24 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, expand_layout, 0, writes);
                 cmdbuf.pushConstants(expand_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(expand),
                                      &expand);
-                cmdbuf.dispatch((total_triangles + 63) / 64, 1, 1);
+                cmdbuf.dispatch((dispatch_triangles + 63) / 64, 1, 1);
+            }
+            if (num_geometries) { // the static cache's measurements, read back by the host later
+                const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
+                const vk::DescriptorBufferInfo probe_info{probe_handle, probe_offset, probe_bytes};
+                const std::array writes = {
+                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                           .descriptorType = vk::DescriptorType::eStorageBuffer,
+                                           .pBufferInfo = &table_info},
+                    vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
+                                           .descriptorType = vk::DescriptorType::eStorageBuffer,
+                                           .pBufferInfo = &probe_info}};
+                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, probe_pipeline);
+                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, probe_layout, 0, writes);
+                cmdbuf.pushConstants(probe_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(probe), &probe);
+                cmdbuf.dispatch(num_geometries, 1, 1);
+                memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
+                               vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
             }
             memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
                            AsBuild | vk::PipelineStageFlagBits2::eTransfer,
@@ -884,6 +1349,46 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     }
     profile(0x47A02ull, "rtao blas");
     scheduler.RecordCrumb({.name = "rtao blas"}, [=, blas = blas](vk::CommandBuffer cmdbuf) {
+        // The static cache's new BLASes (world space, built for trace speed).
+        if (!promos.empty()) {
+            std::vector<vk::AccelerationStructureGeometryKHR> geos(promos.size());
+            std::vector<vk::AccelerationStructureBuildGeometryInfoKHR> infos(promos.size());
+            std::vector<vk::AccelerationStructureBuildRangeInfoKHR> ranges(promos.size());
+            std::vector<const vk::AccelerationStructureBuildRangeInfoKHR*> range_ptrs(promos.size());
+            for (size_t i = 0; i < promos.size(); ++i) {
+                const auto& pr = promos[i];
+                geos[i] = vk::AccelerationStructureGeometryKHR{
+                    .geometryType = vk::GeometryTypeKHR::eTriangles,
+                    .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                                     .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                                     .vertexData = {.deviceAddress = triangles_address +
+                                                                     vk::DeviceSize(pr.out_base) * 36},
+                                     .vertexStride = 3 * sizeof(float),
+                                     .maxVertex = pr.triangles * 3 - 1,
+                                     .indexType = vk::IndexType::eNoneKHR,
+                                 }},
+                    .flags = vk::GeometryFlagBitsKHR::eOpaque,
+                };
+                infos[i] = vk::AccelerationStructureBuildGeometryInfoKHR{
+                    .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+                    .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
+                             vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
+                    .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+                    .dstAccelerationStructure = pr.blas,
+                    .geometryCount = 1,
+                    .pGeometries = &geos[i],
+                    .scratchData = {.deviceAddress = pr.scratch},
+                };
+                ranges[i] = vk::AccelerationStructureBuildRangeInfoKHR{.primitiveCount = pr.triangles};
+                range_ptrs[i] = &ranges[i];
+            }
+            cmdbuf.buildAccelerationStructuresKHR(u32(infos.size()), infos.data(), range_ptrs.data());
+        }
+        if (!total_triangles) {
+            memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
+                           vk::AccessFlagBits2::eAccelerationStructureReadKHR);
+            return;
+        }
         vk::AccelerationStructureGeometryKHR blas_geometry{
             .geometryType = vk::GeometryTypeKHR::eTriangles,
             .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
@@ -934,7 +1439,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             .pGeometries = &tlas_geometry,
             .scratchData = {.deviceAddress = tlas_scratch_address},
         };
-        const vk::AccelerationStructureBuildRangeInfoKHR tlas_range{.primitiveCount = 1};
+        const vk::AccelerationStructureBuildRangeInfoKHR tlas_range{.primitiveCount = num_instances};
         cmdbuf.buildAccelerationStructuresKHR(tlas_info, &tlas_range);
         memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, Compute,
                        vk::AccessFlagBits2::eAccelerationStructureReadKHR);

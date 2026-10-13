@@ -114,7 +114,9 @@ void main() {
             // tilts rays into flat walls and floors.
             vec3 tri[3];
             rayQueryGetIntersectionTriangleVertexPositionsEXT(snap, true, tri);
-            vec3 Ng = cross(tri[1] - tri[0], tri[2] - tri[0]);
+            // Object space: cached static draws are world-space BLASes placed by the view matrix.
+            const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(snap, true);
+            vec3 Ng = mat3(o2w) * cross(tri[1] - tri[0], tri[2] - tri[0]);
             const float len_g = length(Ng);
             if (len_g > 1e-12) {
                 Ng /= len_g;
