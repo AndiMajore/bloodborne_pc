@@ -42,6 +42,8 @@ public:
         bool restart;
         bool triangle_list;
         bool non_indexed; // index_address 0, vertex i of the draw is index i
+        bool alpha_test;  // the pixel shader discards (foliage, vines): solid quads in the BVH
+        bool depth_write; // off: decals and overlays hugging other surfaces
     };
 
     explicit RayTracedAO(const Instance& instance, Scheduler& scheduler,
@@ -108,7 +110,9 @@ private:
     std::vector<GpuGeometry> geometries;
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
-    u32 skipped_topology = 0, skipped_no_address = 0;
+    u32 skipped_topology = 0, skipped_no_address = 0, skipped_alpha = 0, skipped_nowrite = 0;
+    bool include_alpha = false;   // settings "alpha=1": keep alpha-tested draws
+    bool include_nowrite = false; // settings "decals=1": keep draws without depth write
     bool readback_pending = false;
     u32 readback_frame = 0;
     u32 readback_triangles = 0;

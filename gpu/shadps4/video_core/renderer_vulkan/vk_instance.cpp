@@ -310,6 +310,7 @@ bool Instance::CreateDevice() {
     ray_query = add_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
                 add_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
                 add_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+    position_fetch = ray_query && add_extension(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
     dynamic_state_3 = add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
     if (dynamic_state_3) {
         dynamic_state_3_features =
@@ -646,10 +647,16 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceRayQueryFeaturesKHR{
             .rayQuery = true,
         },
+        vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR{
+            .rayTracingPositionFetch = true,
+        },
     };
     if (!ray_query) {
         device_chain.unlink<vk::PhysicalDeviceAccelerationStructureFeaturesKHR>();
         device_chain.unlink<vk::PhysicalDeviceRayQueryFeaturesKHR>();
+    }
+    if (!position_fetch) {
+        device_chain.unlink<vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR>();
     }
 
     if (!custom_border_color) {

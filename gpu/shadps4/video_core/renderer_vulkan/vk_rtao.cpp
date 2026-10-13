@@ -84,6 +84,10 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         std::puts("RTAO: ray queries unsupported by the driver, off");
         return;
     }
+    if (!instance.IsRayTracingPositionFetchSupported()) {
+        std::puts("RTAO: VK_KHR_ray_tracing_position_fetch unsupported by the driver, off");
+        return;
+    }
     if (!object_motion.Enabled() || !camera_motion.Enabled()) {
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
@@ -195,6 +199,8 @@ void RayTracedAO::PollSettings() {
         else if (key == "enabled") active = value != 0.0f;
         else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
         else if (key == "dump") dump_request = value;
+        else if (key == "alpha") include_alpha = value != 0.0f;
+        else if (key == "decals") include_nowrite = value != 0.0f;
     }
     std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, history %.2f, debug %u, "
                 "stage %u\n",
@@ -296,7 +302,8 @@ bool RayTracedAO::CreateAccelerationStructures() {
     };
     vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
         .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild |
+                 vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
         .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
         .geometryCount = 1,
         .pGeometries = &blas_geometry,
@@ -438,9 +445,11 @@ void RayTracedAO::OnFrameStart() {
     }
     if (frame % 600 == 0 && frame) {
         std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u; "
-                    "%u strips/other skipped, %u without index address), %u passes recorded in 600 frames\n",
+                    "%u strips/other, %u alpha-tested, %u without depth write, %u without index address "
+                    "skipped), %u passes recorded in 600 frames\n",
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
-                    max_triangles, skipped_topology, skipped_no_address, recorded);
+                    max_triangles, skipped_topology, skipped_alpha, skipped_nowrite, skipped_no_address,
+                    recorded);
         recorded = 0;
         ++reports;
     }
@@ -450,6 +459,8 @@ void RayTracedAO::OnFrameStart() {
     dropped_draws = 0;
     skipped_topology = 0;
     skipped_no_address = 0;
+    skipped_alpha = 0;
+    skipped_nowrite = 0;
     done_this_frame = false;
     last_color = {};
     mask_candidate = {};
@@ -468,6 +479,14 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     }
     if (!g.triangle_list) { // strips and the rest: not expanded (yet), counted
         ++skipped_topology;
+        return;
+    }
+    if (g.alpha_test && !include_alpha) {
+        ++skipped_alpha;
+        return;
+    }
+    if (!g.depth_write && !include_nowrite) {
+        ++skipped_nowrite;
         return;
     }
     if (g.index_address == 0 && !g.non_indexed) {
@@ -823,7 +842,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         };
         const vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
             .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild |
+                     vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
             .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
             .dstAccelerationStructure = blas,
             .geometryCount = 1,
