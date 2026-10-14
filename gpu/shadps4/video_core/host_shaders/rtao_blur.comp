@@ -8,11 +8,13 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0) uniform texture2D src_tex;             // half res: ao, view z
 layout(binding = 1, rg16f) uniform writeonly image2D dst_img;
+layout(binding = 2) uniform texture2D hist_tex;            // denoiser 2: b = accumulated frames
 
 layout(push_constant) uniform Constants {
     vec2 half_size;
     ivec2 dir;        // (1,0) or (0,1)
     float sigma;      // taps' falloff in texels (0 = copy)
+    uint use_n;       // 1: the width follows the accumulated frames (wide where few)
 };
 
 void main() {
@@ -25,6 +27,11 @@ void main() {
         imageStore(dst_img, hp, vec4(c, 0.0, 0.0));
         return;
     }
+    float width = sigma;
+    if (use_n != 0u) { // 2x at one frame, the base width at 4, half of it from 16 on
+        const float n = max(texelFetch(hist_tex, hp, 0).b, 1.0);
+        width = sigma * clamp(2.0 / sqrt(n), 0.5, 2.0);
+    }
     float ao = c.r, wsum = 1.0;
     const int taps = 3;
     for (int k = -taps; k <= taps; ++k) {
@@ -33,7 +40,7 @@ void main() {
         }
         const ivec2 sp = clamp(hp + dir * k, ivec2(0), ivec2(half_size) - 1);
         const vec2 s = texelFetch(src_tex, sp, 0).rg;
-        const float wg = exp(-float(k * k) / (2.0 * sigma * sigma));
+        const float wg = exp(-float(k * k) / (2.0 * width * width));
         const float wd = exp(-abs(s.g - c.g) / (0.03 * c.g + 0.1)); // same surface only
         const float w = wg * wd;
         ao += s.r * w;

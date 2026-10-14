@@ -29,6 +29,11 @@ layout(binding = 6, std140) uniform Constants {
     float ao_far;     // no AO beyond this distance (the BVH ends a radius later)
     uint normals;     // 0: the G-buffer's shading normal, 1: geometric, from the depth buffer
     float offset;     // extra origin offset along the normal, metres (on top of the ulp offset)
+    uint denoise;     // 1: temporal blend here; 2: raw output for rtao_temporal.comp
+    uint subpixel;    // 1: the sampled full-res pixel cycles through the 2x2 block per frame
+    uint falloff;     // 0: a hit counts 1 - 0.5 t/r; 1: binary hits within a random length in
+                      // [0, r] (linear falloff to 0 at the radius, expected value)
+    uint period;      // frames before the per-pixel noise repeats
 };
 
 const float PI = 3.14159265;
@@ -96,7 +101,9 @@ void TracePixel(ivec2 hp) {
     if (hp.x >= int(half_size.x) || hp.y >= int(half_size.y)) {
         return;
     }
-    const ivec2 fp = hp * 2 + 1;
+    // The full-res pixel this half-res texel samples: fixed, or one of the 2x2 block per frame
+    // (the temporal accumulation then covers all four and thin features stop aliasing).
+    const ivec2 fp = hp * 2 + (subpixel != 0u ? ivec2(frame & 1u, (frame >> 1) & 1u) : ivec2(1));
     const float depth = texelFetch(depth_tex, fp, 0).r;
     if (depth >= 1.0) {
         imageStore(out_img, hp, vec4(1.0, 1e9, 0.0, 0.0));
@@ -168,8 +175,11 @@ void TracePixel(ivec2 hp) {
     const vec3 T = normalize(cross(up, N));
     const vec3 B = cross(N, T);
     const float t_min = mode == 4u ? 0.1 : 0.0;
-    const float n0 = IGN(vec2(fp) + float(frame % 8u) * 5.588238);
-    const float n1 = IGN(vec2(fp.yx) + float(frame % 8u) * 1.618034);
+    // Noise per pixel, shifted per frame (64 frames for denoiser 2, whose history is longer).
+    // (period: from the settings; the shift 5.588 is Jimenez' interleaved gradient noise step.)
+    const float n0 = IGN(vec2(fp) + float(frame % period) * 5.588238);
+    const float n1 = IGN(vec2(fp.yx) + float(frame % period) * 1.618034);
+    const float n2 = IGN(vec2(fp) * 1.37 + float(frame % period) * 3.141593);
 
     float occlusion = 0.0;
     for (uint r = 0u; r < rays; ++r) {
@@ -180,9 +190,18 @@ void TracePixel(ivec2 hp) {
         const float cos_theta = sqrt(1.0 - u);
         const float sin_theta = sqrt(u);
         const vec3 dir = T * (cos(phi) * sin_theta) + B * (sin(phi) * sin_theta) + N * cos_theta;
-        const float t = OcclusionHit(origin, dir, t_min, radius);
-        if (t >= 0.0) {
-            occlusion += 1.0 - clamp(t / radius, 0.0, 1.0) * 0.5; // near hits count more
+        if (falloff == 1u) {
+            // A random ray length in [0, r]: a hit at distance t occludes with probability 1 - t/r,
+            // and the first hit is all that is needed (TerminateOnFirstHit stays exact).
+            const float len = radius * max(fract(n2 + float(r) * 0.6180340), 0.02);
+            if (OcclusionHit(origin, dir, t_min, len) >= 0.0) {
+                occlusion += 1.0;
+            }
+        } else {
+            const float t = OcclusionHit(origin, dir, t_min, radius);
+            if (t >= 0.0) {
+                occlusion += 1.0 - clamp(t / radius, 0.0, 1.0) * 0.5; // near hits count more
+            }
         }
     }
     float ao = 1.0 - occlusion / float(rays);
@@ -190,6 +209,10 @@ void TracePixel(ivec2 hp) {
         ao = mix(ao, 1.0, smoothstep(0.75 * ao_far, ao_far, dist));
     }
 
+    if (denoise == 2u) { // rtao_temporal.comp does the rest
+        imageStore(out_img, hp, vec4(ao, P.z, 0.0, 0.0));
+        return;
+    }
     // Temporal: last frame's value where this pixel was. Bilinear over the four half-res
     // texels around the reprojected position, each accepted only where its depth agrees
     // (nearest-texel fetches smeared sharp shadows into a trail), and the result is kept within

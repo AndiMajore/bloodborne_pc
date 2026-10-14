@@ -179,7 +179,16 @@ private:
     float snap_far = 30.0f;   // settings "snap=": the surface snap up to this depth (0 = off)
     float ao_far = 40.0f;     // settings "far=": no AO and no BVH beyond (0 = everything); 40 m saves ~2 ms
     float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
-    u32 rays = 6; // 8 cost 4.3 ms at 1.5M triangles (below 60 FPS)
+    // Denoiser 2 (settings "denoise=2"): raw trace output, then rtao_temporal.comp (accumulated
+    // frame count per pixel, variance clipping), and a blur whose width follows that count.
+    u32 denoise = 2;
+    float max_n = 32.0f;   // "maxn=": accumulated frames at most
+    float clip_k = 2.0f;   // "clipk=": history clip, mean +- clip_k sigma
+    float clip_floor = 0.1f; // "clipfloor=": the clip's half-width at least this
+    bool subpixel = false; // "subpixel=1": the 2x2 sample cycle (denoiser 2; costs stability: 3.6 vs 2.8%)
+    u32 falloff = 0;       // "falloff=1": binary hits within a random length (linear to 0 at r)
+    u32 noise_period = 8;  // "period=": frames before the per-pixel ray pattern repeats
+    u32 rays = 2; // denoiser 2 at 2 rays is steadier than denoiser 1 at 6 (Doll: 2.8 vs 4.4% of pixels)
     u32 max_triangles = 3000000; // 1.5M dropped ~10 draws per frame in the Hunter's Dream (blinking occluders)
     u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply
     u32 max_geometries = 8192;
@@ -219,7 +228,9 @@ private:
     bool readback_pending = false;
     u32 readback_frame = 0;
     u32 readback_triangles = 0;
-    Buffer dump_buffer;       // host: the half-res AO image (rg16f), "dump=" in the settings
+    Buffer dump_buffer;       // host: DumpFrames consecutive half-res AO images (rg16f), "dump="
+    static constexpr u32 DumpFrames = 8;
+    u32 dump_index = 0;       // frames copied so far
     bool dump_pending = false;
     u32 dump_frame = 0;
     float dump_request = 0.0f, dump_done = 0.0f;
@@ -244,9 +255,10 @@ private:
 
     // Pipelines
     vk::UniqueDescriptorSetLayout expand_desc_layout, trace_desc_layout, apply_desc_layout, blur_desc_layout,
-        probe_desc_layout;
-    vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout, probe_layout;
-    vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline;
+        probe_desc_layout, temporal_desc_layout;
+    vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout, probe_layout, temporal_layout;
+    vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline,
+        temporal_pipeline;
     vk::UniquePipeline rt_trace_pipeline; // ray-tracing pipeline variant of the trace
     bool use_rt_pipeline = false;          // settings "pipeline=": on when supported (BB_RTAO_PIPELINE=0: off)
     Buffer sbt_buffer;
@@ -280,6 +292,10 @@ private:
     vk::UniqueImageView motion_view;
     VideoCore::UniqueImage blur_image; // half res, the horizontal blur pass
     vk::UniqueImageView blur_view;
+    VideoCore::UniqueImage raw_image;  // half res, denoiser 2: this frame's trace (ao, z)
+    vk::UniqueImageView raw_view;
+    std::array<VideoCore::UniqueImage, 2> hist_images; // half res, denoiser 2: ao, z, N (ping-pong)
+    std::array<vk::UniqueImageView, 2> hist_views;
     struct ViewEntry {
         vk::Image image{};
         u64 uid = 0;

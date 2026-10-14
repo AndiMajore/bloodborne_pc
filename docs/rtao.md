@@ -38,8 +38,13 @@ it the port is unchanged.
      `.rchit` or `rtao_trace.comp`): a geometric normal from four depth taps, a short ray that snaps
      the origin onto the BVH surface (depth-biased draws sit centimetres off it), a
      Waechter-Binder ulp offset, then `rays` cosine-weighted rays over `radius`; temporal blend
-     with a bilinear, depth-tested, clamped history;
-   - `rtao_blur.comp`: separable 7-tap depth-aware blur (`sigma`);
+     with a bilinear, depth-tested, clamped history (denoiser 1), or raw output (denoiser 2);
+   - denoiser 2 (default): `rtao_temporal.comp` blends the raw AO with the reprojected history at
+     1/N, N being the per-pixel count of accumulated frames (up to `maxn`, reset where the depth
+     test fails), after clipping the history to the current 3x3 mean +- max(`clipk` sigma,
+     `clipfloor`);
+   - `rtao_blur.comp`: separable 7-tap depth-aware blur (`sigma`; with denoiser 2 twice as wide
+     where N is 1, half as wide from N = 16);
    - `rtao_apply.comp`: depth-aware 4x4 upsample, `ao^power`, written as
      `min(game mask, lerp(1, ao, strength))` (or ours alone with `replace=1`).
 
@@ -84,8 +89,14 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `strength` | `BB_RTAO_STRENGTH` | 1.0 | how much of the AO enters the mask |
 | `power` | `BB_RTAO_POWER` | 2.0 | `ao^power` (1 = physically plain, 2 = the chosen look) |
 | `radius` | `BB_RTAO_RADIUS` | 1.5 | ray length in metres |
-| `rays` | `BB_RTAO_RAYS` | 6 | AO rays per half-res pixel |
-| `history` | `BB_RTAO_HISTORY` | 0.5 | temporal weight (0.85 lagged visibly in motion) |
+| `rays` | `BB_RTAO_RAYS` | 2 | AO rays per half-res pixel (denoiser 1 wants 6) |
+| `denoise` | `BB_RTAO_DENOISE` | 2 | 2: accumulated frame count + variance clipping; 1: fixed history weight |
+| `maxn` | | 32 | denoiser 2: accumulated frames at most |
+| `clipk`, `clipfloor` | | 2, 0.1 | denoiser 2: history clip to mean +- max(clipk sigma, clipfloor) |
+| `subpixel` | | 0 | denoiser 2: 1 cycles the sampled pixel through the 2x2 block (thin features; less steady) |
+| `falloff` | | 0 | 1: binary hits within a random length, linear to 0 at the radius (lighter) |
+| `period` | | 8 | frames before a pixel's ray pattern repeats |
+| `history` | `BB_RTAO_HISTORY` | 0.5 | denoiser 1: temporal weight (0.85 lagged visibly in motion) |
 | `sigma` | `BB_RTAO_SIGMA` | 1.5 | half-res blur width in texels, 0 off |
 | `blur` | | 1 | 4x4 depth-aware upsample, 0: 2x2 |
 | `replace` | | 0 | 1: ignore the game's AO (or a shader pack's) in the mask |
@@ -103,7 +114,7 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | | `BB_RTAO_MAX_TRIANGLES` | 3000000 | per-frame triangle budget (buffers are sized for it) |
 | `stage` | `BB_RTAO_STAGE` | 5 | stop after: 1 expand, 2 BLAS, 3 TLAS, 4 trace, 5 apply |
 | `debug` | `BB_RTAO_DEBUG` | 0 | 1 raw AO, 2 camera-ray test, 3 normal facing, 4 AO with t_min 0.1 |
-| `dump` | | | change the value: the half-res AO image goes to `out/rtao_dump_<frame>.pgm` |
+| `dump` | | | change the value: 8 consecutive frames of the AO the apply gets go to `out/rtao_dump_<frame>_<k>.pgm`; the log line gives mean, mean frame-to-frame change and the share of pixels changing > 0.05 |
 | `ringtest` | | 0 | 1: every pass on ring slot 0 (tests the busy-slot skip) |
 
 ## Measurements (RX 9070 XT, RADV, 2560x1440 render, FSR to 4K)
@@ -128,7 +139,12 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Trace workgroups 8x4 instead of 8x8 (compute variant) | 1.78-1.81 ms | 1.77-1.78 ms (no effect, kept) |
 | Per-frame BLAS without ALLOW_DATA_ACCESS (RDNA4 compressed pairs; three sessions A/B/A) | build 1.65, trace 1.79 ms | build 2.41, trace 1.73 ms: kept the flag |
 | Cached BLASes compressed (no flag), cache on vs off | RT 4.53 ms | 4.20 ms |
-| Depth-derived normals + snap vs shading normals, self-hit share | 9.1% (shading, no snap) | 4.4% |
+| Depth-derived normals vs shading normals, self-hit share (pixels > 0.15 darker than with rays from 10 cm out; the snap was on in all four runs, a settings bug) | shading 6.4% / 9.1% | depth 4.4% / 6.2% |
+| Snap ray on vs off (6 rays / 1 ray) | trace 1.43 / 0.27 ms | 1.55 / 0.50 ms |
+| Trace vs ray count (pipeline, snap on) | 1 ray 0.50, 2 rays 0.70 ms | 6 rays 1.55, 12 rays 2.62 ms |
+| Denoiser 2 at 2 rays vs denoiser 1 at 6 (still camera, 8 frames) | GPU busy 16.63 ms, 4.40% of pixels change > 0.05, mean 0.787 | 15.68 ms, 2.78%, mean 0.786 |
+| Denoiser 2 clip floor (2 rays) | 0: mean 0.803 (biased light: all-miss 3x3 neighbourhoods clipped history to 1) | 0.1: 0.787 (raw trace mean 0.791) |
+| Defaults at the end of 2026-10-14 vs RT off | GPU busy 13.37 ms | 15.73 ms (60 FPS) |
 
 Known cost drivers: trace cost hardly depends on the ray count (it is traversal-bound: rays
 start in dense geometry and misses walk the whole local BVH); every pixel near the camera is
