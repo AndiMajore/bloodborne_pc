@@ -151,6 +151,26 @@ start in dense geometry and misses walk the whole local BVH); every pixel near t
 traced, so looking at the ground is the worst case; the per-frame BLAS is rebuilt from a
 non-indexed expansion every frame.
 
+## Memory
+
+Fixed buffers at the default 3M-triangle budget (RX 9070 XT, RADV):
+
+| What | MiB |
+|---|---|
+| Per-frame BLAS (3M triangles, ~200 B per triangle on RADV; same for fast build and fast trace) | 586 |
+| Its build scratch | 400 |
+| Triangle list (3M per-frame + 0.4M cache builds, 36 B each) | 117 |
+| Cache build scratch, TLAS, rings, probe buffers | ~93 |
+| Total RTAO fixed buffers | 1196 |
+| Object-motion capture with `BB_RTAO=1` (8M positions x 2 frames) | 256 |
+
+The static cache comes on top: at most `BB_RTAO_CACHE_MB` (1536) and at most a quarter of the
+device heap's remaining room (VMA's budget minus usage), re-checked every 10 seconds. A failed
+cache allocation halves the budget, trims the least recently seen BLASes and pauses cache builds
+for 10 seconds; the 10-second report says so (no per-allocation messages).
+`BB_RTAO_FAIL_ALLOC=N` makes every Nth cache allocation fail, to test that path. Compaction is not
+used: on RADV it saves nothing.
+
 ## Debugging
 
 - **GPU hangs**: breadcrumbs name the stage (`STUCK: pass rtao <stage>`); `stage=N` stops after a

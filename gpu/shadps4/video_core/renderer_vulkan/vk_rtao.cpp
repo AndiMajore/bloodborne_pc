@@ -148,6 +148,9 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 3000000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
     cache_enabled = EnvU32("BB_RTAO_CACHE", 1) != 0;
+    cache_budget_cap = u64(std::max(EnvU32("BB_RTAO_CACHE_MB", 1536), 16u)) << 20;
+    cache_budget = cache_budget_cap;
+    fail_test = EnvU32("BB_RTAO_FAIL_ALLOC", 0);
     denoise = std::clamp(EnvU32("BB_RTAO_DENOISE", 2), 1u, 2u);
     // ALLOW_DATA_ACCESS on the per-frame BLAS although nothing reads positions back: on RADV the
     // flag turns RDNA4's compressed triangle-pair leaves off, and their build cost more than
@@ -294,7 +297,7 @@ void RayTracedAO::PollSettings() {
         else if (key == "sigma") sigma = std::clamp(value, 0.0f, 4.0f);
         else if (key == "replace") replace_mask = value != 0.0f;
         else if (key == "snap") snap_far = std::max(value, 0.0f);
-        else if (key == "build") build_fast_trace = value != 0.0f;
+        else if (key == "build") build_fast_trace = value != 0.0f && fast_trace_allowed;
         else if (key == "far") ao_far = std::max(value, 0.0f);
         else if (key == "cache") cache_enabled = value != 0.0f;
         else if (key == "promote") promote_after = std::clamp(u32(value), 2u, 600u);
@@ -426,7 +429,7 @@ void RayTracedAO::CreateTracePipeline() {
 }
 
 bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
-                               bool host, vk::DeviceSize alignment) {
+                               bool host, vk::DeviceSize alignment, bool quiet) {
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = size,
@@ -450,7 +453,9 @@ bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsage
                   : vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &raw,
                                     &out.allocation, &info);
     if (result != VK_SUCCESS) {
-        std::printf("RTAO: buffer of %llu MiB failed (%d)\n", (unsigned long long)(size >> 20), result);
+        if (!quiet) {
+            std::printf("RTAO: buffer of %llu MiB failed (%d)\n", (unsigned long long)(size >> 20), result);
+        }
         return false;
     }
     out.buffer = raw;
@@ -458,6 +463,23 @@ bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsage
     out.mapped = info.pMappedData;
     out.address = instance.GetDevice().getBufferAddress({.buffer = out.buffer});
     return true;
+}
+
+// The cache's budget: at most BB_RTAO_CACHE_MB (1536), and at most a quarter of what the device
+// heap still has room for (VMA's budget minus usage, plus what the cache already holds).
+void RayTracedAO::UpdateCacheBudget() {
+    const auto& props = instance.GetPhysicalDevice().getMemoryProperties();
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(instance.GetAllocator(), budgets.data());
+    u64 room = 0;
+    for (u32 i = 0; i < props.memoryHeapCount; ++i) {
+        if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+            const u64 free = budgets[i].budget > budgets[i].usage ? budgets[i].budget - budgets[i].usage : 0;
+            room = std::max(room, free);
+        }
+    }
+    const u64 budget = std::min(cache_budget_cap, (room + cache_bytes) / 4);
+    cache_budget = std::max<u64>(budget, 64ull << 20);
 }
 
 void RayTracedAO::DestroyBuffer(Buffer& buffer) {
@@ -516,15 +538,30 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .geometryCount = 1,
         .pGeometries = &blas_geometry,
     };
-    // Sized for both build preferences ("build=" in the settings switches them live).
+    // Sized for fast build only (the per-frame BLAS; a fast-trace build measured no different and
+    // its sizes are larger): BB_RTAO_FAST_TRACE=1 sizes for both and allows build=1.
     auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
         vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
-    blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace | (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{});
-    const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
-        vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
-    blas_sizes.accelerationStructureSize =
-        std::max(blas_sizes.accelerationStructureSize, trace_sizes.accelerationStructureSize);
-    blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
+    {
+        auto trace_info = blas_info;
+        trace_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
+                           (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
+                                        : vk::BuildAccelerationStructureFlagsKHR{});
+        const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
+            vk::AccelerationStructureBuildTypeKHR::eDevice, trace_info, max_triangles);
+        std::printf("RTAO: per-frame BLAS for %u triangles: fast build %llu MiB + %llu scratch, fast trace %llu MiB + "
+                    "%llu scratch\n", max_triangles,
+                    (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
+                    (unsigned long long)(blas_sizes.buildScratchSize >> 20),
+                    (unsigned long long)(trace_sizes.accelerationStructureSize >> 20),
+                    (unsigned long long)(trace_sizes.buildScratchSize >> 20));
+        fast_trace_allowed = EnvU32("BB_RTAO_FAST_TRACE", 0) != 0;
+        if (fast_trace_allowed) {
+            blas_sizes.accelerationStructureSize =
+                std::max(blas_sizes.accelerationStructureSize, trace_sizes.accelerationStructureSize);
+            blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
+        }
+    }
     if (!CreateBuffer(blas_buffer, blas_sizes.accelerationStructureSize,
                       BU::eAccelerationStructureStorageKHR, false) ||
         !CreateBuffer(blas_scratch, blas_sizes.buildScratchSize, BU::eStorageBuffer, false,
@@ -590,6 +627,14 @@ bool RayTracedAO::CreateAccelerationStructures() {
     }
     SetObjectName(device, blas, "rtao per-frame BLAS");
     SetObjectName(device, tlas, "rtao TLAS");
+    for (const Buffer* buffer : {&table_buffer, &triangle_buffer, &instance_buffer, &probe_buffer, &constants_buffer,
+                                 &index_ring, &probe_chunks, &probe_ranges, &probe_partials, &blas_buffer,
+                                 &blas_scratch, &promo_scratch, &tlas_buffer, &tlas_scratch, &readback_buffer}) {
+        static_bytes += buffer->size;
+    }
+    std::printf("RTAO: fixed buffers %llu MiB (with the object-motion capture's %llu MiB of positions)\n",
+                (unsigned long long)(static_bytes >> 20),
+                (unsigned long long)((u64(object_motion.PositionsCapacity()) * 2 * 16) >> 20));
     std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
                 (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
                 (unsigned long long)(blas_sizes.buildScratchSize >> 20),
@@ -714,6 +759,11 @@ void RayTracedAO::OnFrameStart() {
                     "%u not stable yet, %u copies of a mesh not all cached, %u cache off\n",
                     per_frame_reasons[0], per_frame_reasons[1], per_frame_reasons[2], per_frame_reasons[3],
                     per_frame_reasons[4], per_frame_reasons[5]);
+        std::printf("RTAO: memory: fixed %llu MiB, cache %llu of %llu MiB budget%s\n",
+                    (unsigned long long)(static_bytes >> 20), (unsigned long long)(cache_bytes >> 20),
+                    (unsigned long long)(cache_budget >> 20),
+                    alloc_failures ? " (allocations failed: budget halved, cache builds paused)" : "");
+        alloc_failures = 0;
         promotions = 0;
         evictions_total = 0;
         if (recorded == 0 && !draws.empty() && active && !missing_pass_reported) {
@@ -969,6 +1019,11 @@ void RayTracedAO::TrimCache() {
                 break;
             }
             Evict(cache[key]);
+        }
+    }
+    if (frame % 600 == 0) {
+        if (frame >= promotion_pause_until) {
+            UpdateCacheBudget();
         }
     }
     if (frame % 600 == 0) { // forget draws not seen for a minute
@@ -1352,6 +1407,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         dynamic_list.push_back(gpu);
         dynamic_keys.push_back(d.key);
         if (!use_cache || d.skinned || e.blas || e.evictions >= 3 || e.stable < promote_after || too_big(e) ||
+            frame < promotion_pause_until ||
             gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles || promos.size() >= 256) {
             continue;
         }
@@ -1393,8 +1449,17 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             continue;
         }
         Buffer storage;
-        if (!CreateBuffer(storage, sizes.accelerationStructureSize,
-                          vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR, false)) {
+        static u32 attempts = 0;
+        const bool forced_failure = fail_test && ++attempts % fail_test == 0;
+        if (forced_failure || !CreateBuffer(storage, sizes.accelerationStructureSize,
+                                            vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR, false,
+                                            0, true)) {
+            // Out of memory (or the test): the cache is full. Halve its budget, trim it, and build
+            // nothing more for ten seconds.
+            ++alloc_failures;
+            cache_budget = std::max<u64>(cache_budget / 2, 64ull << 20);
+            promotion_pause_until = frame + 600;
+            TrimCache();
             continue;
         }
         const auto as = device.createAccelerationStructureKHR({

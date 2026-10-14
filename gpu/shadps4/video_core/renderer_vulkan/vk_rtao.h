@@ -144,7 +144,8 @@ private:
         vk::DeviceSize size{};
     };
     bool CreateBuffer(Buffer& buffer, vk::DeviceSize size, vk::BufferUsageFlags usage, bool host,
-                      vk::DeviceSize alignment = 0);
+                      vk::DeviceSize alignment = 0, bool quiet = false);
+    void UpdateCacheBudget();
     void DestroyBuffer(Buffer& buffer);
     bool EnsureResources(u32 width, u32 height);
     bool CreateAccelerationStructures();
@@ -172,7 +173,8 @@ private:
     float history = 0.5f; // 0.85 lagged visibly behind the camera (the Doll's cap)
     bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
     bool replace_mask = false; // settings "replace=1": the game's AO (or the GTAO pack) is ignored
-    bool build_fast_trace = false; // settings "build=1": BVH built for trace speed
+    bool build_fast_trace = false; // settings "build=1": BVH built for trace speed (BB_RTAO_FAST_TRACE=1)
+    bool fast_trace_allowed = false;
     bool data_access = true;       // BB_RTAO_DATA_ACCESS=0: the per-frame BLAS without ALLOW_DATA_ACCESS
     bool depth_normals = true;   // settings "normals=0": the G-buffer shading normal instead
     float origin_offset = 0.0f;  // settings "offset=": metres along the normal on top of the ulp offset
@@ -202,6 +204,11 @@ private:
     u32 promote_after = 8;               // matching observations before a draw is cached
     float cache_max_size = 20.0f;        // settings "maxsize=": bigger draws stay per frame (far cut)
     u64 cache_budget = 1536ull << 20;    // bytes of cached BLASes (least recently seen go first)
+    u64 cache_budget_cap = 1536ull << 20; // BB_RTAO_CACHE_MB; the heap budget may lower it further
+    u32 promotion_pause_until = 0;        // allocation failed: no cache builds until this frame
+    u32 alloc_failures = 0;               // (per report)
+    u32 fail_test = 0;                    // BB_RTAO_FAIL_ALLOC=N: every Nth cache allocation fails (test)
+    u64 static_bytes = 0;                 // the RTAO's fixed buffers (footprint report)
     std::unordered_map<u64, CacheEntry> cache;
     u64 cache_bytes = 0;
     u32 cache_instances = 0, cache_instance_tris = 0, promotions = 0, evictions_total = 0;
