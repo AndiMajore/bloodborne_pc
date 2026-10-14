@@ -87,7 +87,8 @@ the least recently seen draws leave it.
 
 The pass reads each draw's index buffer by device address when the game's AO pass ends, many draws
 later. Small ranges (up to 16 KiB, streamed by the buffer cache through a ring that is reused once
-the draw's tick is done) are copied from the game's memory at draw time into the RTAO's own ring.
+the draw's tick is done) are copied from the game's memory at draw time into the RTAO's own ring,
+through the runtime's backing view under its memory lock (`ReadBacking`; never a raw guest pointer).
 With layer memory (`BB_LAYER_MEMORY=1`, default off on AMD) the buffer cache holds the mirrors it
 retires during a frame over an index range the pass reads by address (the rasterizer registers
 each with `HoldRange`; `retire_hold.h`) until the pass is recorded, and only while the pass is on;
@@ -146,6 +147,7 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `debug` | `BB_RTAO_DEBUG` | 0 | 1 raw AO, 2 camera-ray test, 3 normal facing, 4 AO with t_min 0.1 |
 | `dump` | | | change the value: 8 consecutive frames of the AO the apply gets go to `out/rtao_dump_<frame>_<k>.pgm`; the log line gives mean, mean frame-to-frame change and the share of pixels changing > 0.05 |
 | `ringtest` | | 0 | 1: every pass on ring slot 0 (tests the busy-slot skip) |
+| `recreate` | | | change the value: the pass's images are made again, as on a resize (old ones go deferred) |
 
 ## Measurements (RX 9070 XT, RADV, 2560x1440 render, FSR to 4K)
 
@@ -234,4 +236,6 @@ went out (lanterns, candles; reproducibly from about 1.3 GiB, with VRAM far from
 - Strips and other non-list topologies are skipped (counted in the log).
 - The capture's positions are post-vertex-shader: anything the game moves in a later stage is not
   seen.
-- With the game's SSAO patched out there is nothing to write into.
+- With the game's SSAO patched out there is nothing to write into. RTAO writes only into the mask
+  of the pass identified by its upsample shader (0xc45c51cb); if a game update or a pack changed
+  that hash, the log says so once and nothing is written.

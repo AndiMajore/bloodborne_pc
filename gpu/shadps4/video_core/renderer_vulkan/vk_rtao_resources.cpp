@@ -573,7 +573,32 @@ bool RayTracedAO::EnsureResources(u32 w, u32 h) {
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
     };
-    scheduler.Finish();
+    // A new size (live presets, the upscaler's render size): the old images and the dump buffer
+    // go once the GPU is past the commands recorded so far; no full wait (history restarts).
+    if (ao_images[0]) {
+        struct Old {
+            std::vector<VideoCore::UniqueImage> images;
+            std::vector<vk::UniqueImageView> views;
+            Buffer dump;
+            VmaAllocator allocator;
+        };
+        auto old = std::make_unique<Old>();
+        old->allocator = allocator;
+        for (const auto& pair : std::initializer_list<std::pair<VideoCore::UniqueImage*, vk::UniqueImageView*>>{
+                 {&ao_images[0], &ao_views[0]}, {&ao_images[1], &ao_views[1]}, {&motion_image, &motion_view},
+                 {&blur_image, &blur_view}, {&raw_image, &raw_view}, {&hist_images[0], &hist_views[0]},
+                 {&hist_images[1], &hist_views[1]}}) {
+            old->views.push_back(std::move(*pair.second));
+            old->images.push_back(std::move(*pair.first));
+        }
+        old->dump = std::exchange(dump_buffer, Buffer{});
+        scheduler.DeferOperation([old = std::move(old)]() mutable {
+            if (old->dump.buffer) {
+                vmaDestroyBuffer(old->allocator, old->dump.buffer, old->dump.allocation);
+            }
+            old.reset();
+        });
+    }
     for (u32 i = 0; i < 2; ++i) {
         make_image(ao_images[i], ao_views[i], vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
     }
@@ -590,10 +615,6 @@ bool RayTracedAO::EnsureResources(u32 w, u32 h) {
     SetObjectName(device, vk::Image(ao_images[1]), "rtao ao 1");
     SetObjectName(device, vk::Image(motion_image), "rtao motion");
     SetObjectName(device, vk::Image(blur_image), "rtao blur");
-    if (dump_buffer.buffer) {
-        vmaDestroyBuffer(allocator, dump_buffer.buffer, dump_buffer.allocation);
-        dump_buffer = {};
-    }
     CreateBuffer(dump_buffer, vk::DeviceSize(DumpFrames) * ((w + 1) / 2) * ((h + 1) / 2) * 4,
                  vk::BufferUsageFlagBits::eTransferDst,
                  true);

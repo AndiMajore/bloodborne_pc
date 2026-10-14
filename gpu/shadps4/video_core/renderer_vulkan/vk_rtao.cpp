@@ -25,6 +25,7 @@
 #include "video_core/host_shaders/rtao_trace_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
@@ -311,6 +312,7 @@ void RayTracedAO::OnFrameStart() {
         ++reports;
     }
     TrimCache();
+    world_frames += draws.empty() ? 0 : 1;
     if (frame % 600 != 599) { // keep the last frame's totals for the report
         index_bytes_frame = index_bytes_small = 0;
     }
@@ -376,7 +378,7 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     }
     u64 index_address = g.index_address;
     bool index_mid_word = (g.index_address & 2) != 0;
-    if (g.index_host && g.index_bytes) {
+    if (g.index_guest && g.index_bytes) {
         // The frame's ring slot is the one the pass will use; only once the GPU is done with it.
         const u32 copy_slot = settings.ring_test ? 0u : frame % TableSlots;
         if (index_ring_state < 0) {
@@ -389,7 +391,11 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
             return;
         }
         const vk::DeviceSize offset = vk::DeviceSize(copy_slot) * IndexRingSlot + at;
-        std::memcpy(static_cast<u8*>(index_ring.mapped) + offset, g.index_host, g.index_bytes);
+        // Under the runtime's memory lock, from the backing store: the game may unmap or rewrite
+        // the range meanwhile (an unmapped page reads as zeros, which the expand drops as
+        // degenerate, not as a host fault).
+        Core::Memory::Instance()->ReadBacking(g.index_guest, static_cast<u8*>(index_ring.mapped) + offset,
+                                              g.index_bytes);
         index_ring_used = at + g.index_bytes;
         index_address = index_ring.address + offset;
         index_mid_word = false;
@@ -438,17 +444,10 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
         if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && settings.active &&
             !draws.empty()) {
             done_this_frame = true;
-            static bool reported_heuristic = false;
-            if (mask_by_heuristic && !reported_heuristic) {
-                reported_heuristic = true;
-                std::puts("RTAO: the AO mask was found by its format (R8, scene size): the game's "
-                          "upsample shader was not seen yet");
-            }
             Record(mask_candidate);
         }
         last_color = color;
         mask_candidate = {};
-        mask_by_heuristic = false;
     }
     if (!color || !depth_id || mask_candidate) {
         return;
@@ -462,16 +461,21 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
         mask_candidate = color;
         return;
     }
-    if (upsample_seen) {
-        return; // the shader identifies the pass; the format heuristic is not needed
+    // Only the identified pass is written. An R8 scene-size target while the shader was never
+    // seen is reported once (a game update or a shader pack that changed the upsample shader's
+    // hash), and left alone.
+    if (upsample_seen || heuristic_reported) {
+        return;
     }
     const auto& image = texture_cache.GetImage(color);
     const auto& depth = texture_cache.GetImage(depth_id);
     if (image.info.pixel_format == vk::Format::eR8Unorm &&
         image.info.size.width == depth.info.size.width &&
-        image.info.size.height == depth.info.size.height) {
-        mask_candidate = color;
-        mask_by_heuristic = true;
+        image.info.size.height == depth.info.size.height && world_frames > 120) {
+        heuristic_reported = true;
+        std::printf("RTAO: an R8 scene-size target (pixel shader 0x%llx) but the game's AO upsample "
+                    "shader 0x%llx was not seen: not written (has its hash changed?)\n",
+                    (unsigned long long)ps_hash, (unsigned long long)AoUpsampleShader);
     }
 }
 
@@ -482,6 +486,10 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     auto& depth = texture_cache.GetImage(depth_id);
     auto& normal = texture_cache.GetImage(normal_id);
     const u32 w = depth.info.size.width, h = depth.info.size.height;
+    if (settings.recreate_request != recreate_done) { // recreate=: as a resize would
+        recreate_done = settings.recreate_request;
+        width = 0;
+    }
     if (normal.info.size.width != w || normal.info.size.height != h || !EnsureResources(w, h)) {
         return;
     }
@@ -903,6 +911,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         static_parts.swap(static_build); // built in this pass
     }
     const vk::DeviceSize split_fetch_bytes = vk::DeviceSize(promo_used) * 36;
+    const vk::DeviceSize split_fetch_src = vk::DeviceSize(max_triangles) * 36; // the promotions' region
     probe_ticks[ring] = slot_ticks[slot];
     auto* table = static_cast<GpuGeometry*>(table_buffer.mapped) + size_t(slot) * max_geometries;
     std::memcpy(table, geometries.data(), geometries.size() * sizeof(GpuGeometry));
@@ -1127,7 +1136,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                                AsBuild, vk::AccessFlagBits2::eShaderRead);
             }
             if (split_fetch_now) { // the world-space copies of this frame, big meshes among them
-                const vk::BufferCopy region{vk::DeviceSize(max_triangles) * 36, 0, split_fetch_bytes};
+                const vk::BufferCopy region{split_fetch_src, 0, split_fetch_bytes};
                 cmdbuf.copyBuffer(triangles_handle, split_fetch_handle, region);
                 memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
                                vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);

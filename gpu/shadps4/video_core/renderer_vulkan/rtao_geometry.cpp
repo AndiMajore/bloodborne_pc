@@ -267,6 +267,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);
     else if (key == "dump") s.dump_request = value;
+    else if (key == "recreate") s.recreate_request = value;
     else return false;
     return true;
 }

@@ -52,8 +52,9 @@ public:
         u64 key;          // identity across frames (shader, buffers, ranges); the occurrence is added
         bool skinned;     // a bone palette: never cached
         // Small index ranges (the buffer cache streams them through a ring that is reused once the
-        // draw's tick is done): the game's memory, copied at draw time into the RTAO's own ring.
-        const void* index_host = nullptr;
+        // draw's tick is done): the guest address, copied at draw time into the RTAO's own ring
+        // through the runtime's backing view (Core::MemoryManager::ReadBacking; 0: none).
+        VAddr index_guest = 0;
         u32 index_bytes = 0;
     };
     /// True once per frame, after the pass was recorded (the caller releases what it held).
@@ -88,7 +89,7 @@ public:
     void AddGeometry(const Geometry& geometry);
     /// Every draw's first color target and fragment shader: the end of the game's AO upsample
     /// pass (pixel shader 0xc45c51cb into an R8 target of the scene size) is where the mask is
-    /// rewritten. Before that shader is seen, any R8 scene-size target qualifies.
+    /// rewritten. Nothing else is ever written.
     void OnColorTarget(VideoCore::ImageId color, u64 ps_hash);
     static constexpr u64 AoUpsampleShader = 0xc45c51cbull;
 
@@ -247,11 +248,13 @@ private:
     bool dump_pending = false;
     u32 dump_frame = 0;
     float dump_done = 0.0f;   // the last dump= value served
+    float recreate_done = 0.0f; // the last recreate= value served
     u32 recorded_total = 0;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};
-    bool upsample_seen = false;   // the game's upsample shader was seen: the heuristic is off
-    bool mask_by_heuristic = false;
+    bool upsample_seen = false;   // the game's upsample shader was seen
+    bool heuristic_reported = false; // an R8 scene-size target without it (reported once)
+    u32 world_frames = 0;            // frames with G-buffer draws
     bool missing_pass_reported = false;
     bool done_this_frame = false;
     u32 frame = 0;

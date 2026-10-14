@@ -137,6 +137,7 @@ struct Settings {
     u32 static_interval = 30;    // frames between rebuilds for a changed set (not for a move); 0: every pass // > 0: meshes bigger than cache_max_size are cached in pieces of this size
     bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
     float dump_request = 0.0f;
+    float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };
 
 /// One key=value; false for an unknown key. Values are clamped to their ranges.

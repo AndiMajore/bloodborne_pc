@@ -1830,14 +1830,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 // Small index ranges go through the buffer cache's stream ring, which may be reused
                 // before the RTAO pass reads them: the RTAO copies them from the game's memory now.
                 const u64 index_bytes = u64(regs.num_indices) * index_size;
-                const void* rtao_index_host =
+                const VAddr rtao_index_guest =
                     is_indexed && index_bytes <= VideoCore::BufferCache::STREAM_THRESHOLD &&
                             !buffer_cache.IsRegionGpuModified(index_address, index_bytes) &&
                             memory->IsValidGpuMapping(index_address, index_bytes) &&
                             memory->ClampRangeSize(index_address, index_bytes) == index_bytes
-                        ? reinterpret_cast<const void*>(index_address)
-                        : nullptr;
-                if (is_indexed && !rtao_index_host) { // read by address at the pass
+                        ? index_address
+                        : 0;
+                if (is_indexed && !rtao_index_guest) { // read by address at the pass
                     buffer_cache.HoldRange(index_address, index_bytes);
                 }
                 rtao->AddGeometry({
@@ -1863,8 +1863,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                                     (u64(regs.num_instances.NumInstances()) << 8) ^
                                                     u64(u32(base_vertex)) ^ (u64(first_instance) << 48)),
                     .skinned = skinned,
-                    .index_host = rtao_index_host,
-                    .index_bytes = rtao_index_host ? u32(regs.num_indices * index_size) : 0u,
+                    .index_guest = rtao_index_guest,
+                    .index_bytes = rtao_index_guest ? u32(regs.num_indices * index_size) : 0u,
                 });
             }
         }
