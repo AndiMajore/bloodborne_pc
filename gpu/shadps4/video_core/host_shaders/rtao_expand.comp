@@ -5,29 +5,16 @@
 #version 450
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64) in;
 
-struct Geometry {
-    uint store;          // positions base (vec4 index)
-    uint vertices;       // vertices per instance in the capture
-    uint instances;
-    uint first_vertex;
-    uint64_t index_address;
-    uint index_count;    // per instance
-    uint index16;        // 1: 16-bit indices
-    int base_vertex;
-    uint restart;        // 1: primitive restart on
-    uint triangle_offset; // first output triangle of this geometry
-    uint triangles;      // output triangles (index_count / 3 * instances)
-    uint out_base;       // first output triangle in the triangle buffer
-    uint flags;          // 1: world space (a static-cache build), 2: probed
-};
+#include "rtao_geometry.glsl"
+
 layout(binding = 0, std430) readonly buffer Geometries { Geometry geometries[]; };
 layout(binding = 1, std430) writeonly buffer Triangles { float vertices[]; }; // 9 floats per triangle
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Positions { vec4 p[]; };
-layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint w[]; };
 
 layout(push_constant) uniform Constants {
     uint64_t positions_address;
@@ -39,14 +26,6 @@ layout(push_constant) uniform Constants {
     vec4 inv_view[3];     // view -> world rows (world-space entries)
 };
 
-uint ReadIndex(Words words, uint index16, uint i) {
-    if (index16 != 0u) {
-        const uint j = i + ((index16 & 2u) != 0u ? 1u : 0u); // bit 1: the buffer starts mid-word
-        const uint word = words.w[j >> 1];
-        return (j & 1u) != 0u ? (word >> 16) : (word & 0xffffu);
-    }
-    return words.w[i];
-}
 
 void main() {
     const uint t = gl_GlobalInvocationID.x;

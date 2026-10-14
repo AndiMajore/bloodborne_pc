@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/types.h"
+#include "video_core/renderer_vulkan/rtao_geometry.h"
 
 namespace VideoCore {
 class TextureCache;
@@ -85,33 +86,12 @@ public:
     static constexpr u64 AoUpsampleShader = 0xc45c51cbull;
 
 private:
-    struct GpuGeometry {
-        u32 store, vertices, instances, first_vertex;
-        u64 index_address;
-        u32 index_count, index16;
-        s32 base_vertex;
-        u32 restart, triangle_offset, triangles;
-        u32 out_base; // first output triangle in the triangle buffer
-        u32 flags;    // GeoWorld: world space (a cache build); GeoProbe: measured for the cache
-    };
-    static_assert(sizeof(GpuGeometry) == 56);
-    static constexpr u32 GeoWorld = 1, GeoProbe = 2;
-
-    /// Per probed draw, written by rtao_probe.comp: world-space summary of its captured vertices.
-    struct ProbeStats {
-        u32 id, count;
-        float centroid[3], min[3], max[3], first[3];
-        u32 pad[2];
-    };
-    static_assert(sizeof(ProbeStats) == 64);
+    using GpuGeometry = Rtao::GpuGeometry;
+    using ProbeStats = Rtao::ProbeStats;
+    static constexpr u32 GeoWorld = Rtao::GeoWorld, GeoProbe = Rtao::GeoProbe;
 
     /// A draw seen over several frames: static ones get their own world-space BLAS.
-    struct CacheEntry {
-        u64 base = 0;          // the mesh (all copies of it share this)
-        u32 stable = 0;        // consecutive direct matching observations (stable draw order)
-        u32 evictions = 0;     // static, then changed: three times and the draw is never cached
-        bool have_stats = false;
-        ProbeStats stats{};
+    struct CacheEntry : Rtao::CacheState {
         u32 last_seen = 0;     // frame
         vk::AccelerationStructureKHR blas{};
         VmaAllocation allocation{};
@@ -130,11 +110,6 @@ private:
         u32 occurrence;
         bool skinned;
     };
-    static u64 KeyOf(u64 base, u32 occurrence) {
-        u64 key = (base ^ (u64(occurrence + 1) * 0x9E3779B97F4A7C15ull)) * 0xBF58476D1CE4E5B9ull;
-        key ^= key >> 31;
-        return key ? key : 1;
-    }
 
     struct Buffer {
         vk::Buffer buffer{};
@@ -154,7 +129,8 @@ private:
                              vk::ImageAspectFlags aspect);
     void Record(VideoCore::ImageId mask);
     void ReadProbes(u32 ring);
-    bool StatsMatch(const ProbeStats& a, const ProbeStats& b) const;
+    void WriteDump();      // vk_rtao_diagnostics.cpp
+    void ReportReadback(); // vk_rtao_diagnostics.cpp
     void Evict(CacheEntry& entry);
     void TrimCache();
 
@@ -166,33 +142,10 @@ private:
     ObjectMotion& object_motion;
 
     bool enabled = false;
-    u32 debug = 0; // 1: raw AO into the mask, 2: primary-ray test, 3: normal facing, 4: AO with t_min 0.1
-    float strength = 1.0f;
-    float power = 2.0f; // ao^power before the apply (the chosen look: 2 at radius 1.5; 1 = plain)
-    float radius = 1.5f;
-    float history = 0.5f; // 0.85 lagged visibly behind the camera (the Doll's cap)
-    bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
-    bool replace_mask = false; // settings "replace=1": the game's AO (or the GTAO pack) is ignored
-    bool build_fast_trace = false; // settings "build=1": BVH built for trace speed (BB_RTAO_FAST_TRACE=1)
+    Rtao::Settings settings; // environment at start, <user>/rtao.txt while the game runs
     bool fast_trace_allowed = false;
     bool data_access = true;       // BB_RTAO_DATA_ACCESS=0: the per-frame BLAS without ALLOW_DATA_ACCESS
-    bool depth_normals = true;   // settings "normals=0": the G-buffer shading normal instead
-    float origin_offset = 0.0f;  // settings "offset=": metres along the normal on top of the ulp offset
-    float snap_far = 30.0f;   // settings "snap=": the surface snap up to this depth (0 = off)
-    float ao_far = 40.0f;     // settings "far=": no AO and no BVH beyond (0 = everything); 40 m saves ~2 ms
-    float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
-    // Denoiser 2 (settings "denoise=2"): raw trace output, then rtao_temporal.comp (accumulated
-    // frame count per pixel, variance clipping), and a blur whose width follows that count.
-    u32 denoise = 2;
-    float max_n = 32.0f;   // "maxn=": accumulated frames at most
-    float clip_k = 2.0f;   // "clipk=": history clip, mean +- clip_k sigma
-    float clip_floor = 0.1f; // "clipfloor=": the clip's half-width at least this
-    bool subpixel = false; // "subpixel=1": the 2x2 sample cycle (denoiser 2; costs stability: 3.6 vs 2.8%)
-    u32 falloff = 0;       // "falloff=1": binary hits within a random length (linear to 0 at r)
-    u32 noise_period = 8;  // "period=": frames before the per-pixel ray pattern repeats
-    u32 rays = 2; // denoiser 2 at 2 rays is steadier than denoiser 1 at 6 (Doll: 2.8 vs 4.4% of pixels)
     u32 max_triangles = 3000000; // 1.5M dropped ~10 draws per frame in the Hunter's Dream (blinking occluders)
-    u32 stage = 5; // stop after this stage: 1 expand, 2 blas, 3 tlas, 4 trace, 5 apply
     u32 max_geometries = 8192;
 
     std::vector<GpuGeometry> geometries; // the frame's table (built in Record)
@@ -200,9 +153,6 @@ private:
     std::unordered_map<u64, u32> occurrences;
     std::unordered_map<u64, u32> max_copies; // per mesh: the most copies seen in one frame
     // Static cache
-    bool cache_enabled = true;           // settings "cache=0": everything per frame
-    u32 promote_after = 8;               // matching observations before a draw is cached
-    float cache_max_size = 20.0f;        // settings "maxsize=": bigger draws stay per frame (far cut)
     u64 cache_budget = 1536ull << 20;    // bytes of cached BLASes (least recently seen go first)
     u64 cache_budget_cap = 1536ull << 20; // BB_RTAO_CACHE_MB; the heap budget may lower it further
     u32 promotion_pause_until = 0;        // allocation failed: no cache builds until this frame
@@ -212,7 +162,7 @@ private:
     std::unordered_map<u64, CacheEntry> cache;
     u64 cache_bytes = 0;
     u32 cache_instances = 0, cache_instance_tris = 0, promotions = 0, evictions_total = 0;
-    u32 probes_read = 0, probes_stale = 0, probes_matched = 0, probes_changed = 0, mismatch_prints = 0;
+    u32 probes_read = 0, probes_stale = 0, probes_matched = 0, probes_changed = 0;
     u32 probes_reordered = 0;
     // Why per-frame triangles are not cached (the last pass): skinned, too big, blacklisted,
     // not stable yet, part of a mesh whose copies are not all cached, cache off.
@@ -227,14 +177,11 @@ private:
     u64 readback_tick = 0, dump_tick = 0;
     u32 skipped_busy = 0;   // passes skipped because the slot was still in use (per report)
     u64 index_bytes_frame = 0, index_bytes_small = 0; // measurement: index data per frame (all, < 16 KiB ranges)
-    bool ring_test = false; // settings "ringtest=1": every pass on slot 0 (exercises the skip)
     static constexpr u32 MaxInstances = 8192;
     static constexpr u32 PromoTriangles = 400000; // world-space triangles built per frame at most
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
     u32 skipped_topology = 0, skipped_no_address = 0, skipped_alpha = 0, skipped_nowrite = 0;
-    bool include_alpha = false;   // settings "alpha=1": keep alpha-tested draws
-    bool include_nowrite = false; // settings "decals=1": keep draws without depth write
     bool readback_pending = false;
     u32 readback_frame = 0;
     u32 readback_triangles = 0;
@@ -243,7 +190,7 @@ private:
     u32 dump_index = 0;       // frames copied so far
     bool dump_pending = false;
     u32 dump_frame = 0;
-    float dump_request = 0.0f, dump_done = 0.0f;
+    float dump_done = 0.0f;   // the last dump= value served
     u32 recorded_total = 0;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};
@@ -256,7 +203,6 @@ private:
     std::string settings_path;
     long long settings_mtime = -1;
     std::chrono::steady_clock::time_point last_poll{};
-    bool active = true; // the file's "enabled" (the pass stays constructed)
     bool history_valid = false;
     u32 last_recorded_frame = 0;            // frame of the previous traced pass
     std::array<float, 3> last_camera_world{}; // its camera position (cuts: > 1 m between passes)
@@ -270,7 +216,6 @@ private:
     vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline,
         temporal_pipeline;
     vk::UniquePipeline rt_trace_pipeline; // ray-tracing pipeline variant of the trace
-    bool use_rt_pipeline = false;          // settings "pipeline=": on when supported (BB_RTAO_PIPELINE=0: off)
     Buffer sbt_buffer;
     vk::StridedDeviceAddressRegionKHR sbt_rgen{}, sbt_miss{}, sbt_hit{};
     // Geometry and acceleration structures

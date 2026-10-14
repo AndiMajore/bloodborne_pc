@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: ray-traced AO, the logic without Vulkan (tests/test_rtao_geometry.cpp): the GPU records
+// shared with the shaders, draw identities, the static cache's observation state machine, and the
+// settings (environment at start, <user>/rtao.txt while the game runs). See docs/rtao.md.
+
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <string_view>
+
+namespace Rtao {
+
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+using s32 = std::int32_t;
+
+/// BB_RTAO=1: asked for (the object-motion capture and the pipeline cache size themselves by it
+/// before the pass exists).
+bool Requested();
+
+/// One draw of the frame's geometry table (rtao_geometry.glsl's Geometry).
+struct GpuGeometry {
+    u32 store, vertices, instances, first_vertex;
+    u64 index_address;
+    u32 index_count;
+    u32 index16;         // bit 0: 16-bit indices; bit 1: the buffer starts mid-word
+    s32 base_vertex;
+    u32 restart;
+    u32 triangle_offset; // first triangle of this draw in the expand dispatch
+    u32 triangles;
+    u32 out_base;        // first output triangle in the triangle buffer
+    u32 flags;           // GeoWorld, GeoProbe
+};
+static_assert(sizeof(GpuGeometry) == 56);
+inline constexpr u32 GeoWorld = 1, GeoProbe = 2;
+
+/// Per probed draw (rtao_probe.comp): world-space summary of its index-referenced vertices.
+struct ProbeStats {
+    u32 id, count;
+    float centroid[3], min[3], max[3], first[3];
+    u32 pad[2];
+};
+static_assert(sizeof(ProbeStats) == 64);
+
+/// A draw's identity in the static cache: the mesh (shader, buffers, ranges) and its occurrence in
+/// the frame (copies of a mesh drawn several times). Never 0.
+u64 KeyOf(u64 base, u32 occurrence);
+
+/// Same summary within the reconstruction tolerance (2 cm + 0.02% of the distance to the camera).
+bool StatsMatch(const ProbeStats& a, const ProbeStats& b, const std::array<float, 3>& camera);
+
+/// The bounding box's diagonal is longer than max_size (0: no limit).
+bool TooBig(const ProbeStats& stats, float max_size);
+
+/// What the static cache knows of a draw, without its Vulkan objects.
+struct CacheState {
+    u64 base = 0;
+    u32 stable = 0;     // consecutive direct matching observations
+    u32 evictions = 0;  // cached, then changed: three times and never again
+    bool have_stats = false;
+    ProbeStats stats{}; // the reference: the first observation of the current run
+    bool cached = false;
+};
+
+enum class Observation { First, Same, Reordered, Changed, ChangedEvict };
+
+/// One probe result for a draw: `sibling_match` says it matches another copy of the same mesh (the
+/// game reordered its draws). Updates the state; ChangedEvict means the caller must drop the
+/// draw's BLAS (and the state is no longer cached).
+Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match,
+                    const std::array<float, 3>& camera);
+
+/// May the draw get its own BLAS now?
+bool Promotable(const CacheState& state, bool skinned, bool too_big, u32 promote_after);
+
+/// Settings: environment at start, the live file while the game runs.
+struct Settings {
+    bool active = true;
+    float strength = 1.0f, power = 2.0f, radius = 1.5f, history = 0.5f, sigma = 1.5f;
+    u32 rays = 2, debug = 0, stage = 5, denoise = 2;
+    bool blur = true, replace_mask = false, depth_normals = true, use_rt_pipeline = true;
+    float snap_far = 30.0f, ao_far = 40.0f, origin_offset = 0.0f;
+    float max_n = 32.0f, clip_k = 2.0f, clip_floor = 0.1f;
+    bool subpixel = false;
+    u32 falloff = 0, noise_period = 8;
+    bool cache_enabled = true;
+    u32 promote_after = 8;
+    float cache_max_size = 20.0f;
+    bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
+    float dump_request = 0.0f;
+};
+
+/// One key=value; false for an unknown key. Values are clamped to their ranges.
+bool Apply(Settings& settings, std::string_view key, float value);
+
+/// The live file's text: key=value tokens separated by any white space (several per line too).
+/// Returns how many were applied; a change of denoiser sets `history_reset`.
+u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset);
+
+} // namespace Rtao

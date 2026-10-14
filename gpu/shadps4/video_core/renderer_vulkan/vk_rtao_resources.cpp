@@ -1,0 +1,522 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: ray-traced AO, buffers, pipelines, acceleration structures and the static cache's bookkeeping (see vk_rtao.cpp).
+#include "video_core/renderer_vulkan/vk_rtao.h"
+#include "video_core/renderer_vulkan/vk_rtao_internal.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <vk_mem_alloc.h>
+
+#include "video_core/host_shaders/rtao_trace_rchit.h"
+#include "video_core/host_shaders/rtao_trace_rgen.h"
+#include "video_core/host_shaders/rtao_trace_rmiss.h"
+#include "video_core/renderer_vulkan/vk_camera_motion.h"
+#include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/texture_cache/texture_cache.h"
+
+namespace Vulkan {
+using namespace RtaoInternal;
+
+void RayTracedAO::CreateTracePipeline() {
+    const auto device = instance.GetDevice();
+    const std::array modules = {CompileSPV(RTAO_TRACE_RGEN, device), CompileSPV(RTAO_TRACE_RMISS, device),
+                                CompileSPV(RTAO_TRACE_RCHIT, device)};
+    const std::array stages = {
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eRaygenKHR, .module = modules[0], .pName = "main"},
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eMissKHR, .module = modules[1], .pName = "main"},
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eClosestHitKHR, .module = modules[2], .pName = "main"},
+    };
+    const std::array groups = {
+        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 0,
+                                               .closestHitShader = VK_SHADER_UNUSED_KHR,
+                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
+        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 1,
+                                               .closestHitShader = VK_SHADER_UNUSED_KHR,
+                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
+        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup,
+                                               .generalShader = VK_SHADER_UNUSED_KHR, .closestHitShader = 2,
+                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
+    };
+    const auto result = device.createRayTracingPipelinesKHR(
+        {}, {}, vk::RayTracingPipelineCreateInfoKHR{
+                    .stageCount = u32(stages.size()),
+                    .pStages = stages.data(),
+                    .groupCount = u32(groups.size()),
+                    .pGroups = groups.data(),
+                    .maxPipelineRayRecursionDepth = 1,
+                    .layout = *trace_layout,
+                });
+    for (const auto module : modules) {
+        device.destroyShaderModule(module);
+    }
+    if (result.result != vk::Result::eSuccess || result.value.empty()) {
+        std::printf("RTAO: the ray-tracing-pipeline trace could not be created (%s)\n",
+                    vk::to_string(result.result).c_str());
+        return;
+    }
+    rt_trace_pipeline = vk::UniquePipeline(result.value[0], device);
+    // Shader binding table: raygen, miss, hit, each at a base-aligned offset.
+    const auto props = instance.GetPhysicalDevice()
+                           .getProperties2<vk::PhysicalDeviceProperties2,
+                                           vk::PhysicalDeviceRayTracingPipelinePropertiesKHR>()
+                           .get<vk::PhysicalDeviceRayTracingPipelinePropertiesKHR>();
+    const u32 handle_size = props.shaderGroupHandleSize;
+    const u32 stride = (handle_size + props.shaderGroupHandleAlignment - 1) / props.shaderGroupHandleAlignment *
+                       props.shaderGroupHandleAlignment;
+    const u32 base = std::max(props.shaderGroupBaseAlignment, stride);
+    std::vector<u8> handles(size_t(handle_size) * groups.size());
+    if (device.getRayTracingShaderGroupHandlesKHR(*rt_trace_pipeline, 0, u32(groups.size()), handles.size(),
+                                                  handles.data()) != vk::Result::eSuccess ||
+        !CreateBuffer(sbt_buffer, vk::DeviceSize(base) * groups.size(),
+                      vk::BufferUsageFlagBits::eShaderBindingTableKHR, true, props.shaderGroupBaseAlignment)) {
+        std::puts("RTAO: the shader binding table could not be created; the pipeline trace is off");
+        rt_trace_pipeline.reset();
+        return;
+    }
+    for (size_t i = 0; i < groups.size(); ++i) {
+        std::memcpy(static_cast<u8*>(sbt_buffer.mapped) + i * base, handles.data() + i * handle_size, handle_size);
+    }
+    vmaFlushAllocation(instance.GetAllocator(), sbt_buffer.allocation, 0, VK_WHOLE_SIZE);
+    sbt_rgen = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address, .stride = stride, .size = stride};
+    sbt_miss = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + base, .stride = stride, .size = stride};
+    sbt_hit = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + 2 * base, .stride = stride, .size = stride};
+    SetObjectName(device, *rt_trace_pipeline, "rtao trace (ray-tracing pipeline)");
+    std::puts("RTAO: the trace runs as a ray-tracing pipeline (pipeline=0 in rtao.txt: ray queries)");
+}
+
+bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
+                               bool host, vk::DeviceSize alignment, bool quiet) {
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VkBufferUsageFlags(usage | vk::BufferUsageFlagBits::eShaderDeviceAddress),
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VmaAllocationCreateInfo alloc_ci{
+        .flags = host ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                            VMA_ALLOCATION_CREATE_MAPPED_BIT
+                      : VmaAllocationCreateFlags{},
+        .usage = host ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .requiredFlags = host ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                              : VkMemoryPropertyFlags{},
+    };
+    VkBuffer raw{};
+    VmaAllocationInfo info{};
+    const VkResult result =
+        alignment ? vmaCreateBufferWithAlignment(instance.GetAllocator(), &buffer_ci, &alloc_ci,
+                                                 alignment, &raw, &out.allocation, &info)
+                  : vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &raw,
+                                    &out.allocation, &info);
+    if (result != VK_SUCCESS) {
+        if (!quiet) {
+            std::printf("RTAO: buffer of %llu MiB failed (%d)\n", (unsigned long long)(size >> 20), result);
+        }
+        return false;
+    }
+    out.buffer = raw;
+    out.size = size;
+    out.mapped = info.pMappedData;
+    out.address = instance.GetDevice().getBufferAddress({.buffer = out.buffer});
+    return true;
+}
+
+// The cache's budget: at most BB_RTAO_CACHE_MB (1536), and at most a quarter of what the device
+// heap still has room for (VMA's budget minus usage, plus what the cache already holds).
+void RayTracedAO::UpdateCacheBudget() {
+    const auto& props = instance.GetPhysicalDevice().getMemoryProperties();
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(instance.GetAllocator(), budgets.data());
+    u64 room = 0;
+    for (u32 i = 0; i < props.memoryHeapCount; ++i) {
+        if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+            const u64 free = budgets[i].budget > budgets[i].usage ? budgets[i].budget - budgets[i].usage : 0;
+            room = std::max(room, free);
+        }
+    }
+    const u64 budget = std::min(cache_budget_cap, (room + cache_bytes) / 4);
+    cache_budget = std::max<u64>(budget, 64ull << 20);
+}
+
+void RayTracedAO::DestroyBuffer(Buffer& buffer) {
+    if (buffer.buffer) {
+        vmaDestroyBuffer(instance.GetAllocator(), buffer.buffer, buffer.allocation);
+        buffer = {};
+    }
+}
+
+bool RayTracedAO::CreateAccelerationStructures() {
+    const auto device = instance.GetDevice();
+    const auto as_props = instance.GetPhysicalDevice()
+                              .getProperties2<vk::PhysicalDeviceProperties2,
+                                              vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
+                              .get<vk::PhysicalDeviceAccelerationStructurePropertiesKHR>();
+    scratch_alignment = std::max<vk::DeviceSize>(as_props.minAccelerationStructureScratchOffsetAlignment, 1);
+
+    using BU = vk::BufferUsageFlagBits;
+    if (!CreateBuffer(table_buffer, vk::DeviceSize(TableSlots) * max_geometries * sizeof(GpuGeometry),
+                      BU::eStorageBuffer, true) ||
+        !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles + PromoTriangles) * 9 * sizeof(float),
+                      BU::eStorageBuffer | BU::eAccelerationStructureBuildInputReadOnlyKHR |
+                          BU::eTransferSrc, // the debug readback copies from it
+                      false) ||
+        !CreateBuffer(instance_buffer,
+                      vk::DeviceSize(TableSlots) * MaxInstances * sizeof(vk::AccelerationStructureInstanceKHR),
+                      BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
+        !CreateBuffer(probe_buffer, vk::DeviceSize(ProbeSlots) * max_geometries * sizeof(ProbeStats),
+                      BU::eStorageBuffer, true) ||
+        !CreateBuffer(constants_buffer, vk::DeviceSize(TableSlots) * ConstantsStride, BU::eUniformBuffer, true) ||
+        !CreateBuffer(index_ring, vk::DeviceSize(TableSlots) * IndexRingSlot, BU::eStorageBuffer, true) ||
+        !CreateBuffer(probe_chunks, vk::DeviceSize(TableSlots) * MaxProbeChunks * 8, BU::eStorageBuffer, true) ||
+        !CreateBuffer(probe_ranges, vk::DeviceSize(TableSlots) * max_geometries * 8, BU::eStorageBuffer, true) ||
+        !CreateBuffer(probe_partials, vk::DeviceSize(MaxProbeChunks) * 48, BU::eStorageBuffer, false) ||
+        !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
+                      BU::eTransferDst, true)) {
+        return false;
+    }
+
+    // BLAS: one triangle geometry over the whole list, sized for the budget.
+    vk::AccelerationStructureGeometryKHR blas_geometry{
+        .geometryType = vk::GeometryTypeKHR::eTriangles,
+        .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                         .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                         .vertexData = {.deviceAddress = triangle_buffer.address},
+                         .vertexStride = 3 * sizeof(float),
+                         .maxVertex = max_triangles * 3 - 1,
+                         .indexType = vk::IndexType::eNoneKHR,
+                     }},
+        .flags = vk::GeometryFlagBitsKHR::eOpaque,
+    };
+    vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
+        .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{}),
+        .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+        .geometryCount = 1,
+        .pGeometries = &blas_geometry,
+    };
+    // Sized for fast build only (the per-frame BLAS; a fast-trace build measured no different and
+    // its sizes are larger): BB_RTAO_FAST_TRACE=1 sizes for both and allows build=1.
+    auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
+        vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
+    {
+        auto trace_info = blas_info;
+        trace_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
+                           (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
+                                        : vk::BuildAccelerationStructureFlagsKHR{});
+        const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
+            vk::AccelerationStructureBuildTypeKHR::eDevice, trace_info, max_triangles);
+        std::printf("RTAO: per-frame BLAS for %u triangles: fast build %llu MiB + %llu scratch, fast trace %llu MiB + "
+                    "%llu scratch\n", max_triangles,
+                    (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
+                    (unsigned long long)(blas_sizes.buildScratchSize >> 20),
+                    (unsigned long long)(trace_sizes.accelerationStructureSize >> 20),
+                    (unsigned long long)(trace_sizes.buildScratchSize >> 20));
+        fast_trace_allowed = EnvU32("BB_RTAO_FAST_TRACE", 0) != 0;
+        if (fast_trace_allowed) {
+            blas_sizes.accelerationStructureSize =
+                std::max(blas_sizes.accelerationStructureSize, trace_sizes.accelerationStructureSize);
+            blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
+        }
+    }
+    if (!CreateBuffer(blas_buffer, blas_sizes.accelerationStructureSize,
+                      BU::eAccelerationStructureStorageKHR, false) ||
+        !CreateBuffer(blas_scratch, blas_sizes.buildScratchSize, BU::eStorageBuffer, false,
+                      scratch_alignment)) {
+        return false;
+    }
+    blas = Check(device.createAccelerationStructureKHR({
+        .buffer = blas_buffer.buffer,
+        .size = blas_sizes.accelerationStructureSize,
+        .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+    }));
+    blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = blas});
+    // The static cache's builds of a frame share one scratch (sized for PromoTriangles, built for
+    // trace speed: a cached BLAS is built once and traced for many frames).
+    {
+        blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace; // cache: compressed
+        blas_geometry.geometry.triangles.maxVertex = PromoTriangles * 3 - 1;
+        const auto promo_sizes = device.getAccelerationStructureBuildSizesKHR(
+            vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, PromoTriangles);
+        // Room for the alignment of many small builds.
+        if (!CreateBuffer(promo_scratch, promo_sizes.buildScratchSize + 512 * scratch_alignment,
+                          BU::eStorageBuffer, false, scratch_alignment)) {
+            return false;
+        }
+    }
+
+    // TLAS: one instance, identity (the triangles are already in view space).
+    vk::AccelerationStructureGeometryKHR tlas_geometry{
+        .geometryType = vk::GeometryTypeKHR::eInstances,
+        .geometry = {.instances = vk::AccelerationStructureGeometryInstancesDataKHR{
+                         .arrayOfPointers = false,
+                         .data = {.deviceAddress = instance_buffer.address},
+                     }},
+    };
+    vk::AccelerationStructureBuildGeometryInfoKHR tlas_info{
+        .type = vk::AccelerationStructureTypeKHR::eTopLevel,
+        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+        .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+        .geometryCount = 1,
+        .pGeometries = &tlas_geometry,
+    };
+    const auto tlas_sizes = device.getAccelerationStructureBuildSizesKHR(
+        vk::AccelerationStructureBuildTypeKHR::eDevice, tlas_info, MaxInstances);
+    if (!CreateBuffer(tlas_buffer, tlas_sizes.accelerationStructureSize,
+                      BU::eAccelerationStructureStorageKHR, false) ||
+        !CreateBuffer(tlas_scratch, tlas_sizes.buildScratchSize, BU::eStorageBuffer, false,
+                      scratch_alignment)) {
+        return false;
+    }
+    tlas = Check(device.createAccelerationStructureKHR({
+        .buffer = tlas_buffer.buffer,
+        .size = tlas_sizes.accelerationStructureSize,
+        .type = vk::AccelerationStructureTypeKHR::eTopLevel,
+    }));
+    for (const auto& [buffer, name] : std::initializer_list<std::pair<const Buffer*, const char*>>{
+             {&table_buffer, "rtao table"}, {&triangle_buffer, "rtao triangles"},
+             {&instance_buffer, "rtao instances"}, {&probe_buffer, "rtao probe results"},
+             {&constants_buffer, "rtao constants"}, {&blas_buffer, "rtao per-frame BLAS"},
+             {&blas_scratch, "rtao BLAS scratch"}, {&promo_scratch, "rtao cache scratch"},
+             {&tlas_buffer, "rtao TLAS"}, {&tlas_scratch, "rtao TLAS scratch"},
+             {&readback_buffer, "rtao readback"}, {&index_ring, "rtao index ring"}}) {
+        SetObjectName(device, buffer->buffer, name);
+    }
+    SetObjectName(device, blas, "rtao per-frame BLAS");
+    SetObjectName(device, tlas, "rtao TLAS");
+    for (const Buffer* buffer : {&table_buffer, &triangle_buffer, &instance_buffer, &probe_buffer, &constants_buffer,
+                                 &index_ring, &probe_chunks, &probe_ranges, &probe_partials, &blas_buffer,
+                                 &blas_scratch, &promo_scratch, &tlas_buffer, &tlas_scratch, &readback_buffer}) {
+        static_bytes += buffer->size;
+    }
+    std::printf("RTAO: fixed buffers %llu MiB (with the object-motion capture's %llu MiB of positions)\n",
+                (unsigned long long)(static_bytes >> 20),
+                (unsigned long long)((u64(object_motion.PositionsCapacity()) * 2 * 16) >> 20));
+    std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
+                (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
+                (unsigned long long)(blas_sizes.buildScratchSize >> 20),
+                (unsigned long long)(triangle_buffer.size >> 20));
+    return true;
+}
+
+void RayTracedAO::Evict(CacheEntry& entry) {
+    if (entry.blas) {
+        const auto device = instance.GetDevice();
+        scheduler.DeferOperation([device, allocator = instance.GetAllocator(), blas = entry.blas,
+                                  buffer = entry.buffer, allocation = entry.allocation] {
+            device.destroyAccelerationStructureKHR(blas);
+            vmaDestroyBuffer(allocator, buffer, allocation);
+        });
+        cache_bytes -= entry.bytes;
+    }
+    entry.blas = vk::AccelerationStructureKHR{};
+    entry.cached = false;
+    entry.buffer = vk::Buffer{};
+    entry.allocation = VmaAllocation{};
+    entry.address = 0;
+    entry.bytes = 0;
+    entry.triangles = 0;
+}
+
+void RayTracedAO::ReadProbes(u32 ring) {
+    const u32 id = probe_ids[ring];
+    if (!id) {
+        return;
+    }
+    probe_ids[ring] = 0;
+    vmaInvalidateAllocation(instance.GetAllocator(), probe_buffer.allocation,
+                            vk::DeviceSize(ring) * max_geometries * sizeof(ProbeStats),
+                            vk::DeviceSize(max_geometries) * sizeof(ProbeStats));
+    const auto* stats = static_cast<const ProbeStats*>(probe_buffer.mapped) + size_t(ring) * max_geometries;
+    const auto& keys = probe_keys[ring];
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (!keys[i]) {
+            continue;
+        }
+        if (stats[i].id != id) {
+            ++probes_stale; // the GPU has not written it (yet)
+            continue;
+        }
+        ++probes_read;
+        ProbeStats s;
+        std::memcpy(&s, &stats[i], sizeof(s));
+        if (s.id != id) {
+            continue;
+        }
+        const auto it = cache.find(keys[i]);
+        if (it == cache.end()) {
+            continue;
+        }
+        CacheEntry& e = it->second;
+        // Another copy of the same mesh in this slot (the game sorts draws by distance): a reorder.
+        bool sibling = false;
+        if (e.have_stats && !Rtao::StatsMatch(e.stats, s, camera_world)) {
+            const auto copies = max_copies.find(e.base);
+            for (u32 o = 0; copies != max_copies.end() && o < copies->second && !sibling; ++o) {
+                const auto other = cache.find(Rtao::KeyOf(e.base, o));
+                sibling = other != cache.end() && &other->second != &e && other->second.have_stats &&
+                          Rtao::StatsMatch(other->second.stats, s, camera_world);
+            }
+        }
+        switch (Rtao::Observe(e, s, sibling, camera_world)) {
+        case Rtao::Observation::First:
+            break;
+        case Rtao::Observation::Same:
+            ++probes_matched;
+            break;
+        case Rtao::Observation::Reordered:
+            ++probes_reordered;
+            break;
+        case Rtao::Observation::Changed:
+            ++probes_changed;
+            break;
+        case Rtao::Observation::ChangedEvict: // cached, then it moved (a door, a lift)
+            ++probes_changed;
+            ++evictions_total;
+            Evict(e);
+            break;
+        }
+    }
+}
+
+void RayTracedAO::TrimCache() {
+    if (cache_bytes > cache_budget) {
+        std::vector<std::pair<u32, u64>> order; // last seen, key
+        for (const auto& [key, e] : cache) {
+            if (e.blas && e.last_seen != frame) {
+                order.emplace_back(e.last_seen, key);
+            }
+        }
+        std::sort(order.begin(), order.end());
+        for (const auto& [seen, key] : order) {
+            if (cache_bytes <= cache_budget * 9 / 10) {
+                break;
+            }
+            Evict(cache[key]);
+        }
+    }
+    if (frame % 600 == 0) {
+        if (frame >= promotion_pause_until) {
+            UpdateCacheBudget();
+        }
+    }
+    if (frame % 600 == 0) { // forget draws not seen for a minute
+        for (auto it = cache.begin(); it != cache.end();) {
+            if (frame - it->second.last_seen > 3600) {
+                if (it->second.blas) {
+                    Evict(it->second);
+                }
+                it = cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+}
+
+bool RayTracedAO::EnsureResources(u32 w, u32 h) {
+    if (width == w && height == h && ao_images[0]) {
+        return true;
+    }
+    const auto device = instance.GetDevice();
+    const auto allocator = instance.GetAllocator();
+    const auto make_image = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
+                                vk::Format format, u32 iw, u32 ih) {
+        view.reset();
+        image = VideoCore::UniqueImage(device, allocator);
+        image.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {iw, ih, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                     vk::ImageUsageFlagBits::eTransferSrc, // the dump= copy
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        view = Check(device.createImageViewUnique({
+            .image = vk::Image(image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+    };
+    scheduler.Finish();
+    for (u32 i = 0; i < 2; ++i) {
+        make_image(ao_images[i], ao_views[i], vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
+    }
+    make_image(motion_image, motion_view, vk::Format::eR16G16Sfloat, w, h);
+    make_image(blur_image, blur_view, vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
+    make_image(raw_image, raw_view, vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
+    for (u32 i = 0; i < 2; ++i) {
+        make_image(hist_images[i], hist_views[i], vk::Format::eR16G16B16A16Sfloat, (w + 1) / 2, (h + 1) / 2);
+    }
+    SetObjectName(device, vk::Image(raw_image), "rtao raw");
+    SetObjectName(device, vk::Image(hist_images[0]), "rtao history 0");
+    SetObjectName(device, vk::Image(hist_images[1]), "rtao history 1");
+    SetObjectName(device, vk::Image(ao_images[0]), "rtao ao 0");
+    SetObjectName(device, vk::Image(ao_images[1]), "rtao ao 1");
+    SetObjectName(device, vk::Image(motion_image), "rtao motion");
+    SetObjectName(device, vk::Image(blur_image), "rtao blur");
+    if (dump_buffer.buffer) {
+        vmaDestroyBuffer(allocator, dump_buffer.buffer, dump_buffer.allocation);
+        dump_buffer = {};
+    }
+    CreateBuffer(dump_buffer, vk::DeviceSize(DumpFrames) * ((w + 1) / 2) * ((h + 1) / 2) * 4,
+                 vk::BufferUsageFlagBits::eTransferDst,
+                 true);
+    dump_pending = false;
+    width = w;
+    height = h;
+    history_valid = false;
+    ao_index = 0;
+    return true;
+}
+
+vk::ImageView RayTracedAO::CachedView(const VideoCore::Image& image, vk::Format format,
+                                      vk::ImageAspectFlags aspect) {
+    const vk::Image handle = image.GetImage();
+    ViewEntry* oldest = &view_cache[0];
+    for (auto& entry : view_cache) {
+        if (entry.view && entry.image == handle && entry.uid == image.image_uid &&
+            entry.format == format && entry.aspect == aspect) {
+            entry.last_use = ++view_uses;
+            return entry.view;
+        }
+        if (entry.last_use < oldest->last_use) {
+            oldest = &entry;
+        }
+    }
+    const auto device = instance.GetDevice();
+    if (oldest->view) {
+        scheduler.DeferOperation([device, view = oldest->view] { device.destroyImageView(view); });
+    }
+    *oldest = {
+        .image = handle,
+        .uid = image.image_uid,
+        .format = format,
+        .aspect = aspect,
+        .view = Check(device.createImageView({
+            .image = handle,
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .subresourceRange = {aspect, 0, 1, 0, 1},
+        })),
+        .last_use = ++view_uses,
+    };
+    return oldest->view;
+}
+
+} // namespace Vulkan

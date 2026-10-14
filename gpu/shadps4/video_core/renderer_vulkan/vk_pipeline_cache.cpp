@@ -26,6 +26,7 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "video_core/renderer_vulkan/rtao_geometry.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -849,8 +850,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         static const bool all_motion = [] {
             // bbport: the ray-traced AO (vk_rtao.cpp) needs every G-buffer draw captured.
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
-            const char* rtao = std::getenv("BB_RTAO");
-            return (value && value[0] == '1') || (rtao && rtao[0] == '1');
+            return (value && value[0] == '1') || Rtao::Requested();
         }();
         if (all_motion) {
             sel.motion = true;

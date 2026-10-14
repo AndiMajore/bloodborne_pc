@@ -178,6 +178,10 @@ target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::X11 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(rtao-geometry-test EXCLUDE_FROM_ALL ../tests/test_rtao_geometry.cpp
+               shadps4/video_core/renderer_vulkan/rtao_geometry.cpp)
+target_compile_options(rtao-geometry-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(rtao-geometry-test PRIVATE shadps4)
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)

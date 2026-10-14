@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdlib>
+#include "video_core/renderer_vulkan/rtao_geometry.h"
 
 #include <array>
 #include "video_core/renderer_vulkan/motion_history.h"
@@ -110,8 +111,7 @@ private:
     // bbport: twice the room with the ray-traced AO, which needs every G-buffer draw's positions
     // (at 4M the capture was full in the Hunter's Dream and skipped draws changed per frame).
     static u32 ChoosePositionsPerFrame() noexcept {
-        const char* rtao = std::getenv("BB_RTAO");
-        return (rtao && rtao[0] == '1') ? (8u << 20) : (4u << 20);
+        return Rtao::Requested() ? (8u << 20) : (4u << 20);
     }
     const u32 PositionsPerFrame = ChoosePositionsPerFrame();
     Motion::History history{PositionsPerFrame};

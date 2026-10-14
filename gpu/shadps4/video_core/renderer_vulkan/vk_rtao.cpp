@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_rtao.h"
+#include "video_core/renderer_vulkan/vk_rtao_internal.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <iterator>
 #include <sys/stat.h>
 #include "common/path_util.h"
 
@@ -21,9 +23,6 @@
 #include "video_core/host_shaders/rtao_probe_comp.h"
 #include "video_core/host_shaders/rtao_temporal_comp.h"
 #include "video_core/host_shaders/rtao_trace_comp.h"
-#include "video_core/host_shaders/rtao_trace_rchit.h"
-#include "video_core/host_shaders/rtao_trace_rgen.h"
-#include "video_core/host_shaders/rtao_trace_rmiss.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
@@ -36,98 +35,14 @@
 
 namespace Vulkan {
 
-namespace {
-struct ExpandConstants {
-    u64 positions_address;
-    u64 pad; // std430: the vec4 below is 16-byte aligned in the shader's push block
-    std::array<float, 4> proj;
-    u32 num_geometries;
-    u32 total_triangles;
-    float far_cut;
-    u32 pad1;
-    std::array<float, 12> inv_view; // view -> world rows (world-space entries)
-};
-struct ProbeConstants {
-    u64 positions_address;
-    u32 num_geometries;
-    u32 id;
-    std::array<float, 4> proj;
-    std::array<float, 12> inv_view;
-    u32 pass_index;
-    u32 num_chunks;
-};
-static_assert(sizeof(ProbeConstants) == 88 && offsetof(ProbeConstants, pass_index) == 80);
-struct TraceConstants {
-    std::array<float, 12> view;
-    std::array<float, 4> proj;
-    std::array<float, 2> full_size;
-    std::array<float, 2> half_size;
-    std::array<float, 2> jitter;
-    float radius;
-    float history;
-    u32 rays;
-    u32 frame;
-    u32 mode; // 0 ao, 2 primary-ray test
-    float snap_far;
-    float ao_far;
-    u32 normals;
-    float offset;
-    u32 denoise;
-    u32 subpixel;
-    u32 falloff;
-    u32 period;
-};
-struct TemporalConstants {
-    std::array<float, 2> half_size;
-    std::array<s32, 2> sub;
-    float max_n;
-    float clip_k;
-    u32 history_ok;
-    float clip_floor;
-};
-static_assert(sizeof(TemporalConstants) == 32);
-struct ApplyConstants {
-    std::array<float, 4> proj;
-    std::array<float, 2> full_size;
-    std::array<float, 2> half_size;
-    float strength;
-    u32 debug;
-    float power;
-    u32 blur;
-    u32 replace;
-    u32 pad1;
-};
-static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
-static_assert(sizeof(TraceConstants) == 140 && offsetof(TraceConstants, falloff) == 132);
-struct BlurConstants {
-    std::array<float, 2> half_size;
-    std::array<s32, 2> dir;
-    float sigma;
-    u32 use_n;
-};
-static_assert(sizeof(ApplyConstants) == 56);
-static_assert(sizeof(BlurConstants) == 24);
-float EnvFloat(const char* name, float fallback) {
-    const char* value = std::getenv(name);
-    return value ? std::strtof(value, nullptr) : fallback;
-}
-u32 EnvU32(const char* name, u32 fallback) {
-    const char* value = std::getenv(name);
-    return value ? u32(std::strtoul(value, nullptr, 10)) : fallback;
-}
-constexpr auto AsBuild = vk::PipelineStageFlagBits2::eAccelerationStructureBuildKHR;
-constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
-// The trace runs in compute (ray queries) or as a ray-generation shader (pipeline=1).
-constexpr auto TraceStages = Compute | vk::PipelineStageFlagBits2::eRayTracingShaderKHR;
-} // namespace
+using namespace RtaoInternal;
 
 RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
                          VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
                          CameraMotion& camera_motion_, ObjectMotion& object_motion_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
       runtime{runtime_}, camera_motion{camera_motion_}, object_motion{object_motion_} {
-    const char* env = std::getenv("BB_RTAO");
-    if (!env || env[0] != '1') {
+    if (!Rtao::Requested()) {
         return;
     }
     if (!instance.IsRayQuerySupported()) {
@@ -138,20 +53,20 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
     }
-    debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 4u);
-    strength = std::clamp(EnvFloat("BB_RTAO_STRENGTH", 1.0f), 0.0f, 1.0f);
-    radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
-    power = std::clamp(EnvFloat("BB_RTAO_POWER", 2.0f), 0.1f, 8.0f);
-    history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.5f), 0.0f, 0.98f);
-    sigma = std::clamp(EnvFloat("BB_RTAO_SIGMA", 1.5f), 0.0f, 4.0f);
-    rays = std::clamp(EnvU32("BB_RTAO_RAYS", 2), 1u, 32u);
+    settings.debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 4u);
+    settings.strength = std::clamp(EnvFloat("BB_RTAO_STRENGTH", 1.0f), 0.0f, 1.0f);
+    settings.radius = std::max(EnvFloat("BB_RTAO_RADIUS", 1.5f), 0.05f);
+    settings.power = std::clamp(EnvFloat("BB_RTAO_POWER", 2.0f), 0.1f, 8.0f);
+    settings.history = std::clamp(EnvFloat("BB_RTAO_HISTORY", 0.5f), 0.0f, 0.98f);
+    settings.sigma = std::clamp(EnvFloat("BB_RTAO_SIGMA", 1.5f), 0.0f, 4.0f);
+    settings.rays = std::clamp(EnvU32("BB_RTAO_RAYS", 2), 1u, 32u);
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 3000000), 10000u, 16000000u);
-    stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
-    cache_enabled = EnvU32("BB_RTAO_CACHE", 1) != 0;
+    settings.stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
+    settings.cache_enabled = EnvU32("BB_RTAO_CACHE", 1) != 0;
     cache_budget_cap = u64(std::max(EnvU32("BB_RTAO_CACHE_MB", 1536), 16u)) << 20;
     cache_budget = cache_budget_cap;
     fail_test = EnvU32("BB_RTAO_FAIL_ALLOC", 0);
-    denoise = std::clamp(EnvU32("BB_RTAO_DENOISE", 2), 1u, 2u);
+    settings.denoise = std::clamp(EnvU32("BB_RTAO_DENOISE", 2), 1u, 2u);
     // ALLOW_DATA_ACCESS on the per-frame BLAS although nothing reads positions back: on RADV the
     // flag turns RDNA4's compressed triangle-pair leaves off, and their build cost more than
     // their traversal saved (Doll, three sessions: build 1.65 vs 2.41 ms, trace 1.79 vs 1.73 ms).
@@ -235,7 +150,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     if (rt_pipeline_supported) {
         CreateTracePipeline();
         // Measured at the Doll: trace 1.40-1.44 ms as a pipeline vs 1.62-1.64 ms with ray queries.
-        use_rt_pipeline = rt_trace_pipeline && EnvU32("BB_RTAO_PIPELINE", 1) != 0;
+        settings.use_rt_pipeline = rt_trace_pipeline && EnvU32("BB_RTAO_PIPELINE", 1) != 0;
     }
     // Names for validation messages and captures.
     SetObjectName(device, *expand_pipeline, "rtao expand");
@@ -251,7 +166,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     }
     enabled = true;
     std::printf("RTAO: on, %u rays, denoiser %u, radius %.2f, strength %.2f, up to %u triangles%s\n",
-                rays, denoise, radius, strength, max_triangles, debug ? ", debug view" : "");
+                settings.rays, settings.denoise, settings.radius, settings.strength, max_triangles, settings.debug ? ", debug view" : "");
     if (const char* file = std::getenv("BB_RTAO_FILE")) {
         settings_path = file;
     } else {
@@ -276,59 +191,22 @@ void RayTracedAO::PollSettings() {
     }
     settings_mtime = mtime;
     std::ifstream file(settings_path);
-    std::string line;
-    while (std::getline(file, line)) {
-        const auto eq = line.find('=');
-        if (eq == std::string::npos || line[0] == '#') {
-            continue;
-        }
-        const std::string key = line.substr(0, eq);
-        const float value = std::strtof(line.c_str() + eq + 1, nullptr);
-        if (key == "strength") strength = std::clamp(value, 0.0f, 1.0f);
-        else if (key == "radius") radius = std::max(value, 0.05f);
-        else if (key == "history") history = std::clamp(value, 0.0f, 0.98f);
-        else if (key == "rays") rays = std::clamp(u32(value), 1u, 32u);
-        else if (key == "debug") debug = std::clamp(u32(value), 0u, 4u);
-        else if (key == "enabled") active = value != 0.0f;
-        else if (key == "stage") stage = std::clamp(u32(value), 0u, 5u);
-        else if (key == "dump") dump_request = value;
-        else if (key == "power") power = std::clamp(value, 0.1f, 8.0f);
-        else if (key == "blur") blur = value != 0.0f;
-        else if (key == "sigma") sigma = std::clamp(value, 0.0f, 4.0f);
-        else if (key == "replace") replace_mask = value != 0.0f;
-        else if (key == "snap") snap_far = std::max(value, 0.0f);
-        else if (key == "build") build_fast_trace = value != 0.0f && fast_trace_allowed;
-        else if (key == "far") ao_far = std::max(value, 0.0f);
-        else if (key == "cache") cache_enabled = value != 0.0f;
-        else if (key == "promote") promote_after = std::clamp(u32(value), 2u, 600u);
-        else if (key == "maxsize") cache_max_size = std::max(value, 0.0f);
-        else if (key == "ringtest") ring_test = value != 0.0f;
-        else if (key == "normals") depth_normals = value != 0.0f;
-        else if (key == "denoise") {
-            const u32 mode = std::clamp(u32(value), 1u, 2u);
-            if (mode != denoise) {
-                history_valid = false; // the two histories differ
-            }
-            denoise = mode;
-        }
-        else if (key == "maxn") max_n = std::clamp(value, 1.0f, 255.0f);
-        else if (key == "clipk") clip_k = std::clamp(value, 0.1f, 10.0f);
-        else if (key == "clipfloor") clip_floor = std::clamp(value, 0.0f, 1.0f);
-        else if (key == "subpixel") subpixel = value != 0.0f;
-        else if (key == "falloff") falloff = value != 0.0f ? 1u : 0u;
-        else if (key == "period") noise_period = std::clamp(u32(value), 1u, 1024u);
-        else if (key == "pipeline") use_rt_pipeline = value != 0.0f && rt_trace_pipeline;
-        else if (key == "offset") origin_offset = std::clamp(value, 0.0f, 0.1f);
-        else if (key == "alpha") include_alpha = value != 0.0f;
-        else if (key == "decals") include_nowrite = value != 0.0f;
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    bool history_reset = false;
+    Rtao::ApplyText(settings, text, history_reset);
+    if (history_reset) {
+        history_valid = false; // the two denoisers' histories differ
     }
-    std::printf("RTAO: settings: enabled %d, %u rays, radius %.2f, strength %.2f, power %.2f, history %.2f, "
-                "sigma %.2f, blur %d, replace %d, snap %.0f m, far %.0f m, build %s, debug %u, stage %u, alpha %d, decals %d, "
-                "cache %d (after %u frames)\n",
-                active ? 1 : 0, rays, radius, strength, power, history, sigma, blur ? 1 : 0, replace_mask ? 1 : 0,
-                snap_far, ao_far, build_fast_trace ? "fast trace" : "fast build",
-                debug, stage, include_alpha ? 1 : 0, include_nowrite ? 1 : 0, cache_enabled ? 1 : 0,
-                promote_after);
+    settings.use_rt_pipeline = settings.use_rt_pipeline && rt_trace_pipeline;
+    settings.build_fast_trace = settings.build_fast_trace && fast_trace_allowed;
+    std::printf("RTAO: settings: enabled %d, %u rays, denoiser %u (maxn %.0f, clip %.1f / %.2f), radius %.2f, "
+                "strength %.2f, power %.2f, far %.0f m, snap %.0f m, normals %s, trace %s, cache %d (maxsize %.0f m), "
+                "debug %u, stage %u\n",
+                settings.active ? 1 : 0, settings.rays, settings.denoise, settings.max_n, settings.clip_k,
+                settings.clip_floor, settings.radius, settings.strength, settings.power, settings.ao_far,
+                settings.snap_far, settings.depth_normals ? "depth" : "shading",
+                settings.use_rt_pipeline ? "pipeline" : "ray query", settings.cache_enabled ? 1 : 0,
+                settings.cache_max_size, settings.debug, settings.stage);
 }
 
 RayTracedAO::~RayTracedAO() {
@@ -358,377 +236,18 @@ RayTracedAO::~RayTracedAO() {
     }
 }
 
-void RayTracedAO::CreateTracePipeline() {
-    const auto device = instance.GetDevice();
-    const std::array modules = {CompileSPV(RTAO_TRACE_RGEN, device), CompileSPV(RTAO_TRACE_RMISS, device),
-                                CompileSPV(RTAO_TRACE_RCHIT, device)};
-    const std::array stages = {
-        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eRaygenKHR, .module = modules[0], .pName = "main"},
-        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eMissKHR, .module = modules[1], .pName = "main"},
-        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eClosestHitKHR, .module = modules[2], .pName = "main"},
-    };
-    const std::array groups = {
-        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 0,
-                                               .closestHitShader = VK_SHADER_UNUSED_KHR,
-                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
-                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
-        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 1,
-                                               .closestHitShader = VK_SHADER_UNUSED_KHR,
-                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
-                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
-        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup,
-                                               .generalShader = VK_SHADER_UNUSED_KHR, .closestHitShader = 2,
-                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
-                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
-    };
-    const auto result = device.createRayTracingPipelinesKHR(
-        {}, {}, vk::RayTracingPipelineCreateInfoKHR{
-                    .stageCount = u32(stages.size()),
-                    .pStages = stages.data(),
-                    .groupCount = u32(groups.size()),
-                    .pGroups = groups.data(),
-                    .maxPipelineRayRecursionDepth = 1,
-                    .layout = *trace_layout,
-                });
-    for (const auto module : modules) {
-        device.destroyShaderModule(module);
-    }
-    if (result.result != vk::Result::eSuccess || result.value.empty()) {
-        std::printf("RTAO: the ray-tracing-pipeline trace could not be created (%s)\n",
-                    vk::to_string(result.result).c_str());
-        return;
-    }
-    rt_trace_pipeline = vk::UniquePipeline(result.value[0], device);
-    // Shader binding table: raygen, miss, hit, each at a base-aligned offset.
-    const auto props = instance.GetPhysicalDevice()
-                           .getProperties2<vk::PhysicalDeviceProperties2,
-                                           vk::PhysicalDeviceRayTracingPipelinePropertiesKHR>()
-                           .get<vk::PhysicalDeviceRayTracingPipelinePropertiesKHR>();
-    const u32 handle_size = props.shaderGroupHandleSize;
-    const u32 stride = (handle_size + props.shaderGroupHandleAlignment - 1) / props.shaderGroupHandleAlignment *
-                       props.shaderGroupHandleAlignment;
-    const u32 base = std::max(props.shaderGroupBaseAlignment, stride);
-    std::vector<u8> handles(size_t(handle_size) * groups.size());
-    if (device.getRayTracingShaderGroupHandlesKHR(*rt_trace_pipeline, 0, u32(groups.size()), handles.size(),
-                                                  handles.data()) != vk::Result::eSuccess ||
-        !CreateBuffer(sbt_buffer, vk::DeviceSize(base) * groups.size(),
-                      vk::BufferUsageFlagBits::eShaderBindingTableKHR, true, props.shaderGroupBaseAlignment)) {
-        std::puts("RTAO: the shader binding table could not be created; the pipeline trace is off");
-        rt_trace_pipeline.reset();
-        return;
-    }
-    for (size_t i = 0; i < groups.size(); ++i) {
-        std::memcpy(static_cast<u8*>(sbt_buffer.mapped) + i * base, handles.data() + i * handle_size, handle_size);
-    }
-    vmaFlushAllocation(instance.GetAllocator(), sbt_buffer.allocation, 0, VK_WHOLE_SIZE);
-    sbt_rgen = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address, .stride = stride, .size = stride};
-    sbt_miss = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + base, .stride = stride, .size = stride};
-    sbt_hit = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + 2 * base, .stride = stride, .size = stride};
-    SetObjectName(device, *rt_trace_pipeline, "rtao trace (ray-tracing pipeline)");
-    std::puts("RTAO: the trace runs as a ray-tracing pipeline (pipeline=0 in rtao.txt: ray queries)");
-}
 
-bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
-                               bool host, vk::DeviceSize alignment, bool quiet) {
-    const VkBufferCreateInfo buffer_ci{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = size,
-        .usage = VkBufferUsageFlags(usage | vk::BufferUsageFlagBits::eShaderDeviceAddress),
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-    VmaAllocationCreateInfo alloc_ci{
-        .flags = host ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                            VMA_ALLOCATION_CREATE_MAPPED_BIT
-                      : VmaAllocationCreateFlags{},
-        .usage = host ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-        .requiredFlags = host ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-                              : VkMemoryPropertyFlags{},
-    };
-    VkBuffer raw{};
-    VmaAllocationInfo info{};
-    const VkResult result =
-        alignment ? vmaCreateBufferWithAlignment(instance.GetAllocator(), &buffer_ci, &alloc_ci,
-                                                 alignment, &raw, &out.allocation, &info)
-                  : vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &raw,
-                                    &out.allocation, &info);
-    if (result != VK_SUCCESS) {
-        if (!quiet) {
-            std::printf("RTAO: buffer of %llu MiB failed (%d)\n", (unsigned long long)(size >> 20), result);
-        }
-        return false;
-    }
-    out.buffer = raw;
-    out.size = size;
-    out.mapped = info.pMappedData;
-    out.address = instance.GetDevice().getBufferAddress({.buffer = out.buffer});
-    return true;
-}
 
-// The cache's budget: at most BB_RTAO_CACHE_MB (1536), and at most a quarter of what the device
-// heap still has room for (VMA's budget minus usage, plus what the cache already holds).
-void RayTracedAO::UpdateCacheBudget() {
-    const auto& props = instance.GetPhysicalDevice().getMemoryProperties();
-    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
-    vmaGetHeapBudgets(instance.GetAllocator(), budgets.data());
-    u64 room = 0;
-    for (u32 i = 0; i < props.memoryHeapCount; ++i) {
-        if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
-            const u64 free = budgets[i].budget > budgets[i].usage ? budgets[i].budget - budgets[i].usage : 0;
-            room = std::max(room, free);
-        }
-    }
-    const u64 budget = std::min(cache_budget_cap, (room + cache_bytes) / 4);
-    cache_budget = std::max<u64>(budget, 64ull << 20);
-}
 
-void RayTracedAO::DestroyBuffer(Buffer& buffer) {
-    if (buffer.buffer) {
-        vmaDestroyBuffer(instance.GetAllocator(), buffer.buffer, buffer.allocation);
-        buffer = {};
-    }
-}
 
-bool RayTracedAO::CreateAccelerationStructures() {
-    const auto device = instance.GetDevice();
-    const auto as_props = instance.GetPhysicalDevice()
-                              .getProperties2<vk::PhysicalDeviceProperties2,
-                                              vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
-                              .get<vk::PhysicalDeviceAccelerationStructurePropertiesKHR>();
-    scratch_alignment = std::max<vk::DeviceSize>(as_props.minAccelerationStructureScratchOffsetAlignment, 1);
-
-    using BU = vk::BufferUsageFlagBits;
-    if (!CreateBuffer(table_buffer, vk::DeviceSize(TableSlots) * max_geometries * sizeof(GpuGeometry),
-                      BU::eStorageBuffer, true) ||
-        !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles + PromoTriangles) * 9 * sizeof(float),
-                      BU::eStorageBuffer | BU::eAccelerationStructureBuildInputReadOnlyKHR |
-                          BU::eTransferSrc, // the debug readback copies from it
-                      false) ||
-        !CreateBuffer(instance_buffer,
-                      vk::DeviceSize(TableSlots) * MaxInstances * sizeof(vk::AccelerationStructureInstanceKHR),
-                      BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
-        !CreateBuffer(probe_buffer, vk::DeviceSize(ProbeSlots) * max_geometries * sizeof(ProbeStats),
-                      BU::eStorageBuffer, true) ||
-        !CreateBuffer(constants_buffer, vk::DeviceSize(TableSlots) * ConstantsStride, BU::eUniformBuffer, true) ||
-        !CreateBuffer(index_ring, vk::DeviceSize(TableSlots) * IndexRingSlot, BU::eStorageBuffer, true) ||
-        !CreateBuffer(probe_chunks, vk::DeviceSize(TableSlots) * MaxProbeChunks * 8, BU::eStorageBuffer, true) ||
-        !CreateBuffer(probe_ranges, vk::DeviceSize(TableSlots) * max_geometries * 8, BU::eStorageBuffer, true) ||
-        !CreateBuffer(probe_partials, vk::DeviceSize(MaxProbeChunks) * 48, BU::eStorageBuffer, false) ||
-        !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
-                      BU::eTransferDst, true)) {
-        return false;
-    }
-
-    // BLAS: one triangle geometry over the whole list, sized for the budget.
-    vk::AccelerationStructureGeometryKHR blas_geometry{
-        .geometryType = vk::GeometryTypeKHR::eTriangles,
-        .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                         .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                         .vertexData = {.deviceAddress = triangle_buffer.address},
-                         .vertexStride = 3 * sizeof(float),
-                         .maxVertex = max_triangles * 3 - 1,
-                         .indexType = vk::IndexType::eNoneKHR,
-                     }},
-        .flags = vk::GeometryFlagBitsKHR::eOpaque,
-    };
-    vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
-        .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{}),
-        .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-        .geometryCount = 1,
-        .pGeometries = &blas_geometry,
-    };
-    // Sized for fast build only (the per-frame BLAS; a fast-trace build measured no different and
-    // its sizes are larger): BB_RTAO_FAST_TRACE=1 sizes for both and allows build=1.
-    auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
-        vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
-    {
-        auto trace_info = blas_info;
-        trace_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
-                           (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
-                                        : vk::BuildAccelerationStructureFlagsKHR{});
-        const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
-            vk::AccelerationStructureBuildTypeKHR::eDevice, trace_info, max_triangles);
-        std::printf("RTAO: per-frame BLAS for %u triangles: fast build %llu MiB + %llu scratch, fast trace %llu MiB + "
-                    "%llu scratch\n", max_triangles,
-                    (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
-                    (unsigned long long)(blas_sizes.buildScratchSize >> 20),
-                    (unsigned long long)(trace_sizes.accelerationStructureSize >> 20),
-                    (unsigned long long)(trace_sizes.buildScratchSize >> 20));
-        fast_trace_allowed = EnvU32("BB_RTAO_FAST_TRACE", 0) != 0;
-        if (fast_trace_allowed) {
-            blas_sizes.accelerationStructureSize =
-                std::max(blas_sizes.accelerationStructureSize, trace_sizes.accelerationStructureSize);
-            blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
-        }
-    }
-    if (!CreateBuffer(blas_buffer, blas_sizes.accelerationStructureSize,
-                      BU::eAccelerationStructureStorageKHR, false) ||
-        !CreateBuffer(blas_scratch, blas_sizes.buildScratchSize, BU::eStorageBuffer, false,
-                      scratch_alignment)) {
-        return false;
-    }
-    blas = Check(device.createAccelerationStructureKHR({
-        .buffer = blas_buffer.buffer,
-        .size = blas_sizes.accelerationStructureSize,
-        .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-    }));
-    blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = blas});
-    // The static cache's builds of a frame share one scratch (sized for PromoTriangles, built for
-    // trace speed: a cached BLAS is built once and traced for many frames).
-    {
-        blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace; // cache: compressed
-        blas_geometry.geometry.triangles.maxVertex = PromoTriangles * 3 - 1;
-        const auto promo_sizes = device.getAccelerationStructureBuildSizesKHR(
-            vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, PromoTriangles);
-        // Room for the alignment of many small builds.
-        if (!CreateBuffer(promo_scratch, promo_sizes.buildScratchSize + 512 * scratch_alignment,
-                          BU::eStorageBuffer, false, scratch_alignment)) {
-            return false;
-        }
-    }
-
-    // TLAS: one instance, identity (the triangles are already in view space).
-    vk::AccelerationStructureGeometryKHR tlas_geometry{
-        .geometryType = vk::GeometryTypeKHR::eInstances,
-        .geometry = {.instances = vk::AccelerationStructureGeometryInstancesDataKHR{
-                         .arrayOfPointers = false,
-                         .data = {.deviceAddress = instance_buffer.address},
-                     }},
-    };
-    vk::AccelerationStructureBuildGeometryInfoKHR tlas_info{
-        .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
-        .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-        .geometryCount = 1,
-        .pGeometries = &tlas_geometry,
-    };
-    const auto tlas_sizes = device.getAccelerationStructureBuildSizesKHR(
-        vk::AccelerationStructureBuildTypeKHR::eDevice, tlas_info, MaxInstances);
-    if (!CreateBuffer(tlas_buffer, tlas_sizes.accelerationStructureSize,
-                      BU::eAccelerationStructureStorageKHR, false) ||
-        !CreateBuffer(tlas_scratch, tlas_sizes.buildScratchSize, BU::eStorageBuffer, false,
-                      scratch_alignment)) {
-        return false;
-    }
-    tlas = Check(device.createAccelerationStructureKHR({
-        .buffer = tlas_buffer.buffer,
-        .size = tlas_sizes.accelerationStructureSize,
-        .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-    }));
-    for (const auto& [buffer, name] : std::initializer_list<std::pair<const Buffer*, const char*>>{
-             {&table_buffer, "rtao table"}, {&triangle_buffer, "rtao triangles"},
-             {&instance_buffer, "rtao instances"}, {&probe_buffer, "rtao probe results"},
-             {&constants_buffer, "rtao constants"}, {&blas_buffer, "rtao per-frame BLAS"},
-             {&blas_scratch, "rtao BLAS scratch"}, {&promo_scratch, "rtao cache scratch"},
-             {&tlas_buffer, "rtao TLAS"}, {&tlas_scratch, "rtao TLAS scratch"},
-             {&readback_buffer, "rtao readback"}, {&index_ring, "rtao index ring"}}) {
-        SetObjectName(device, buffer->buffer, name);
-    }
-    SetObjectName(device, blas, "rtao per-frame BLAS");
-    SetObjectName(device, tlas, "rtao TLAS");
-    for (const Buffer* buffer : {&table_buffer, &triangle_buffer, &instance_buffer, &probe_buffer, &constants_buffer,
-                                 &index_ring, &probe_chunks, &probe_ranges, &probe_partials, &blas_buffer,
-                                 &blas_scratch, &promo_scratch, &tlas_buffer, &tlas_scratch, &readback_buffer}) {
-        static_bytes += buffer->size;
-    }
-    std::printf("RTAO: fixed buffers %llu MiB (with the object-motion capture's %llu MiB of positions)\n",
-                (unsigned long long)(static_bytes >> 20),
-                (unsigned long long)((u64(object_motion.PositionsCapacity()) * 2 * 16) >> 20));
-    std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
-                (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
-                (unsigned long long)(blas_sizes.buildScratchSize >> 20),
-                (unsigned long long)(triangle_buffer.size >> 20));
-    return true;
-}
 
 void RayTracedAO::OnFrameStart() {
     if (!enabled) {
         return;
     }
     static u32 reports = 0;
-    if (dump_pending && dump_index == DumpFrames && dump_buffer.mapped && scheduler.IsFree(dump_tick)) {
-        dump_pending = false;
-        vmaInvalidateAllocation(instance.GetAllocator(), dump_buffer.allocation, 0, VK_WHOLE_SIZE);
-        const u32 dw = (width + 1) / 2, dh = (height + 1) / 2;
-        const size_t texels_per_frame = size_t(dw) * dh;
-        const auto* texels = static_cast<const u16*>(dump_buffer.mapped);
-        const auto half_to_float = [](u16 hf) {
-            const u32 sign = (hf >> 15) & 1, exp = (hf >> 10) & 0x1f, mant = hf & 0x3ff;
-            float value;
-            if (exp == 0) value = std::ldexp(float(mant), -24);
-            else if (exp == 31) value = mant ? NAN : INFINITY;
-            else value = std::ldexp(float(mant | 0x400), int(exp) - 25);
-            return sign ? -value : value;
-        };
-        std::vector<float> prev(texels_per_frame), cur(texels_per_frame);
-        double mean = 0.0, change = 0.0;
-        u64 changed = 0, zeros = 0;
-        for (u32 k = 0; k < DumpFrames; ++k) {
-            const u16* frame_texels = texels + k * texels_per_frame * 2;
-            for (size_t i = 0; i < texels_per_frame; ++i) {
-                const float r = half_to_float(frame_texels[i * 2]);
-                cur[i] = std::isfinite(r) ? std::clamp(r, 0.0f, 2.0f) : 0.0f;
-                mean += cur[i];
-                zeros += cur[i] == 0.0f;
-                if (k) {
-                    const float d = std::abs(cur[i] - prev[i]);
-                    change += d;
-                    changed += d > 0.05f;
-                }
-            }
-            const std::string path =
-                "out/rtao_dump_" + std::to_string(dump_frame) + "_" + std::to_string(k) + ".pgm";
-            if (FILE* f = std::fopen(path.c_str(), "wb")) {
-                std::fprintf(f, "P5\n%u %u\n255\n", dw, dh);
-                std::vector<u8> row(dw);
-                for (u32 y = 0; y < dh; ++y) {
-                    for (u32 x = 0; x < dw; ++x) {
-                        row[x] = u8(cur[size_t(y) * dw + x] * 127.5f + 0.5f); // 1.0 -> 128
-                    }
-                    std::fwrite(row.data(), 1, dw, f);
-                }
-                std::fclose(f);
-            }
-            prev.swap(cur);
-        }
-        const double all = double(texels_per_frame) * DumpFrames, pairs = double(texels_per_frame) * (DumpFrames - 1);
-        std::printf("RTAO: dumped out/rtao_dump_%u_0..%u.pgm (%u consecutive frames, %ux%u, 1.0 = 128): mean %.3f, "
-                    "%.1f%% zero; frame to frame: mean |change| %.4f, %.2f%% of pixels change > 0.05\n",
-                    dump_frame, DumpFrames - 1, DumpFrames, dw, dh, mean / all, 100.0 * zeros / all,
-                    change / pairs, 100.0 * changed / pairs);
-    }
-    if (readback_pending && scheduler.IsFree(readback_tick)) {
-        // Copied 120 frames ago: long finished. How do the expanded triangles look?
-        readback_pending = false;
-        vmaInvalidateAllocation(instance.GetAllocator(), readback_buffer.allocation, 0, VK_WHOLE_SIZE);
-        const float* v = static_cast<const float*>(readback_buffer.mapped);
-        u32 valid = 0, finite = 0;
-        const u32 count = std::min<u32>(ReadbackTriangles, readback_triangles);
-        float zmin = 1e30f, zmax = -1e30f, xymax = 0.0f;
-        for (u32 i = 0; i < count; ++i) {
-            const float* tri = v + i * 9;
-            bool nonzero = false, all_finite = true;
-            for (u32 k = 0; k < 9; ++k) {
-                nonzero |= tri[k] != 0.0f;
-                all_finite &= std::isfinite(tri[k]);
-            }
-            if (!nonzero) continue;
-            ++valid;
-            if (!all_finite) continue;
-            ++finite;
-            for (u32 k = 0; k < 3; ++k) {
-                zmin = std::min(zmin, tri[k * 3 + 2]);
-                zmax = std::max(zmax, tri[k * 3 + 2]);
-                xymax = std::max({xymax, std::abs(tri[k * 3]), std::abs(tri[k * 3 + 1])});
-            }
-        }
-        std::printf("RTAO: readback (frame %u): of the first %u triangles %u non-zero, %u valid (finite), "
-                    "%u invalid (NaN); z %.2f..%.2f, |xy| up to %.2f; first: (%.2f %.2f %.2f) (%.2f %.2f %.2f) "
-                    "(%.2f %.2f %.2f)\n",
-                    readback_frame, count, valid, finite, valid - finite, zmin, zmax, xymax, v[0], v[1], v[2],
-                    v[3], v[4], v[5], v[6], v[7], v[8]);
-    }
+    WriteDump();
+    ReportReadback();
     if (frame % 600 == 0 && frame) {
         std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u; "
                     "%u strips/other, %u alpha-tested, %u without depth write, %u without index address "
@@ -766,7 +285,7 @@ void RayTracedAO::OnFrameStart() {
         alloc_failures = 0;
         promotions = 0;
         evictions_total = 0;
-        if (recorded == 0 && !draws.empty() && active && !missing_pass_reported) {
+        if (recorded == 0 && !draws.empty() && settings.active && !missing_pass_reported) {
             missing_pass_reported = true;
             std::puts("RTAO: OFF in practice: the game's AO pass never ran, so there is no AO mask to "
                       "write into. The \"Disable SSAO\" game patch (launcher: Game effects, SSAO "
@@ -809,11 +328,11 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
         ++skipped_topology;
         return;
     }
-    if (g.alpha_test && !include_alpha) {
+    if (g.alpha_test && !settings.include_alpha) {
         ++skipped_alpha;
         return;
     }
-    if (!g.depth_write && !include_nowrite) {
+    if (!g.depth_write && !settings.include_nowrite) {
         ++skipped_nowrite;
         return;
     }
@@ -843,7 +362,7 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     bool index_mid_word = (g.index_address & 2) != 0;
     if (g.index_host && g.index_bytes) {
         // The frame's ring slot is the one the pass will use; only once the GPU is done with it.
-        const u32 copy_slot = ring_test ? 0u : frame % TableSlots;
+        const u32 copy_slot = settings.ring_test ? 0u : frame % TableSlots;
         if (index_ring_state < 0) {
             index_ring_state = (!slot_ticks[copy_slot] || scheduler.IsFree(slot_ticks[copy_slot])) ? 1 : 0;
             index_ring_used = 0;
@@ -869,7 +388,7 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     u32& copies = max_copies[g.key];
     copies = std::max(copies, occurrence + 1);
     Draw& draw = draws.emplace_back();
-    draw.key = KeyOf(g.key, occurrence);
+    draw.key = Rtao::KeyOf(g.key, occurrence);
     draw.base = g.key;
     draw.occurrence = occurrence;
     draw.skinned = g.skinned;
@@ -890,155 +409,9 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
                           .flags = 0};
 }
 
-bool RayTracedAO::StatsMatch(const ProbeStats& a, const ProbeStats& b) const {
-    if (a.count != b.count || a.count == 0) {
-        return false;
-    }
-    // World positions are rebuilt from clip space each frame: allow for the rounding, which grows
-    // with the distance from the camera.
-    const float dx = a.centroid[0] - camera_world[0], dy = a.centroid[1] - camera_world[1],
-                dz = a.centroid[2] - camera_world[2];
-    const float tol = 0.02f + 2e-4f * std::sqrt(dx * dx + dy * dy + dz * dz);
-    for (int i = 0; i < 3; ++i) {
-        if (std::abs(a.centroid[i] - b.centroid[i]) > tol || std::abs(a.min[i] - b.min[i]) > tol ||
-            std::abs(a.max[i] - b.max[i]) > tol || std::abs(a.first[i] - b.first[i]) > tol) {
-            return false;
-        }
-    }
-    return true;
-}
 
-void RayTracedAO::Evict(CacheEntry& entry) {
-    if (entry.blas) {
-        const auto device = instance.GetDevice();
-        scheduler.DeferOperation([device, allocator = instance.GetAllocator(), blas = entry.blas,
-                                  buffer = entry.buffer, allocation = entry.allocation] {
-            device.destroyAccelerationStructureKHR(blas);
-            vmaDestroyBuffer(allocator, buffer, allocation);
-        });
-        cache_bytes -= entry.bytes;
-    }
-    entry.blas = vk::AccelerationStructureKHR{};
-    entry.buffer = vk::Buffer{};
-    entry.allocation = VmaAllocation{};
-    entry.address = 0;
-    entry.bytes = 0;
-    entry.triangles = 0;
-}
 
-void RayTracedAO::ReadProbes(u32 ring) {
-    const u32 id = probe_ids[ring];
-    if (!id) {
-        return;
-    }
-    probe_ids[ring] = 0;
-    vmaInvalidateAllocation(instance.GetAllocator(), probe_buffer.allocation,
-                            vk::DeviceSize(ring) * max_geometries * sizeof(ProbeStats),
-                            vk::DeviceSize(max_geometries) * sizeof(ProbeStats));
-    const auto* stats = static_cast<const ProbeStats*>(probe_buffer.mapped) + size_t(ring) * max_geometries;
-    const auto& keys = probe_keys[ring];
-    for (size_t i = 0; i < keys.size(); ++i) {
-        if (!keys[i]) {
-            continue;
-        }
-        if (stats[i].id != id) {
-            ++probes_stale; // the GPU has not written it (yet)
-            continue;
-        }
-        ++probes_read;
-        ProbeStats s;
-        std::memcpy(&s, &stats[i], sizeof(s));
-        if (s.id != id) {
-            continue;
-        }
-        const auto it = cache.find(keys[i]);
-        if (it == cache.end()) {
-            continue;
-        }
-        CacheEntry& e = it->second;
-        if (e.have_stats && StatsMatch(e.stats, s)) {
-            ++e.stable; // the reference stays the first observation: slow drift is not static
-            ++probes_matched;
-            continue;
-        }
-        if (e.have_stats) {
-            // Another copy of the same mesh in this slot (the draw order changed): not a change.
-            bool sibling = false;
-            const auto copies = max_copies.find(e.base);
-            for (u32 o = 0; copies != max_copies.end() && o < copies->second && !sibling; ++o) {
-                const auto other = cache.find(KeyOf(e.base, o));
-                sibling = other != cache.end() && &other->second != &e && other->second.have_stats &&
-                          StatsMatch(other->second.stats, s);
-            }
-            if (sibling) {
-                ++probes_reordered;
-                e.stable = 0; // the order is not stable: no promotion from this slot for now
-                continue;
-            }
-            ++probes_changed;
-            if (mismatch_prints < 6 || (frame % 600 < 3 && mismatch_prints < 600)) {
-                ++mismatch_prints;
-                float dmax = 0.0f;
-                for (int c = 0; c < 3; ++c) {
-                    dmax = std::max({dmax, std::abs(e.stats.min[c] - s.min[c]), std::abs(e.stats.max[c] - s.max[c])});
-                }
-                const float dist = std::sqrt((s.centroid[0] - camera_world[0]) * (s.centroid[0] - camera_world[0]) +
-                                             (s.centroid[1] - camera_world[1]) * (s.centroid[1] - camera_world[1]) +
-                                             (s.centroid[2] - camera_world[2]) * (s.centroid[2] - camera_world[2]));
-                std::printf("RTAO: probe change at %.1f m: bounds moved up to %.3f m, ", dist, dmax);
-                std::printf("RTAO: probe change: count %u -> %u, centroid (%.3f %.3f %.3f) -> (%.3f %.3f %.3f), "
-                            "first (%.3f %.3f %.3f) -> (%.3f %.3f %.3f), camera (%.1f %.1f %.1f)\n",
-                            e.stats.count, s.count, e.stats.centroid[0], e.stats.centroid[1], e.stats.centroid[2],
-                            s.centroid[0], s.centroid[1], s.centroid[2], e.stats.first[0], e.stats.first[1],
-                            e.stats.first[2], s.first[0], s.first[1], s.first[2], camera_world[0],
-                            camera_world[1], camera_world[2]);
-            }
-        }
-        if (e.blas) { // cached, then it moved (a door, a lift): back to per frame
-            Evict(e);
-            ++e.evictions;
-            ++evictions_total;
-        }
-        e.stats = s;
-        e.have_stats = true;
-        e.stable = 1;
-    }
-}
 
-void RayTracedAO::TrimCache() {
-    if (cache_bytes > cache_budget) {
-        std::vector<std::pair<u32, u64>> order; // last seen, key
-        for (const auto& [key, e] : cache) {
-            if (e.blas && e.last_seen != frame) {
-                order.emplace_back(e.last_seen, key);
-            }
-        }
-        std::sort(order.begin(), order.end());
-        for (const auto& [seen, key] : order) {
-            if (cache_bytes <= cache_budget * 9 / 10) {
-                break;
-            }
-            Evict(cache[key]);
-        }
-    }
-    if (frame % 600 == 0) {
-        if (frame >= promotion_pause_until) {
-            UpdateCacheBudget();
-        }
-    }
-    if (frame % 600 == 0) { // forget draws not seen for a minute
-        for (auto it = cache.begin(); it != cache.end();) {
-            if (frame - it->second.last_seen > 3600) {
-                if (it->second.blas) {
-                    Evict(it->second);
-                }
-                it = cache.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-}
 
 void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
     if (!enabled) {
@@ -1046,7 +419,7 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
     }
     if (color != last_color) {
         // The previous pass ended. Was it the game's AO upsample (into the R8 mask)?
-        if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && active &&
+        if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && settings.active &&
             !draws.empty()) {
             done_this_frame = true;
             static bool reported_heuristic = false;
@@ -1086,100 +459,7 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
     }
 }
 
-bool RayTracedAO::EnsureResources(u32 w, u32 h) {
-    if (width == w && height == h && ao_images[0]) {
-        return true;
-    }
-    const auto device = instance.GetDevice();
-    const auto allocator = instance.GetAllocator();
-    const auto make_image = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
-                                vk::Format format, u32 iw, u32 ih) {
-        view.reset();
-        image = VideoCore::UniqueImage(device, allocator);
-        image.Create(vk::ImageCreateInfo{
-            .imageType = vk::ImageType::e2D,
-            .format = format,
-            .extent = {iw, ih, 1},
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
-            .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-                     vk::ImageUsageFlagBits::eTransferSrc, // the dump= copy
-            .initialLayout = vk::ImageLayout::eUndefined,
-        });
-        view = Check(device.createImageViewUnique({
-            .image = vk::Image(image),
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
-    };
-    scheduler.Finish();
-    for (u32 i = 0; i < 2; ++i) {
-        make_image(ao_images[i], ao_views[i], vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
-    }
-    make_image(motion_image, motion_view, vk::Format::eR16G16Sfloat, w, h);
-    make_image(blur_image, blur_view, vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
-    make_image(raw_image, raw_view, vk::Format::eR16G16Sfloat, (w + 1) / 2, (h + 1) / 2);
-    for (u32 i = 0; i < 2; ++i) {
-        make_image(hist_images[i], hist_views[i], vk::Format::eR16G16B16A16Sfloat, (w + 1) / 2, (h + 1) / 2);
-    }
-    SetObjectName(device, vk::Image(raw_image), "rtao raw");
-    SetObjectName(device, vk::Image(hist_images[0]), "rtao history 0");
-    SetObjectName(device, vk::Image(hist_images[1]), "rtao history 1");
-    SetObjectName(device, vk::Image(ao_images[0]), "rtao ao 0");
-    SetObjectName(device, vk::Image(ao_images[1]), "rtao ao 1");
-    SetObjectName(device, vk::Image(motion_image), "rtao motion");
-    SetObjectName(device, vk::Image(blur_image), "rtao blur");
-    if (dump_buffer.buffer) {
-        vmaDestroyBuffer(allocator, dump_buffer.buffer, dump_buffer.allocation);
-        dump_buffer = {};
-    }
-    CreateBuffer(dump_buffer, vk::DeviceSize(DumpFrames) * ((w + 1) / 2) * ((h + 1) / 2) * 4,
-                 vk::BufferUsageFlagBits::eTransferDst,
-                 true);
-    dump_pending = false;
-    width = w;
-    height = h;
-    history_valid = false;
-    ao_index = 0;
-    return true;
-}
 
-vk::ImageView RayTracedAO::CachedView(const VideoCore::Image& image, vk::Format format,
-                                      vk::ImageAspectFlags aspect) {
-    const vk::Image handle = image.GetImage();
-    ViewEntry* oldest = &view_cache[0];
-    for (auto& entry : view_cache) {
-        if (entry.view && entry.image == handle && entry.uid == image.image_uid &&
-            entry.format == format && entry.aspect == aspect) {
-            entry.last_use = ++view_uses;
-            return entry.view;
-        }
-        if (entry.last_use < oldest->last_use) {
-            oldest = &entry;
-        }
-    }
-    const auto device = instance.GetDevice();
-    if (oldest->view) {
-        scheduler.DeferOperation([device, view = oldest->view] { device.destroyImageView(view); });
-    }
-    *oldest = {
-        .image = handle,
-        .uid = image.image_uid,
-        .format = format,
-        .aspect = aspect,
-        .view = Check(device.createImageView({
-            .image = handle,
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = {aspect, 0, 1, 0, 1},
-        })),
-        .last_use = ++view_uses,
-    };
-    return oldest->view;
-}
 
 void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     auto& mask = texture_cache.GetImage(mask_id);
@@ -1190,7 +470,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         return;
     }
     // The host ring slot (geometry table, instances, constants): only once the GPU is done with it.
-    const u32 slot = ring_test ? 0u : frame % TableSlots;
+    const u32 slot = settings.ring_test ? 0u : frame % TableSlots;
     if (slot_ticks[slot] && !scheduler.IsFree(slot_ticks[slot])) {
         ++skipped_busy; // the game's own AO stays this frame
         return;
@@ -1232,7 +512,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     image_barrier(vk::Image(blur_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
                   vk::AccessFlagBits2::eShaderWrite);
     // Denoiser 2: this frame's raw trace and the history pair (same read/write indices).
-    const bool v2 = denoise == 2 && debug < 2; // the debug views keep the plain path
+    const bool v2 = settings.denoise == 2 && settings.debug < 2; // the debug views keep the plain path
     image_barrier(vk::Image(raw_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
                   vk::AccessFlagBits2::eShaderWrite);
     image_barrier(vk::Image(hist_images[write]), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
@@ -1279,8 +559,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         last_recorded_frame = frame;
         last_camera_world = camera_world;
     }
-    const bool use_cache = cache_enabled && stage >= 3;
-    const float cull = ao_far > 0.0f ? ao_far + radius : 0.0f;
+    const bool use_cache = settings.cache_enabled && settings.stage >= 3;
+    const float cull = settings.ao_far > 0.0f ? settings.ao_far + settings.radius : 0.0f;
     const auto device = instance.GetDevice();
     struct Promotion {
         vk::AccelerationStructureKHR blas;
@@ -1319,12 +599,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     // Huge draws (terrain, building blocks) stay per frame: whole in a cached BLAS, their far
     // triangles came back into the BVH (the far cut works per frame) and rays slowed down.
     const auto too_big = [&](const CacheEntry& e) {
-        if (cache_max_size <= 0.0f || !e.have_stats) {
-            return false;
-        }
-        const float dx = e.stats.max[0] - e.stats.min[0], dy = e.stats.max[1] - e.stats.min[1],
-                    dz = e.stats.max[2] - e.stats.min[2];
-        return dx * dx + dy * dy + dz * dz > cache_max_size * cache_max_size;
+        return e.have_stats && Rtao::TooBig(e.stats, settings.cache_max_size);
     };
     for (const Draw& d : draws) {
         CacheEntry& e = cache[d.key];
@@ -1349,7 +624,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         if (too_big(e)) {
             return phase % 64 == 0; // it will stay per frame; an occasional look is enough
         }
-        if (e.stable >= promote_after) {
+        if (e.stable >= settings.promote_after) {
             return phase % 4 == 0;
         }
         return true;
@@ -1406,7 +681,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         frame_triangles += gpu.triangles;
         dynamic_list.push_back(gpu);
         dynamic_keys.push_back(d.key);
-        if (!use_cache || d.skinned || e.blas || e.evictions >= 3 || e.stable < promote_after || too_big(e) ||
+        if (!use_cache || !Rtao::Promotable(e, d.skinned, too_big(e), settings.promote_after) ||
             frame < promotion_pause_until ||
             gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles || promos.size() >= 256) {
             continue;
@@ -1415,9 +690,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             bool duplicate = false;
             const auto copies = max_copies.find(d.base);
             for (u32 o = 0; copies != max_copies.end() && o < copies->second && !duplicate; ++o) {
-                const auto other = cache.find(KeyOf(d.base, o));
+                const auto other = cache.find(Rtao::KeyOf(d.base, o));
                 duplicate = other != cache.end() && &other->second != &e && other->second.blas &&
-                            StatsMatch(other->second.stats, e.stats);
+                            Rtao::StatsMatch(other->second.stats, e.stats, camera_world);
             }
             if (duplicate) {
                 continue;
@@ -1472,6 +747,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             continue;
         }
         e.blas = as.value;
+        e.cached = true;
         SetObjectName(device, e.blas, "rtao cached BLAS");
         e.buffer = storage.buffer;
         e.allocation = storage.allocation;
@@ -1578,11 +854,11 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         readback_tick = scheduler.CurrentTick();
     }
     // dump=: DumpFrames consecutive frames of the AO the apply gets (after the blur).
-    if (dump_request != dump_done && !dump_pending && stage >= 4 && dump_buffer.mapped) {
+    if (settings.dump_request != dump_done && !dump_pending && settings.stage >= 4 && dump_buffer.mapped) {
         dump_pending = true;
         dump_index = 0;
         dump_frame = frame;
-        dump_done = dump_request;
+        dump_done = settings.dump_request;
     }
     const bool do_dump = dump_pending && dump_index < DumpFrames;
     const vk::DeviceSize dump_offset = vk::DeviceSize(dump_index) * ((w + 1) / 2) * ((h + 1) / 2) * 4;
@@ -1607,7 +883,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .proj = camera_motion.Projection(),
         .num_geometries = num_geometries,
         .total_triangles = dispatch_triangles,
-        .far_cut = ao_far > 0.0f ? ao_far + radius : 0.0f,
+        .far_cut = settings.ao_far > 0.0f ? settings.ao_far + settings.radius : 0.0f,
         .inv_view = inv_view,
     };
     const ProbeConstants probe{
@@ -1635,27 +911,27 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .full_size = {float(w), float(h)},
         .half_size = {float((w + 1) / 2), float((h + 1) / 2)},
         .jitter = jitter,
-        .radius = radius,
-        .history = history_valid ? history : 0.0f,
-        .rays = rays,
+        .radius = settings.radius,
+        .history = history_valid ? settings.history : 0.0f,
+        .rays = settings.rays,
         .frame = frame,
-        .mode = debug,
-        .snap_far = snap_far,
-        .ao_far = ao_far,
-        .normals = depth_normals ? 1u : 0u,
-        .offset = origin_offset,
+        .mode = settings.debug,
+        .snap_far = settings.snap_far,
+        .ao_far = settings.ao_far,
+        .normals = settings.depth_normals ? 1u : 0u,
+        .offset = settings.origin_offset,
         .denoise = v2 ? 2u : 1u,
-        .subpixel = v2 && subpixel ? 1u : 0u,
-        .falloff = falloff,
-        .period = noise_period,
+        .subpixel = v2 && settings.subpixel ? 1u : 0u,
+        .falloff = settings.falloff,
+        .period = settings.noise_period,
     };
     const TemporalConstants temporal{
         .half_size = {float((w + 1) / 2), float((h + 1) / 2)},
-        .sub = subpixel ? std::array<s32, 2>{s32(frame & 1), s32((frame >> 1) & 1)} : std::array<s32, 2>{1, 1},
-        .max_n = max_n,
-        .clip_k = clip_k,
+        .sub = settings.subpixel ? std::array<s32, 2>{s32(frame & 1), s32((frame >> 1) & 1)} : std::array<s32, 2>{1, 1},
+        .max_n = settings.max_n,
+        .clip_k = settings.clip_k,
         .history_ok = history_valid ? 1u : 0u,
-        .clip_floor = clip_floor,
+        .clip_floor = settings.clip_floor,
     };
     const vk::ImageView raw_rw = *raw_view, hist_read = *hist_views[read], hist_write = *hist_views[write];
     const vk::DeviceSize constants_offset = vk::DeviceSize(slot) * ConstantsStride;
@@ -1666,11 +942,11 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .proj = expand.proj,
         .full_size = trace.full_size,
         .half_size = trace.half_size,
-        .strength = strength,
-        .debug = debug ? 1u : 0u,
-        .power = power,
-        .blur = blur ? 1u : 0u,
-        .replace = replace_mask ? 1u : 0u,
+        .strength = settings.strength,
+        .debug = settings.debug ? 1u : 0u,
+        .power = settings.power,
+        .blur = settings.blur ? 1u : 0u,
+        .replace = settings.replace_mask ? 1u : 0u,
     };
 
     const vk::Buffer table_handle = table_buffer.buffer;
@@ -1685,13 +961,13 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const vk::ImageView ao_read = *ao_views[read], ao_write = *ao_views[write];
     const vk::ImageView blur_rw = *blur_view;
     const BlurConstants blur_h{.half_size = {float((w + 1) / 2), float((h + 1) / 2)}, .dir = {1, 0},
-                               .sigma = sigma, .use_n = denoise == 2 && debug < 2 ? 1u : 0u};
-    const BlurConstants blur_v{.half_size = blur_h.half_size, .dir = {0, 1}, .sigma = sigma, .use_n = blur_h.use_n};
+                               .sigma = settings.sigma, .use_n = settings.denoise == 2 && settings.debug < 2 ? 1u : 0u};
+    const BlurConstants blur_v{.half_size = blur_h.half_size, .dir = {0, 1}, .sigma = settings.sigma, .use_n = blur_h.use_n};
     const vk::ImageView motion = *motion_view;
 
     // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
-    const u32 last_stage = stage;
-    const bool fast_trace = build_fast_trace;
+    const u32 last_stage = settings.stage;
+    const bool fast_trace = settings.build_fast_trace;
     const vk::BuildAccelerationStructureFlagsKHR extra_flags =
         data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
                     : vk::BuildAccelerationStructureFlagsKHR{};
@@ -1902,7 +1178,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     scheduler.RecordCrumb(
         {.name = "rtao trace"},
         [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
-         rt = use_rt_pipeline && rt_trace_pipeline ? *rt_trace_pipeline : vk::Pipeline{},
+         rt = settings.use_rt_pipeline && rt_trace_pipeline ? *rt_trace_pipeline : vk::Pipeline{},
          sbt_rgen = sbt_rgen, sbt_miss = sbt_miss, sbt_hit = sbt_hit,
          ao_image = vk::Image(v2 ? raw_image : ao_images[write])](vk::CommandBuffer cmdbuf) {
             const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
@@ -1996,7 +1272,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     history_valid = true;
 
     // 4b. Separable depth-aware blur of the AO image (in place through blur_image).
-    if (sigma > 0.0f && debug < 2) { // the debug views stay unblurred
+    if (settings.sigma > 0.0f && settings.debug < 2) { // the debug views stay unblurred
         profile(0x47A06ull, "rtao blur");
         scheduler.RecordCrumb(
             {.name = "rtao blur"},
