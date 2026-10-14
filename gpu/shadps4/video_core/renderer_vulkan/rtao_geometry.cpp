@@ -145,6 +145,14 @@ std::vector<ChunkGroup> SplitTriangles(const float* triangles, u32 count, float 
     return groups;
 }
 
+double HeapScale(std::uint64_t heap_budget, std::uint64_t footprint) {
+    if (footprint == 0) {
+        return 1.0;
+    }
+    const double scale = std::min(1.0, HeapShare * double(heap_budget) / double(footprint));
+    return scale < MinScale ? 0.0 : scale;
+}
+
 void RangeAllocator::Reset(u32 new_size) {
     free_ranges.clear();
     size = new_size;

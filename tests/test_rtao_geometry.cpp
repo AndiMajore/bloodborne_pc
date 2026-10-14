@@ -197,6 +197,15 @@ static void Hold() {
     assert(!hold.Holds(0x0, 0x2000));    // released: nothing held
 }
 
+static void Heap() {
+    const u64 mib = 1ull << 20;
+    assert(HeapScale(16000 * mib, 1450 * mib) == 1.0);           // 16 GB: everything fits
+    const double eight = HeapScale(7600 * mib, 1450 * mib);      // an 8 GB card's budget
+    assert(eight > 0.6 && eight < 0.65);                         // 912 MiB of 1450
+    assert(HeapScale(3000 * mib, 1450 * mib) == 0.0);            // under a third: off
+    assert(HeapScale(1000 * mib, 0) == 1.0);
+}
+
 static void SettingsParsing() {
     Settings s;
     bool reset = false;
@@ -227,6 +236,7 @@ int main() {
     Split();
     Pool();
     Hold();
+    Heap();
     SettingsParsing();
     std::puts("rtao-geometry-test: ok");
     return 0;

@@ -201,10 +201,11 @@ private:
     u64 static_bytes = 0;                 // the RTAO's fixed buffers (footprint report)
     std::unordered_map<u64, CacheEntry> cache;
     Rtao::RangeAllocator pool;            // triangles of static_pool
-    static constexpr u32 PoolTriangles = 3000000;
-    static constexpr u32 StaticTriangles = 2000000;  // the static BLAS's budget
+    // Defaults; scaled down with the device heap at creation (Rtao::HeapScale, ticket 28).
+    u32 pool_triangles = 3000000;
+    u32 static_max = 2000000;  // the static BLAS's budget
     static constexpr u32 StaticSeenFrames = 120;     // draws not seen for longer leave it
-    Buffer static_pool;                   // device: float3 x 3 x PoolTriangles
+    Buffer static_pool;                   // device: float3 x 3 x pool_triangles
     Buffer static_blas_buffer;
     vk::AccelerationStructureKHR static_blas{};
     vk::DeviceAddress static_blas_address = 0;

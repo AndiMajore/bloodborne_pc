@@ -82,6 +82,14 @@ struct ChunkGroup {
 std::vector<ChunkGroup> SplitTriangles(const float* triangles, u32 count, float cell, u32 max_triangles,
                                        u32 min_triangles, float* out);
 
+/// The share of the device heap the RTAO's buffers may take, and the smallest scale it runs at.
+inline constexpr double HeapShare = 0.12, MinScale = 1.0 / 3.0;
+
+/// How far the RTAO's triangle budgets shrink so that `footprint` bytes (at the default budgets,
+/// scaling linearly with them) stay within HeapShare of `heap_budget` bytes: 1 when they fit,
+/// 0 when the scale would fall below MinScale (too little memory: the RTAO stays off).
+double HeapScale(std::uint64_t heap_budget, std::uint64_t footprint);
+
 /// First-fit ranges in a fixed pool (the cached world-space triangles); freed neighbours merge.
 class RangeAllocator {
 public:

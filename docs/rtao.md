@@ -191,18 +191,25 @@ pixel near the camera is traced, so looking at the ground is the worst case.
 
 ## Memory
 
-Fixed buffers at the default 1.5M-triangle per-frame budget (RX 9070 XT, RADV):
+Fixed buffers at the default budgets (RX 9070 XT, RADV):
 
 | What | MiB |
 |---|---|
 | Per-frame BLAS (1.5M triangles, ~200 B per triangle with ALLOW_DATA_ACCESS) | 293 |
-| Static BLAS (2M triangles; sized for every `staticbuild` mode, plus a tenth) | 430 |
-| BLAS build scratch (shared: the static build, then the per-frame one) | 377 |
+| Static BLAS (2M triangles, `staticbuild` at creation, plus a tenth) | 430 |
+| BLAS build scratch (shared: the static build, then the per-frame one) | ~300 |
 | Static pool (3M triangles, 36 B each) | 102 |
-| Triangle list (1.5M per-frame + 0.4M cache copies) and the host staging for splits | ~95 |
-| TLAS, rings, probe buffers | ~30 |
+| Triangle list (1.5M per-frame + 0.4M cache copies) | 65 |
+| TLAS, rings, probe buffers, host staging for splits | ~45 |
+| Total reported (`RTAO: fixed buffers`) | 1236 |
 | The RTAO's region of the object-motion capture (4M positions x 2 frames) | 128 |
-| Total reported (`RTAO: fixed buffers`) | ~1320 |
+
+The budgets scale with the device: at creation the pass reads the device-local heap's budget (VMA)
+and keeps its buffers plus its capture region within 12 percent of it, shrinking the per-frame,
+static and pool budgets alike; below a third of the defaults it stays off with a message
+(`RTAO: device heap budget ...` in the log; `BB_RTAO_HEAP_MB=N` pretends a budget). An 8 GB card
+(budget 7600 MiB): scale 0.69, 878 MiB, and the Hunter's Dream still fits the static BLAS. The
+texture collector sees these buffers in the device usage it compares (no separate report needed).
 
 Nothing is allocated per cached draw any more. The buffers are made at the first frame with a
 scene camera, not at start: made at start, before the game's own resources, the game's lights

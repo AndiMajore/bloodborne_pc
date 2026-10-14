@@ -151,6 +151,95 @@ bool RayTracedAO::CreateAccelerationStructures() {
     scratch_alignment = std::max<vk::DeviceSize>(as_props.minAccelerationStructureScratchOffsetAlignment, 1);
 
     using BU = vk::BufferUsageFlagBits;
+    // Sizes of a BLAS over one triangle list.
+    const auto query = [&](vk::BuildAccelerationStructureFlagsKHR flags, u32 triangles) {
+        const vk::AccelerationStructureGeometryKHR geometry{
+            .geometryType = vk::GeometryTypeKHR::eTriangles,
+            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                             .vertexStride = 3 * sizeof(float),
+                             .maxVertex = triangles * 3 - 1,
+                             .indexType = vk::IndexType::eNoneKHR,
+                         }},
+            .flags = vk::GeometryFlagBitsKHR::eOpaque,
+        };
+        const vk::AccelerationStructureBuildGeometryInfoKHR info{
+            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+            .flags = flags,
+            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+            .geometryCount = 1,
+            .pGeometries = &geometry,
+        };
+        return device.getAccelerationStructureBuildSizesKHR(vk::AccelerationStructureBuildTypeKHR::eDevice,
+                                                            info, triangles);
+    };
+    // The per-frame BLAS: fast build (a fast-trace build measured no different and is larger);
+    // BB_RTAO_FAST_TRACE=1 sizes for both and allows build=1.
+    fast_trace_allowed = EnvU32("BB_RTAO_FAST_TRACE", 0) != 0;
+    const vk::BuildAccelerationStructureFlagsKHR access =
+        data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{};
+    const auto per_frame_sizes = [&](u32 triangles) {
+        auto sizes = query(vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | access, triangles);
+        if (fast_trace_allowed) {
+            const auto trace = query(vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace | access, triangles);
+            sizes.accelerationStructureSize = std::max(sizes.accelerationStructureSize, trace.accelerationStructureSize);
+            sizes.buildScratchSize = std::max(sizes.buildScratchSize, trace.buildScratchSize);
+        }
+        return sizes;
+    };
+    // The static BLAS: built rarely (staticbuild=, sized for the mode at creation; another mode
+    // set live may leave the furthest parts out); it shares the scratch (built before the
+    // per-frame BLAS, with a barrier between). A tenth more room: its builds have many geometries
+    // (one per part), sized again per build.
+    const auto static_sizes_for = [&](u32 triangles) {
+        auto sizes = query(StaticFlags(settings.static_build), triangles);
+        sizes.accelerationStructureSize += sizes.accelerationStructureSize / 10;
+        sizes.buildScratchSize += sizes.buildScratchSize / 10;
+        return sizes;
+    };
+    // Device memory at a scale of the default budgets (all of it scales with them).
+    const auto footprint = [&](double scale) {
+        const auto frame_sizes = per_frame_sizes(u32(max_triangles * scale));
+        const auto static_sizes = static_sizes_for(u32(static_max * scale));
+        return frame_sizes.accelerationStructureSize + static_sizes.accelerationStructureSize +
+               std::max(frame_sizes.buildScratchSize, static_sizes.buildScratchSize) +
+               u64(pool_triangles * scale) * 36 + u64(max_triangles * scale + PromoTriangles) * 36 +
+               u64(object_motion.CapturePerFrame()) * 2 * 16;
+    };
+    // At most Rtao::HeapShare of the device heap's budget (BB_RTAO_HEAP_MB: pretend a budget, to
+    // test a smaller card); below a third of the defaults the RTAO stays off.
+    {
+        const auto& props = instance.GetPhysicalDevice().getMemoryProperties();
+        std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+        vmaGetHeapBudgets(instance.GetAllocator(), budgets.data());
+        u64 heap = 0;
+        for (u32 i = 0; i < props.memoryHeapCount; ++i) {
+            if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+                heap = std::max<u64>(heap, budgets[i].budget);
+            }
+        }
+        if (const u32 forced = EnvU32("BB_RTAO_HEAP_MB", 0)) {
+            heap = u64(forced) << 20;
+        }
+        const u64 full = footprint(1.0);
+        const double scale = Rtao::HeapScale(heap, full);
+        if (scale == 0.0) {
+            std::printf("RTAO: off: its buffers need at least %llu MiB, %.0f%% of a device heap budget of "
+                        "%llu MiB is %llu MiB\n", (unsigned long long)((u64(full * Rtao::MinScale)) >> 20),
+                        Rtao::HeapShare * 100.0, (unsigned long long)(heap >> 20),
+                        (unsigned long long)(u64(heap * Rtao::HeapShare) >> 20));
+            return false;
+        }
+        if (scale < 1.0) {
+            max_triangles = u32(max_triangles * scale);
+            static_max = u32(static_max * scale);
+            pool_triangles = u32(pool_triangles * scale);
+        }
+        std::printf("RTAO: device heap budget %llu MiB: buffers %llu MiB (scale %.2f: per-frame %u, static %u, "
+                    "pool %u triangles)\n", (unsigned long long)(heap >> 20),
+                    (unsigned long long)(footprint(1.0) >> 20), scale, max_triangles, static_max,
+                    pool_triangles);
+    }
     if (!CreateBuffer(table_buffer, vk::DeviceSize(TableSlots) * max_geometries * sizeof(GpuGeometry),
                       BU::eStorageBuffer, true) ||
         !CreateBuffer(triangle_buffer, vk::DeviceSize(max_triangles + PromoTriangles) * 9 * sizeof(float),
@@ -171,74 +260,12 @@ bool RayTracedAO::CreateAccelerationStructures() {
                       BU::eTransferDst, true) ||
         !CreateBuffer(split_fetch, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferDst, true, 0, false, true) ||
         !CreateBuffer(split_staging, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferSrc, true) ||
-        !CreateBuffer(static_pool, vk::DeviceSize(PoolTriangles) * 36,
+        !CreateBuffer(static_pool, vk::DeviceSize(pool_triangles) * 36,
                       BU::eAccelerationStructureBuildInputReadOnlyKHR | BU::eTransferDst, false)) {
         return false;
     }
-
-    // BLAS: one triangle geometry over the whole list, sized for the budget.
-    vk::AccelerationStructureGeometryKHR blas_geometry{
-        .geometryType = vk::GeometryTypeKHR::eTriangles,
-        .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                         .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                         .vertexData = {.deviceAddress = triangle_buffer.address},
-                         .vertexStride = 3 * sizeof(float),
-                         .maxVertex = max_triangles * 3 - 1,
-                         .indexType = vk::IndexType::eNoneKHR,
-                     }},
-        .flags = vk::GeometryFlagBitsKHR::eOpaque,
-    };
-    vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
-        .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{}),
-        .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-        .geometryCount = 1,
-        .pGeometries = &blas_geometry,
-    };
-    // Sized for fast build only (the per-frame BLAS; a fast-trace build measured no different and
-    // its sizes are larger): BB_RTAO_FAST_TRACE=1 sizes for both and allows build=1.
-    auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
-        vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
-    {
-        auto trace_info = blas_info;
-        trace_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
-                           (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
-                                        : vk::BuildAccelerationStructureFlagsKHR{});
-        const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
-            vk::AccelerationStructureBuildTypeKHR::eDevice, trace_info, max_triangles);
-        std::printf("RTAO: per-frame BLAS for %u triangles: fast build %llu MiB + %llu scratch, fast trace %llu MiB + "
-                    "%llu scratch\n", max_triangles,
-                    (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
-                    (unsigned long long)(blas_sizes.buildScratchSize >> 20),
-                    (unsigned long long)(trace_sizes.accelerationStructureSize >> 20),
-                    (unsigned long long)(trace_sizes.buildScratchSize >> 20));
-        fast_trace_allowed = EnvU32("BB_RTAO_FAST_TRACE", 0) != 0;
-        if (fast_trace_allowed) {
-            blas_sizes.accelerationStructureSize =
-                std::max(blas_sizes.accelerationStructureSize, trace_sizes.accelerationStructureSize);
-            blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
-        }
-    }
-    // The static BLAS: built rarely (staticbuild=); it shares the scratch (built before the
-    // per-frame BLAS, with a barrier between). A tenth more room: its builds have many geometries
-    // (one per part), sized again per build.
-    vk::AccelerationStructureBuildSizesInfoKHR static_sizes{};
-    {
-        auto static_info = blas_info;
-        for (u32 mode = 0; mode < 3; ++mode) { // sized for every staticbuild= mode
-            static_info.flags = StaticFlags(mode);
-            const auto sizes = device.getAccelerationStructureBuildSizesKHR(
-                vk::AccelerationStructureBuildTypeKHR::eDevice, static_info, StaticTriangles);
-            std::printf("RTAO: static BLAS, staticbuild=%u: %llu MiB + %llu scratch\n", mode,
-                        (unsigned long long)(sizes.accelerationStructureSize >> 20),
-                        (unsigned long long)(sizes.buildScratchSize >> 20));
-            static_sizes.accelerationStructureSize =
-                std::max(static_sizes.accelerationStructureSize, sizes.accelerationStructureSize);
-            static_sizes.buildScratchSize = std::max(static_sizes.buildScratchSize, sizes.buildScratchSize);
-        }
-        static_sizes.accelerationStructureSize += static_sizes.accelerationStructureSize / 10;
-        static_sizes.buildScratchSize += static_sizes.buildScratchSize / 10;
-    }
+    const auto blas_sizes = per_frame_sizes(max_triangles);
+    const auto static_sizes = static_sizes_for(static_max);
     if (!CreateBuffer(blas_buffer, blas_sizes.accelerationStructureSize,
                       BU::eAccelerationStructureStorageKHR, false) ||
         !CreateBuffer(blas_scratch, std::max(blas_sizes.buildScratchSize, static_sizes.buildScratchSize),
@@ -253,11 +280,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
         .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
     }));
     static_blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = static_blas});
-    pool.Reset(PoolTriangles);
-    std::printf("RTAO: static cache: pool of %u triangles (%llu MiB), static BLAS for %u triangles %llu MiB "
-                "(+%llu scratch)\n", PoolTriangles, (unsigned long long)(static_pool.size >> 20), StaticTriangles,
-                (unsigned long long)(static_sizes.accelerationStructureSize >> 20),
-                (unsigned long long)(static_sizes.buildScratchSize >> 20));
+    pool.Reset(pool_triangles);
     blas = Check(device.createAccelerationStructureKHR({
         .buffer = blas_buffer.buffer,
         .size = blas_sizes.accelerationStructureSize,
@@ -370,7 +393,7 @@ void RayTracedAO::RebuildStatic(float reach) {
     std::vector<Candidate> chosen;
     u32 triangles = 0;
     for (const auto& part : parts) {
-        if (triangles + part.triangles > StaticTriangles) {
+        if (triangles + part.triangles > static_max) {
             leave_out(part);
             continue;
         }
