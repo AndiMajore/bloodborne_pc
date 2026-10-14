@@ -711,7 +711,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
                                 ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
                                 : 0;
+        // Test of the retirement hold (BB_RTAO_TEST_MOVE=1, with BB_DRAW_PIPE=0): when the game's AO
+        // upsample starts, the next draw first moves every layer mirror back in place and submits,
+        // so the buffers the frame's draws were bound to retire before the RTAO pass reads them.
+        static const bool test_move = [] {
+            const char* env = std::getenv("BB_RTAO_TEST_MOVE");
+            return env && env[0] == '1';
+        }();
+        if (test_move && ps_hash == RayTracedAO::AoUpsampleShader) {
+            rtao_test_move_pending = true;
+        }
         rtao->OnColorTarget(cb_descs[0].first, ps_hash);
+        if (rtao->TakeRecorded()) {
+            buffer_cache.ReleaseRetirements(scheduler.CurrentTick());
+        }
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -1611,6 +1624,15 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    if (rtao_test_move_pending) {
+        rtao_test_move_pending = false;
+        static u32 moves = 0;
+        if (++moves % 600 == 1) {
+            std::printf("RTAO test: layer mirrors moved back and submitted before the AO pass (%u)\n", moves);
+        }
+        buffer_cache.DemoteAllMirrors();
+        scheduler.Flush();
+    }
     BB_SECTION(DrawRecord);
     buffer_cache.NewPacket();
     if (DrawPipe::OnStageB()) {
@@ -1637,6 +1659,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         ssgi->OnFrameStart();
+        static const bool rtao_hold = [] {
+            const char* env = std::getenv("BB_RTAO_HOLD"); // 0: off (to test what it protects)
+            return !env || env[0] != '0';
+        }();
+        if (rtao->Enabled() && rtao_hold) {
+            // Buffers the buffer cache retires during the frame wait for the RTAO pass (it reads
+            // the frame's index buffers by address when the game's AO pass ends).
+            buffer_cache.ReleaseRetirements(scheduler.CurrentTick());
+            buffer_cache.HoldRetirements();
+        }
         rtao->OnFrameStart();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
@@ -1785,6 +1817,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             // projection, which would collapse into a sheet in front of the camera.
             if (rtao->Enabled() && gbuffer_draw && push_data.motion_param &&
                 object_motion->LastAllocation().store) {
+                // Small index ranges go through the buffer cache's stream ring, which may be reused
+                // before the RTAO pass reads them: the RTAO copies them from the game's memory now.
+                const u64 index_bytes = u64(regs.num_indices) * index_size;
+                const void* rtao_index_host =
+                    is_indexed && index_bytes <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+                            !buffer_cache.IsRegionGpuModified(index_address, index_bytes) &&
+                            memory->IsValidGpuMapping(index_address, index_bytes) &&
+                            memory->ClampRangeSize(index_address, index_bytes) == index_bytes
+                        ? reinterpret_cast<const void*>(index_address)
+                        : nullptr;
                 const auto& alloc = object_motion->LastAllocation();
                 rtao->AddGeometry({
                     .store = alloc.store,
@@ -1809,6 +1851,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                                     (u64(regs.num_instances.NumInstances()) << 8) ^
                                                     u64(u32(base_vertex)) ^ (u64(first_instance) << 48)),
                     .skinned = skinned,
+                    .index_host = rtao_index_host,
+                    .index_bytes = rtao_index_host ? u32(regs.num_indices * index_size) : 0u,
                 });
             }
         }

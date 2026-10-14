@@ -48,7 +48,17 @@ public:
         bool depth_write; // off: decals and overlays hugging other surfaces
         u64 key;          // identity across frames (shader, buffers, ranges); the occurrence is added
         bool skinned;     // a bone palette: never cached
+        // Small index ranges (the buffer cache streams them through a ring that is reused once the
+        // draw's tick is done): the game's memory, copied at draw time into the RTAO's own ring.
+        const void* index_host = nullptr;
+        u32 index_bytes = 0;
     };
+    /// True once per frame, after the pass was recorded (the caller releases what it held).
+    bool TakeRecorded() {
+        const bool value = recorded_this_frame;
+        recorded_this_frame = false;
+        return value;
+    }
 
     explicit RayTracedAO(const Instance& instance, Scheduler& scheduler,
                          VideoCore::TextureCache& texture_cache, Runtime& runtime,
@@ -197,6 +207,7 @@ private:
     std::array<u64, ProbeSlots> probe_ticks{};
     u64 readback_tick = 0, dump_tick = 0;
     u32 skipped_busy = 0;   // passes skipped because the slot was still in use (per report)
+    u64 index_bytes_frame = 0, index_bytes_small = 0; // measurement: index data per frame (all, < 16 KiB ranges)
     bool ring_test = false; // settings "ringtest=1": every pass on slot 0 (exercises the skip)
     static constexpr u32 MaxInstances = 8192;
     static constexpr u32 PromoTriangles = 400000; // world-space triangles built per frame at most
@@ -250,6 +261,12 @@ private:
     Buffer probe_buffer;      // host (read back): ProbeStats[max_geometries] x ProbeSlots
     Buffer promo_scratch;     // device: scratch for the frame's cache builds
     Buffer constants_buffer;  // host: the trace's per-frame constants x TableSlots
+    Buffer index_ring;        // host: small index ranges copied at draw time, IndexRingSlot x TableSlots
+    static constexpr vk::DeviceSize IndexRingSlot = 4ull << 20;
+    vk::DeviceSize index_ring_used = 0;
+    int index_ring_state = -1; // this frame: -1 not checked, 0 slot busy, 1 usable
+    u32 skipped_copy = 0;      // draws left out: the index ring slot was busy or full (per report)
+    bool recorded_this_frame = false;
     static constexpr vk::DeviceSize ConstantsStride = 256; // >= minUniformBufferOffsetAlignment
     Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch;
     Buffer instance_buffer;   // host: AccelerationStructureInstanceKHR[MaxInstances] x TableSlots

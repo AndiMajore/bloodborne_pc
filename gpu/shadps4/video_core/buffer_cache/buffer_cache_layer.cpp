@@ -578,7 +578,7 @@ u64 BufferCache::LayerPromoteRun(u64 first, u64 end) {
             Layer().RemoveMirror(old.base);
             auto node = layer_mirrors.extract(old.base);
             if (!node.empty()) {
-                layer_retired.push_back({std::move(node.mapped()), scheduler.CurrentTick()});
+                layer_retired.push_back({std::move(node.mapped()), RetireTick()});
             }
         }
         Layer().AddMirror(start, bytes, target->Handle(), target->BufferDeviceAddress(), target);
@@ -694,10 +694,21 @@ void BufferCache::LayerDemote(u64 first, u64 end, bool copy_back, int reason) {
         auto node = layer_mirrors.extract(mirror.base);
         if (!node.empty()) {
             BbStats::residency_alloc_bytes.fetch_sub(mirror.size, std::memory_order_relaxed);
-            layer_retired.push_back({std::move(node.mapped()), scheduler.CurrentTick()});
+            layer_retired.push_back({std::move(node.mapped()), RetireTick()});
         }
     }
     ++layer_generation;
+}
+
+void BufferCache::DemoteAllMirrors() {
+    if (layer_mirrors.empty()) {
+        return;
+    }
+    LayerDemote(0, (1ull << 48) >> block_shift, true, 3);
+}
+
+u64 BufferCache::RetireTick() const {
+    return retire_hold ? HeldTick : scheduler.CurrentTick();
 }
 
 void BufferCache::LayerMaintain() {
@@ -870,7 +881,7 @@ u64 BufferCache::LayerCompactMirrors(u64 wanted) {
             BbStats::residency_alloc_bytes.fetch_add(size, std::memory_order_relaxed);
             kept += size;
         }
-        layer_retired.push_back({std::move(node.mapped()), scheduler.CurrentTick()});
+        layer_retired.push_back({std::move(node.mapped()), RetireTick()});
         LayerRepublish(lo, hi); // paged bindings find the new buffers
         ++layer_generation;
         freed += old_size - kept;

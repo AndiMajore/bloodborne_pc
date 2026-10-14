@@ -310,7 +310,7 @@ RayTracedAO::~RayTracedAO() {
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
                          &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
-                         &promo_scratch, &constants_buffer, &sbt_buffer}) {
+                         &promo_scratch, &constants_buffer, &sbt_buffer, &index_ring}) {
         DestroyBuffer(*buffer);
     }
 }
@@ -448,6 +448,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
         !CreateBuffer(probe_buffer, vk::DeviceSize(ProbeSlots) * max_geometries * sizeof(ProbeStats),
                       BU::eStorageBuffer, true) ||
         !CreateBuffer(constants_buffer, vk::DeviceSize(TableSlots) * ConstantsStride, BU::eUniformBuffer, true) ||
+        !CreateBuffer(index_ring, vk::DeviceSize(TableSlots) * IndexRingSlot, BU::eStorageBuffer, true) ||
         !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
                       BU::eTransferDst, true)) {
         return false;
@@ -541,7 +542,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
              {&constants_buffer, "rtao constants"}, {&blas_buffer, "rtao per-frame BLAS"},
              {&blas_scratch, "rtao BLAS scratch"}, {&promo_scratch, "rtao cache scratch"},
              {&tlas_buffer, "rtao TLAS"}, {&tlas_scratch, "rtao TLAS scratch"},
-             {&readback_buffer, "rtao readback"}}) {
+             {&readback_buffer, "rtao readback"}, {&index_ring, "rtao index ring"}}) {
         SetObjectName(device, buffer->buffer, name);
     }
     SetObjectName(device, blas, "rtao per-frame BLAS");
@@ -632,6 +633,12 @@ void RayTracedAO::OnFrameStart() {
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
                     max_triangles, skipped_topology, skipped_alpha, skipped_nowrite, skipped_no_address,
                     recorded, skipped_busy);
+        if (skipped_copy) {
+            std::printf("RTAO: %u draws left out (index ring slot busy or full) in 600 frames\n", skipped_copy);
+            skipped_copy = 0;
+        }
+        std::printf("RTAO: index data of the last frame: %llu KiB (%llu KiB in ranges of <= 16 KiB)\n",
+                    (unsigned long long)(index_bytes_frame >> 10), (unsigned long long)(index_bytes_small >> 10));
         if (history_resets) {
             std::printf("RTAO: history reset %u times (gaps or camera jumps) in 600 frames\n", history_resets);
             history_resets = 0;
@@ -657,8 +664,13 @@ void RayTracedAO::OnFrameStart() {
         ++reports;
     }
     TrimCache();
+    if (frame % 600 != 599) { // keep the last frame's totals for the report
+        index_bytes_frame = index_bytes_small = 0;
+    }
     draws.clear();
     occurrences.clear();
+    index_ring_state = -1;
+    index_ring_used = 0;
     dropped_triangles = 0;
     dropped_draws = 0;
     skipped_topology = 0;
@@ -715,7 +727,32 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
         dropped_triangles += tris;
         return;
     }
+    u64 index_address = g.index_address;
+    bool index_mid_word = (g.index_address & 2) != 0;
+    if (g.index_host && g.index_bytes) {
+        // The frame's ring slot is the one the pass will use; only once the GPU is done with it.
+        const u32 copy_slot = ring_test ? 0u : frame % TableSlots;
+        if (index_ring_state < 0) {
+            index_ring_state = (!slot_ticks[copy_slot] || scheduler.IsFree(slot_ticks[copy_slot])) ? 1 : 0;
+            index_ring_used = 0;
+        }
+        const vk::DeviceSize at = (index_ring_used + 3) & ~vk::DeviceSize(3);
+        if (index_ring_state == 0 || at + g.index_bytes > IndexRingSlot) {
+            ++skipped_copy;
+            return;
+        }
+        const vk::DeviceSize offset = vk::DeviceSize(copy_slot) * IndexRingSlot + at;
+        std::memcpy(static_cast<u8*>(index_ring.mapped) + offset, g.index_host, g.index_bytes);
+        index_ring_used = at + g.index_bytes;
+        index_address = index_ring.address + offset;
+        index_mid_word = false;
+    }
     // The same buffers may be drawn more than once a frame: the occurrence keeps them apart.
+    {
+        const u64 bytes = g.non_indexed ? 0 : u64(g.index_count) * (g.index16 ? 2 : 4);
+        index_bytes_frame += bytes;
+        index_bytes_small += bytes <= 16384 ? bytes : 0;
+    }
     const u32 occurrence = occurrences[g.key]++;
     u32& copies = max_copies[g.key];
     copies = std::max(copies, occurrence + 1);
@@ -730,9 +767,9 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
                           .first_vertex = g.first_vertex,
                           // 16-bit index buffers may start 2 bytes into a word: read words
                           // from the aligned address and skip the first half-word.
-                          .index_address = g.index16 ? (g.index_address & ~u64(3)) : g.index_address,
+                          .index_address = g.index16 ? (index_address & ~u64(3)) : index_address,
                           .index_count = g.index_count,
-                          .index16 = g.index16 ? (1u | u32((g.index_address & 2) ? 2u : 0u)) : 0u,
+                          .index16 = g.index16 ? (1u | (index_mid_word ? 2u : 0u)) : 0u,
                           .base_vertex = g.base_vertex,
                           .restart = g.restart ? 1u : 0u,
                           .triangle_offset = 0,
@@ -1324,6 +1361,11 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         probe_keys[ring].push_back(verify_keys[i]);
     }
     probe_ids[ring] = probe_id;
+    if (index_ring_used) {
+        vmaFlushAllocation(instance.GetAllocator(), index_ring.allocation,
+                           vk::DeviceSize(slot) * IndexRingSlot, index_ring_used);
+    }
+    recorded_this_frame = true;
     // This pass's commands go out with the current tick: the slots are busy until it is reached.
     slot_ticks[slot] = scheduler.CurrentTick();
     probe_ticks[ring] = slot_ticks[slot];

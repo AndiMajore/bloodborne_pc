@@ -400,6 +400,27 @@ private:
     void LayerDemote(u64 first_block, u64 end_block, bool copy_back, int reason);
     /// Frees retired mirrors the GPU is done with.
     void LayerMaintain();
+public:
+    /// bbport (ray-traced AO): buffers retired while held are not freed until released with a tick:
+    /// the RTAO reads the frame's index buffers by device address when the game's AO pass ends,
+    /// draws after the draw that bound them.
+    void HoldRetirements() {
+        retire_hold = true;
+    }
+    /// Test (BB_RTAO_TEST_MOVE=1): every layer mirror back in place now, as a demotion does.
+    void DemoteAllMirrors();
+    void ReleaseRetirements(u64 tick) {
+        retire_hold = false;
+        for (auto& retired : layer_retired) {
+            if (retired.second == HeldTick) {
+                retired.second = tick;
+            }
+        }
+    }
+private:
+    static constexpr u64 HeldTick = ~0ull;
+    bool retire_hold = false;
+    u64 RetireTick() const; // buffer_cache_layer.cpp
     /// Mirrored blocks not bound for BB_VRAM_IDLE_SECONDS go back in place.
     void LayerProcessIdle();
     /// VRAM near the texture collector's critical mark: idle mirrors go back in place.

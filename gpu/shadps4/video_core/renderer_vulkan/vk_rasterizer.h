@@ -451,7 +451,8 @@ private:
     std::unique_ptr<DrawPreparation> draw_prep;
     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
     std::unique_ptr<ScreenSpaceGI> ssgi;         // bbport: BB_SSGI=1 (vk_ssgi.h)
-    std::unique_ptr<RayTracedAO> rtao;           // bbport: BB_RTAO=1 (vk_rtao.h)
+    std::unique_ptr<RayTracedAO> rtao;
+    bool rtao_test_move_pending = false; // BB_RTAO_TEST_MOVE: see PrepareRenderState           // bbport: BB_RTAO=1 (vk_rtao.h)
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
     std::unique_ptr<ObjectMotion> object_motion;
