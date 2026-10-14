@@ -222,10 +222,6 @@ public:
     bool IsRayQuerySupported() const {
         return ray_query;
     }
-    /// bbport: VK_KHR_ray_tracing_position_fetch (the hit triangle's vertices in ray queries).
-    bool IsRayTracingPositionFetchSupported() const noexcept {
-        return position_fetch;
-    }
     /// bbport: VK_KHR_ray_tracing_pipeline (the RTAO trace's pipeline variant).
     bool IsRayTracingPipelineSupported() const noexcept {
         return ray_tracing_pipeline;
@@ -615,7 +611,6 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
     bool ray_query{}; // bbport: VK_KHR_ray_query + acceleration structures (vk_rtao.cpp)
-    bool position_fetch{}; // bbport: VK_KHR_ray_tracing_position_fetch
     bool ray_tracing_pipeline{}; // bbport: VK_KHR_ray_tracing_pipeline
     bool maintenance_8{};
     bool buffer_marker{};

@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "video_core/renderer_vulkan/rtao_geometry.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -306,13 +307,16 @@ bool Instance::CreateDevice() {
         }
     }
     depth_range_unrestricted = add_extension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
-    // bbport: ray queries for the ray-traced AO (vk_rtao.cpp); all three or none.
-    ray_query = add_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
-                add_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
-                add_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
-    position_fetch = ray_query && add_extension(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
-    // bbport: the ray-tracing-pipeline variant of the RTAO trace (an A/B against ray queries).
-    ray_tracing_pipeline = ray_query && add_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    // bbport: ray queries and ray-tracing pipelines for the ray-traced AO (vk_rtao.cpp), only
+    // when it is asked for (BB_RTAO=1): otherwise the device is created as without it.
+    if (Rtao::Requested()) {
+        ray_query = add_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
+                    add_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+                    add_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        ray_tracing_pipeline = ray_query && add_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        std::printf("RTAO: device extensions: ray queries %s, ray-tracing pipeline %s\n",
+                    ray_query ? "on" : "unsupported", ray_tracing_pipeline ? "on" : "unsupported");
+    }
     dynamic_state_3 = add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
     if (dynamic_state_3) {
         dynamic_state_3_features =
@@ -652,9 +656,6 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceRayTracingPipelineFeaturesKHR{
             .rayTracingPipeline = true,
         },
-        vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR{
-            .rayTracingPositionFetch = true,
-        },
     };
     if (!ray_query) {
         device_chain.unlink<vk::PhysicalDeviceAccelerationStructureFeaturesKHR>();
@@ -662,9 +663,6 @@ bool Instance::CreateDevice() {
     }
     if (!ray_tracing_pipeline) {
         device_chain.unlink<vk::PhysicalDeviceRayTracingPipelineFeaturesKHR>();
-    }
-    if (!position_fetch) {
-        device_chain.unlink<vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR>();
     }
 
     if (!custom_border_color) {

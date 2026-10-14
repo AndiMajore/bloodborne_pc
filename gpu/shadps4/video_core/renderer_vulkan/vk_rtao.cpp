@@ -49,7 +49,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         std::puts("RTAO: ray queries unsupported by the driver, off");
         return;
     }
-    if (!object_motion.Enabled() || !camera_motion.Enabled()) {
+    if (!object_motion.Enabled() || !ObjectMotion::RtaoCapture() || !camera_motion.Enabled()) {
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
     }
@@ -364,7 +364,7 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     }
     // The positions must lie inside the capture (two halves of the object-motion buffer).
     const u64 last = u64(g.store) + u64(g.vertices) * g.instances;
-    if (last > 1 + 2ull * object_motion.PositionsCapacity()) {
+    if (last > object_motion.PositionsEntries()) {
         ++dropped_draws;
         dropped_triangles += tris;
         return;

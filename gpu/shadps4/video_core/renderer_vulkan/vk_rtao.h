@@ -71,6 +71,11 @@ public:
     [[nodiscard]] bool Enabled() const noexcept {
         return enabled;
     }
+    /// Running now: not switched off live (enabled=0) and its buffers made. The capture of
+    /// positions follows this, not Enabled().
+    [[nodiscard]] bool Active() const noexcept {
+        return enabled && resources_ready && settings.active;
+    }
     void OnFrameStart();
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {

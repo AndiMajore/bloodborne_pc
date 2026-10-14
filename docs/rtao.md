@@ -9,18 +9,26 @@ it the port is unchanged.
 ## Requirements
 
 - `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`, `VK_KHR_deferred_host_operations` (RADV on
-  RDNA2 and later, NVIDIA, Intel Arc). Without them the feature logs why and stays off.
+  RDNA2 and later, NVIDIA, Intel Arc). Without them the feature logs why and stays off. They
+  are enabled on the device only with `BB_RTAO=1`.
   `VK_KHR_ray_tracing_pipeline`, where present, runs the trace as a ray-tracing pipeline (faster
   on the RX 9070 XT); otherwise it runs as ray queries in a compute shader.
 - Object motion vectors (an upscaler with motion vectors): the geometry comes from that capture.
-  `BB_RTAO=1` makes the capture cover every vertex pipeline and doubles it to 8M vertices.
+  With `BB_RTAO=1`, ray queries and object motion on, G-buffer pipelines the motion path leaves
+  out get a capture-only variant (pipeline key `motion_vectors = 2`: the vertex shader stores
+  positions, the fragment shader and attachments are as without RTAO), and their draws store
+  positions without history into a region and parameter block of their own (4M vertices per
+  frame). The motion vectors the upscaler gets do not change: the `Object motion:` stats line is
+  the same with RTAO on and off. Without `BB_RTAO=1` the device, the capture and every pipeline
+  key are as without the feature.
 - The game's own SSAO pass must run: the "Disable SSAO" game patch (launcher, Game effects,
   SSAO unchecked) removes the mask RTAO writes into. The log says so once.
 
 ## Data flow per frame
 
 1. G-buffer draws (five or more colour targets plus depth) store their post-vertex-shader clip
-   positions in the object-motion capture. `Rasterizer` hands each to `RayTracedAO::AddGeometry`
+   positions in the object-motion capture (the motion path's draws in its history, the rest in
+   the RTAO's own region; only while the pass is on, `enabled=1`). `Rasterizer` hands each to `RayTracedAO::AddGeometry`
    with its index buffer address, counts, topology, alpha-test and depth-write state, an identity
    hash and whether it is skinned. Strips, alpha-tested draws (foliage) and draws without depth
    write (decals) are left out.
@@ -100,7 +108,7 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|
-| `enabled` | | 1 | 0: the pass is not recorded (the capture stays on) |
+| `enabled` | | 1 | 0: the pass is not recorded and nothing is captured for it (the pipeline variants stay) |
 | `strength` | `BB_RTAO_STRENGTH` | 1.0 | how much of the AO enters the mask |
 | `power` | `BB_RTAO_POWER` | 2.0 | `ao^power` (1 = physically plain, 2 = the chosen look) |
 | `radius` | `BB_RTAO_RADIUS` | 1.5 | ray length in metres |
@@ -188,7 +196,7 @@ Fixed buffers at the default 1.5M-triangle per-frame budget (RX 9070 XT, RADV):
 | Static pool (3M triangles, 36 B each) | 102 |
 | Triangle list (1.5M per-frame + 0.4M cache copies) and the host staging for splits | ~95 |
 | TLAS, rings, probe buffers | ~30 |
-| Object-motion capture with `BB_RTAO=1` (8M positions x 2 frames) | 256 |
+| The RTAO's region of the object-motion capture (4M positions x 2 frames) | 128 |
 | Total reported (`RTAO: fixed buffers`) | ~1320 |
 
 Nothing is allocated per cached draw any more. The buffers are made at the first frame with a
@@ -214,8 +222,7 @@ went out (lanterns, candles; reproducibly from about 1.3 GiB, with VRAM far from
   compare the sets of message IDs. The layer reports each ID a limited number of times.
   State of 2026-10-14 at the Doll: no message names an RTAO object and GPU-AV found nothing in 453
   passes. Expected noise from the port: the motion capture's fragment input at location 31 (over
-  128 components) and its unbound attachment 6 (more frequent with `BB_RTAO=1`, which captures
-  every pipeline), a tessellation interface mismatch, FSR 4 cooperative matrices, a 4 GiB buffer,
+  128 components) and its unbound attachment 6, a tessellation interface mismatch, FSR 4 cooperative matrices, a 4 GiB buffer,
   an sRGB storage view, present and render-pass-load hazards.
 
 ## Known limitations

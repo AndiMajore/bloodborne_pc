@@ -314,7 +314,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
     }
     std::printf("RTAO: fixed buffers %llu MiB (with the object-motion capture's %llu MiB of positions)\n",
                 (unsigned long long)(static_bytes >> 20),
-                (unsigned long long)((u64(object_motion.PositionsCapacity()) * 2 * 16) >> 20));
+                (unsigned long long)((u64(object_motion.CapturePerFrame()) * 2 * 16) >> 20));
     std::printf("RTAO: acceleration structures: BLAS %llu MiB (+%llu scratch), triangles %llu MiB\n",
                 (unsigned long long)(blas_sizes.accelerationStructureSize >> 20),
                 (unsigned long long)(blas_sizes.buildScratchSize >> 20),
