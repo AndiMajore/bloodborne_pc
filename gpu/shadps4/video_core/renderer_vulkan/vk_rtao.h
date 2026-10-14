@@ -271,6 +271,10 @@ private:
     static constexpr u32 ReadbackTriangles = 4096;
     Buffer triangle_buffer;   // device: float3 x 3 x (max_triangles + PromoTriangles)
     Buffer probe_buffer;      // host (read back): ProbeStats[max_geometries] x ProbeSlots
+    Buffer probe_chunks;      // host: (geometry, first index) per 4096-index chunk x TableSlots
+    Buffer probe_ranges;      // host: (first chunk, chunks) per table entry x TableSlots
+    Buffer probe_partials;    // device: per chunk sum/count, min, max
+    static constexpr u32 MaxProbeChunks = 32768;
     Buffer promo_scratch;     // device: scratch for the frame's cache builds
     Buffer constants_buffer;  // host: the trace's per-frame constants x TableSlots
     Buffer index_ring;        // host: small index ranges copied at draw time, IndexRingSlot x TableSlots

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// bbport: ray-traced AO, static-cache probe (vk_rtao.cpp). One workgroup per draw of the frame's
-// table: its captured vertices in world space, reduced to a count, centroid, bounding box and the
-// first vertex. The host reads them back a few frames later; a draw whose summary stays the same
+// bbport: ray-traced AO, static-cache probe (vk_rtao.cpp): each probed draw's captured vertices in
+// world space, reduced to a count, centroid, bounding box and the first vertex. Two passes: pass 1
+// reduces chunks of 4096 indices (one workgroup each: a big mesh no longer walks its indices in one
+// workgroup), pass 2 combines a draw's chunks (one workgroup per draw). The host reads them back a few frames later; a draw whose summary stays the same
 // over several frames is static and gets its own world-space BLAS.
 #version 450
 #extension GL_EXT_buffer_reference : require
@@ -33,8 +34,17 @@ struct Stats {
     float first[3];
     uint pad[2];
 };
+struct Partial {
+    vec4 sum_count;   // xyz sum, w count
+    vec4 bmin;
+    vec4 bmax;
+};
 layout(binding = 0, std430) readonly buffer Geometries { Geometry geometries[]; };
 layout(binding = 1, std430) writeonly buffer Out { Stats stats[]; };
+layout(binding = 2, std430) readonly buffer Chunks { uvec2 chunks[]; };    // geometry, first index
+layout(binding = 3, std430) buffer Partials { Partial partials[]; };
+layout(binding = 4, std430) readonly buffer Ranges { uvec2 ranges[]; };    // per geometry: first chunk, chunks
+const uint ChunkIndices = 4096u;
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Positions { vec4 p[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint w[]; };
@@ -54,6 +64,8 @@ layout(push_constant) uniform Constants {
     uint id;
     vec4 proj;
     vec4 inv_view[3];    // view -> world rows
+    uint pass_index;     // 1: chunks, 2: per draw
+    uint num_chunks;
 };
 
 shared vec3 s_sum[64];
@@ -67,49 +79,7 @@ vec3 World(vec4 clip) {
     return vec3(dot(inv_view[0], v), dot(inv_view[1], v), dot(inv_view[2], v));
 }
 
-void main() {
-    const uint gi = gl_WorkGroupID.x;
-    const uint lane = gl_LocalInvocationID.x;
-    if (gi >= num_geometries) {
-        return;
-    }
-    const Geometry g = geometries[gi];
-    if ((g.flags & 2u) == 0u) {
-        return;
-    }
-    Positions positions = Positions(positions_address);
-    Words words = Words(g.index_address);
-    // Only the vertices the indices use: the capture writes no others, and its unused slots hold
-    // whatever an earlier draw left there.
-    const uint restart_value = (g.index16 & 1u) != 0u ? 0xffffu : 0xffffffffu;
-    const uint total = g.index_count * g.instances;
-    vec3 sum = vec3(0.0), bmin = vec3(1e30), bmax = vec3(-1e30);
-    uint count = 0u;
-    for (uint n = lane; n < total; n += 64u) {
-        const uint instance = n / g.index_count;
-        const uint i = n - instance * g.index_count;
-        const uint index = g.index_address != 0ul ? ReadIndex(words, g.index16, i) : i;
-        if (g.restart != 0u && index == restart_value) {
-            continue;
-        }
-        const int vertex = int(index) + g.base_vertex - int(g.first_vertex);
-        if (vertex < 0 || uint(vertex) >= g.vertices) {
-            continue;
-        }
-        const vec4 clip = positions.p[g.store + uint(vertex) + instance * g.vertices];
-        if (any(isnan(clip)) || any(isinf(clip))) {
-            continue;
-        }
-        const vec3 w = World(clip);
-        sum += w;
-        bmin = min(bmin, w);
-        bmax = max(bmax, w);
-        ++count;
-    }
-    s_sum[lane] = sum;
-    s_min[lane] = bmin;
-    s_max[lane] = bmax;
-    s_count[lane] = count;
+void Reduce(uint lane) {
     barrier();
     for (uint step = 32u; step > 0u; step >>= 1) {
         if (lane < step) {
@@ -120,6 +90,84 @@ void main() {
         }
         barrier();
     }
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    if (pass_index == 1u) {
+        const uint ci = gl_WorkGroupID.x;
+        if (ci >= num_chunks) {
+            return;
+        }
+        const uvec2 chunk = chunks[ci];
+        const Geometry g = geometries[chunk.x];
+        Positions positions = Positions(positions_address);
+        Words words = Words(g.index_address);
+        // Only the vertices the indices use: the capture writes no others, and its unused slots
+        // hold whatever an earlier draw left there.
+        const uint restart_value = (g.index16 & 1u) != 0u ? 0xffffu : 0xffffffffu;
+        const uint end = min(chunk.y + ChunkIndices, g.index_count * g.instances);
+        vec3 sum = vec3(0.0), bmin = vec3(1e30), bmax = vec3(-1e30);
+        uint count = 0u;
+        for (uint n = chunk.y + lane; n < end; n += 64u) {
+            const uint instance = n / g.index_count;
+            const uint i = n - instance * g.index_count;
+            const uint index = g.index_address != 0ul ? ReadIndex(words, g.index16, i) : i;
+            if (g.restart != 0u && index == restart_value) {
+                continue;
+            }
+            const int vertex = int(index) + g.base_vertex - int(g.first_vertex);
+            if (vertex < 0 || uint(vertex) >= g.vertices) {
+                continue;
+            }
+            const vec4 clip = positions.p[g.store + uint(vertex) + instance * g.vertices];
+            if (any(isnan(clip)) || any(isinf(clip))) {
+                continue;
+            }
+            const vec3 w = World(clip);
+            sum += w;
+            bmin = min(bmin, w);
+            bmax = max(bmax, w);
+            ++count;
+        }
+        s_sum[lane] = sum;
+        s_min[lane] = bmin;
+        s_max[lane] = bmax;
+        s_count[lane] = count;
+        Reduce(lane);
+        if (lane == 0u) {
+            partials[ci].sum_count = vec4(s_sum[0], float(s_count[0]));
+            partials[ci].bmin = vec4(s_min[0], 0.0);
+            partials[ci].bmax = vec4(s_max[0], 0.0);
+        }
+        return;
+    }
+    // Pass 2: one workgroup per probed draw combines its chunks.
+    const uint gi = gl_WorkGroupID.x;
+    if (gi >= num_geometries) {
+        return;
+    }
+    const Geometry g = geometries[gi];
+    if ((g.flags & 2u) == 0u) {
+        return;
+    }
+    const uvec2 range = ranges[gi];
+    vec3 sum = vec3(0.0), bmin = vec3(1e30), bmax = vec3(-1e30);
+    uint count = 0u;
+    for (uint c = range.x + lane; c < range.x + range.y; c += 64u) {
+        const Partial p = partials[c];
+        sum += p.sum_count.xyz;
+        count += uint(p.sum_count.w);
+        bmin = min(bmin, p.bmin.xyz);
+        bmax = max(bmax, p.bmax.xyz);
+    }
+    s_sum[lane] = sum;
+    s_min[lane] = bmin;
+    s_max[lane] = bmax;
+    s_count[lane] = count;
+    Reduce(lane);
+    Positions positions = Positions(positions_address);
+    Words words = Words(g.index_address);
     if (lane == 0u) {
         const uint n = s_count[0];
         const vec3 c = n > 0u ? s_sum[0] / float(n) : vec3(0.0);

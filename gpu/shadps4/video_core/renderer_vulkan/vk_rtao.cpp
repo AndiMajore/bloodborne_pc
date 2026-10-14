@@ -53,8 +53,10 @@ struct ProbeConstants {
     u32 id;
     std::array<float, 4> proj;
     std::array<float, 12> inv_view;
+    u32 pass_index;
+    u32 num_chunks;
 };
-static_assert(sizeof(ProbeConstants) == 80 && offsetof(ProbeConstants, proj) == 16);
+static_assert(sizeof(ProbeConstants) == 88 && offsetof(ProbeConstants, pass_index) == 80);
 struct TraceConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -219,7 +221,9 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     make_layouts(apply_bindings, sizeof(ApplyConstants), apply_desc_layout, apply_layout);
     make_layouts(blur_bindings, sizeof(BlurConstants), blur_desc_layout, blur_layout);
     blur_pipeline = make_pipeline(RTAO_BLUR_COMP, *blur_layout);
-    const std::array probe_bindings = {binding(0, DT::eStorageBuffer), binding(1, DT::eStorageBuffer)};
+    const std::array probe_bindings = {binding(0, DT::eStorageBuffer), binding(1, DT::eStorageBuffer),
+                                       binding(2, DT::eStorageBuffer), binding(3, DT::eStorageBuffer),
+                                       binding(4, DT::eStorageBuffer)};
     make_layouts(probe_bindings, sizeof(ProbeConstants), probe_desc_layout, probe_layout);
     probe_pipeline = make_pipeline(RTAO_PROBE_COMP, *probe_layout);
     expand_pipeline = make_pipeline(RTAO_EXPAND_COMP, *expand_layout);
@@ -345,7 +349,8 @@ RayTracedAO::~RayTracedAO() {
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
                          &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
-                         &promo_scratch, &constants_buffer, &sbt_buffer, &index_ring}) {
+                         &promo_scratch, &constants_buffer, &sbt_buffer, &index_ring, &probe_chunks,
+                         &probe_ranges, &probe_partials}) {
         DestroyBuffer(*buffer);
     }
 }
@@ -484,6 +489,9 @@ bool RayTracedAO::CreateAccelerationStructures() {
                       BU::eStorageBuffer, true) ||
         !CreateBuffer(constants_buffer, vk::DeviceSize(TableSlots) * ConstantsStride, BU::eUniformBuffer, true) ||
         !CreateBuffer(index_ring, vk::DeviceSize(TableSlots) * IndexRingSlot, BU::eStorageBuffer, true) ||
+        !CreateBuffer(probe_chunks, vk::DeviceSize(TableSlots) * MaxProbeChunks * 8, BU::eStorageBuffer, true) ||
+        !CreateBuffer(probe_ranges, vk::DeviceSize(TableSlots) * max_geometries * 8, BU::eStorageBuffer, true) ||
+        !CreateBuffer(probe_partials, vk::DeviceSize(MaxProbeChunks) * 48, BU::eStorageBuffer, false) ||
         !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
                       BU::eTransferDst, true)) {
         return false;
@@ -1427,6 +1435,35 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         geometries.push_back(verify_list[i]);
         probe_keys[ring].push_back(verify_keys[i]);
     }
+    // Probe chunks: 4096 indices each (pass 1), then one combine per draw (pass 2).
+    u32 num_chunks = 0;
+    {
+        auto* chunk_map = static_cast<std::array<u32, 2>*>(probe_chunks.mapped) + size_t(slot) * MaxProbeChunks;
+        auto* range_map = static_cast<std::array<u32, 2>*>(probe_ranges.mapped) + size_t(slot) * max_geometries;
+        for (size_t i = 0; i < geometries.size(); ++i) {
+            auto& g = geometries[i];
+            range_map[i] = {0, 0};
+            if (!(g.flags & GeoProbe)) {
+                continue;
+            }
+            const u32 total = g.index_count * g.instances;
+            const u32 n = (total + 4095) / 4096;
+            if (num_chunks + n > MaxProbeChunks) { // too much this frame: next time
+                g.flags &= ~GeoProbe;
+                probe_keys[ring][i] = 0;
+                continue;
+            }
+            range_map[i] = {num_chunks, n};
+            for (u32 k = 0; k < n; ++k) {
+                chunk_map[num_chunks + k] = {u32(i), k * 4096};
+            }
+            num_chunks += n;
+        }
+        vmaFlushAllocation(instance.GetAllocator(), probe_chunks.allocation, vk::DeviceSize(slot) * MaxProbeChunks * 8,
+                           std::max<vk::DeviceSize>(num_chunks, 1) * 8);
+        vmaFlushAllocation(instance.GetAllocator(), probe_ranges.allocation, vk::DeviceSize(slot) * max_geometries * 8,
+                           std::max<vk::DeviceSize>(geometries.size(), 1) * 8);
+    }
     probe_ids[ring] = probe_id;
     if (index_ring_used) {
         vmaFlushAllocation(instance.GetAllocator(), index_ring.allocation,
@@ -1504,7 +1541,15 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .id = probe_id,
         .proj = expand.proj,
         .inv_view = inv_view,
+        .pass_index = 1,
+        .num_chunks = num_chunks,
     };
+    ProbeConstants probe_combine = probe;
+    probe_combine.pass_index = 2;
+    const vk::Buffer chunks_handle = probe_chunks.buffer, ranges_handle = probe_ranges.buffer,
+                     partials_handle = probe_partials.buffer;
+    const vk::DeviceSize chunks_offset = vk::DeviceSize(slot) * MaxProbeChunks * 8,
+                         ranges_offset = vk::DeviceSize(slot) * max_geometries * 8;
     const vk::Buffer probe_handle = probe_buffer.buffer;
     const vk::DeviceSize probe_offset = vk::DeviceSize(ring) * max_geometries * sizeof(ProbeStats);
     const vk::DeviceSize probe_bytes = vk::DeviceSize(max_geometries) * sizeof(ProbeStats);
@@ -1628,23 +1673,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                                      &expand);
                 cmdbuf.dispatch((dispatch_triangles + 63) / 64, 1, 1);
             }
-            if (num_geometries) { // the static cache's measurements, read back by the host later
-                const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
-                const vk::DescriptorBufferInfo probe_info{probe_handle, probe_offset, probe_bytes};
-                const std::array writes = {
-                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageBuffer,
-                                           .pBufferInfo = &table_info},
-                    vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageBuffer,
-                                           .pBufferInfo = &probe_info}};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, probe_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, probe_layout, 0, writes);
-                cmdbuf.pushConstants(probe_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(probe), &probe);
-                cmdbuf.dispatch(num_geometries, 1, 1);
-                memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
-                               vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
-            }
+
             memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
                            AsBuild | vk::PipelineStageFlagBits2::eTransfer,
                            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead);
@@ -1653,6 +1682,41 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 cmdbuf.copyBuffer(triangles_handle, readback_handle, region);
             }
         });
+
+    // 1b. The static cache's measurements (its own crumb and profiler segment).
+    if (num_geometries && num_chunks) {
+        profile(0x47A08ull, "rtao probe");
+        scheduler.RecordCrumb(
+            {.name = "rtao probe"},
+            [=, probe_pipeline = *probe_pipeline, probe_layout = *probe_layout](vk::CommandBuffer cmdbuf) {
+                const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
+                const vk::DescriptorBufferInfo probe_info{probe_handle, probe_offset, probe_bytes};
+                const vk::DescriptorBufferInfo chunks_info{chunks_handle, chunks_offset,
+                                                           vk::DeviceSize(MaxProbeChunks) * 8};
+                const vk::DescriptorBufferInfo partials_info{partials_handle, 0, vk::DeviceSize(MaxProbeChunks) * 48};
+                const vk::DescriptorBufferInfo ranges_info{ranges_handle, ranges_offset,
+                                                           vk::DeviceSize(max_geometries) * 8};
+                const auto storage = [](u32 binding_index, const vk::DescriptorBufferInfo* buffer_info) {
+                    return vk::WriteDescriptorSet{.dstBinding = binding_index, .descriptorCount = 1,
+                                                  .descriptorType = vk::DescriptorType::eStorageBuffer,
+                                                  .pBufferInfo = buffer_info};
+                };
+                const std::array writes = {storage(0, &table_info), storage(1, &probe_info),
+                                           storage(2, &chunks_info), storage(3, &partials_info),
+                                           storage(4, &ranges_info)};
+                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, probe_pipeline);
+                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, probe_layout, 0, writes);
+                cmdbuf.pushConstants(probe_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(probe), &probe);
+                cmdbuf.dispatch(num_chunks, 1, 1); // pass 1: chunks
+                memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, Compute,
+                               vk::AccessFlagBits2::eShaderRead);
+                cmdbuf.pushConstants(probe_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(probe_combine),
+                                     &probe_combine);
+                cmdbuf.dispatch(num_geometries, 1, 1); // pass 2: per draw
+                memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
+                               vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
+            });
+    }
 
     // 2. BLAS over the triangle list.
     if (last_stage < 2) {
