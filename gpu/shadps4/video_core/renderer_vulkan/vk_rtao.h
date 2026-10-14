@@ -22,6 +22,7 @@
 
 namespace VideoCore {
 class TextureCache;
+class BufferCache;
 }
 
 namespace Vulkan {
@@ -51,21 +52,16 @@ public:
         bool depth_write; // off: decals and overlays hugging other surfaces
         u64 key;          // identity across frames (shader, buffers, ranges); the occurrence is added
         bool skinned;     // a bone palette: never cached
-        // Small index ranges (the buffer cache streams them through a ring that is reused once the
-        // draw's tick is done): the guest address, copied at draw time into the RTAO's own ring
-        // through the runtime's backing view (Core::MemoryManager::ReadBacking; 0: none).
+        // The guest range of the indices (0: not indexed). Small ranges (the buffer cache streams
+        // them through a ring reused once the draw's tick is done) are copied at draw time into
+        // the RTAO's own ring through the runtime's backing view; the others are read by address
+        // at the pass, and the buffer cache holds mirrors over them until then.
         VAddr index_guest = 0;
         u32 index_bytes = 0;
     };
-    /// True once per frame, after the pass was recorded (the caller releases what it held).
-    bool TakeRecorded() {
-        const bool value = recorded_this_frame;
-        recorded_this_frame = false;
-        return value;
-    }
-
     explicit RayTracedAO(const Instance& instance, Scheduler& scheduler,
-                         VideoCore::TextureCache& texture_cache, Runtime& runtime,
+                         VideoCore::TextureCache& texture_cache, VideoCore::BufferCache& buffer_cache,
+                         Runtime& runtime,
                          CameraMotion& camera_motion, ObjectMotion& object_motion);
     ~RayTracedAO();
 
@@ -176,6 +172,7 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     VideoCore::TextureCache& texture_cache;
+    VideoCore::BufferCache& buffer_cache; // the retirement hold over index ranges read by address
     Runtime& runtime;
     CameraMotion& camera_motion;
     ObjectMotion& object_motion;
@@ -299,6 +296,10 @@ private:
     int index_ring_state = -1; // this frame: -1 not checked, 0 slot busy, 1 usable
     u32 skipped_copy = 0;      // draws left out: the index ring slot was busy or full (per report)
     bool recorded_this_frame = false;
+    bool hold_enabled = true;     // BB_RTAO_HOLD=0: no retirement hold (to test what it protects)
+    bool test_move = false;       // BB_RTAO_TEST_MOVE=1 (layer memory, BB_DRAW_PIPE=0): mirrors moved
+    bool test_move_pending = false; // back in place between the AO upsample and the pass
+    u32 test_moves = 0;
     static constexpr vk::DeviceSize ConstantsStride = 256; // >= minUniformBufferOffsetAlignment
     Buffer blas_buffer, blas_scratch, tlas_buffer, tlas_scratch;
     Buffer instance_buffer;   // host: AccelerationStructureInstanceKHR[MaxInstances] x TableSlots

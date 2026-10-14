@@ -37,6 +37,7 @@ class GraphicsPipeline;
 struct SubmitInfo;
 class Runtime;
 class StagingBufferPool;
+class RayTracedAO; // bbport: its test seam (DemoteAllMirrors)
 } // namespace Vulkan
 
 namespace VideoCore {
@@ -411,8 +412,6 @@ public:
     void HoldRange(VAddr address, u64 size) {
         retire_hold.Add(address, size);
     }
-    /// Test (BB_RTAO_TEST_MOVE=1): every layer mirror back in place now, as a demotion does.
-    void DemoteAllMirrors();
     void ReleaseRetirements(u64 tick) {
         retire_hold.End();
         for (auto& retired : layer_retired) {
@@ -422,6 +421,10 @@ public:
         }
     }
 private:
+    /// Test seam of the ray-traced AO (BB_RTAO_TEST_MOVE=1): every layer mirror back in place now,
+    /// as a demotion does.
+    friend class Vulkan::RayTracedAO;
+    void DemoteAllMirrors();
     static constexpr u64 HeldTick = ~0ull;
     RetireHold retire_hold;
     u64 RetireTick(VAddr base, u64 size) const; // buffer_cache_layer.cpp

@@ -25,6 +25,7 @@
 #include "video_core/host_shaders/rtao_trace_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/buffer_cache/buffer_cache.h"
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -39,9 +40,9 @@ namespace Vulkan {
 using namespace RtaoInternal;
 
 RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
-                         VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
-                         CameraMotion& camera_motion_, ObjectMotion& object_motion_)
-    : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
+                         VideoCore::TextureCache& texture_cache_, VideoCore::BufferCache& buffer_cache_,
+                         Runtime& runtime_, CameraMotion& camera_motion_, ObjectMotion& object_motion_)
+    : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       runtime{runtime_}, camera_motion{camera_motion_}, object_motion{object_motion_} {
     if (!Rtao::Requested()) {
         return;
@@ -71,6 +72,8 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     // The static BLAS: staticbuild= (fast build with the flag by default: a rebuild costs 1.4 ms
     // instead of 2.75 for fast trace, and traces 0.03 ms slower).
     data_access = EnvU32("BB_RTAO_DATA_ACCESS", 1) != 0;
+    hold_enabled = EnvU32("BB_RTAO_HOLD", 1) != 0;
+    test_move = EnvU32("BB_RTAO_TEST_MOVE", 0) != 0;
 
     const auto device = instance.GetDevice();
     const auto make_layouts = [&](std::span<const vk::DescriptorSetLayoutBinding> bindings,
@@ -331,6 +334,12 @@ void RayTracedAO::OnFrameStart() {
     mask_candidate = {};
     ++frame;
     PollSettings();
+    // Mirrors over the index ranges read by address this frame wait for the pass (it reads them
+    // when the game's AO pass ends, draws later); nothing else is held, and only while it is on.
+    buffer_cache.ReleaseRetirements(scheduler.CurrentTick());
+    if (Active() && hold_enabled) {
+        buffer_cache.HoldRetirements();
+    }
 }
 
 void RayTracedAO::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal) {
@@ -378,7 +387,17 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     }
     u64 index_address = g.index_address;
     bool index_mid_word = (g.index_address & 2) != 0;
-    if (g.index_guest && g.index_bytes) {
+    // Small ranges are copied now (the stream ring may be reused before the pass); the others
+    // are held by the buffer cache until the pass is recorded.
+    const bool copy_indices = g.index_guest && g.index_bytes &&
+                              g.index_bytes <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+                              !buffer_cache.IsRegionGpuModified(g.index_guest, g.index_bytes) &&
+                              Core::Memory::Instance()->IsValidGpuMapping(g.index_guest, g.index_bytes) &&
+                              Core::Memory::Instance()->ClampRangeSize(g.index_guest, g.index_bytes) == g.index_bytes;
+    if (g.index_guest && g.index_bytes && !copy_indices) {
+        buffer_cache.HoldRange(g.index_guest, g.index_bytes);
+    }
+    if (copy_indices) {
         // The frame's ring slot is the one the pass will use; only once the GPU is done with it.
         const u32 copy_slot = settings.ring_test ? 0u : frame % TableSlots;
         if (index_ring_state < 0) {
@@ -439,12 +458,28 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
     if (!enabled || !resources_ready) {
         return;
     }
+    if (test_move_pending) { // the draw after the AO upsample's first one, before the pass
+        test_move_pending = false;
+        if (++test_moves % 600 == 1) {
+            std::printf("RTAO test: layer mirrors moved back and submitted before the AO pass (%u)\n",
+                        test_moves);
+        }
+        buffer_cache.DemoteAllMirrors();
+        scheduler.Flush();
+    }
+    if (test_move && ps_hash == AoUpsampleShader && Active()) {
+        test_move_pending = true;
+    }
     if (color != last_color) {
         // The previous pass ended. Was it the game's AO upsample (into the R8 mask)?
         if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && settings.active &&
             !draws.empty()) {
             done_this_frame = true;
             Record(mask_candidate);
+            if (recorded_this_frame) { // what the pass reads is in its commands: release the hold
+                recorded_this_frame = false;
+                buffer_cache.ReleaseRetirements(scheduler.CurrentTick());
+            }
         }
         last_color = color;
         mask_candidate = {};
