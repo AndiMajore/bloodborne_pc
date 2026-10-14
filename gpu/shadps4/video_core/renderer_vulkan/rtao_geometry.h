@@ -80,7 +80,7 @@ struct Settings {
     float strength = 1.0f, power = 2.0f, radius = 1.5f, history = 0.5f, sigma = 1.5f;
     u32 rays = 2, debug = 0, stage = 5, denoise = 2;
     bool blur = true, replace_mask = false, depth_normals = true, use_rt_pipeline = true;
-    float snap_far = 30.0f, ao_far = 40.0f, origin_offset = 0.0f;
+    float snap_far = 0.0f, ao_far = 40.0f, origin_offset = 0.0f;
     float max_n = 32.0f, clip_k = 2.0f, clip_floor = 0.1f;
     bool subpixel = false;
     u32 falloff = 0, noise_period = 8;
