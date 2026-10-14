@@ -138,6 +138,7 @@ private:
     void DestroyBuffer(Buffer& buffer);
     bool EnsureResources(u32 width, u32 height);
     bool CreateAccelerationStructures();
+    void CreateTracePipeline(); // the ray-tracing-pipeline variant (pipeline=1)
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect);
     void Record(VideoCore::ImageId mask);
@@ -235,6 +236,10 @@ private:
         probe_desc_layout;
     vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout, probe_layout;
     vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline;
+    vk::UniquePipeline rt_trace_pipeline; // ray-tracing pipeline variant of the trace
+    bool use_rt_pipeline = false;          // settings "pipeline=": on when supported (BB_RTAO_PIPELINE=0: off)
+    Buffer sbt_buffer;
+    vk::StridedDeviceAddressRegionKHR sbt_rgen{}, sbt_miss{}, sbt_hit{};
     // Geometry and acceleration structures
     static constexpr u32 TableSlots = 3;
     std::array<u64, TableSlots> slot_ticks{};

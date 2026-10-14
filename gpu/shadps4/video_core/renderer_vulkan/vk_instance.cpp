@@ -311,6 +311,8 @@ bool Instance::CreateDevice() {
                 add_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
                 add_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
     position_fetch = ray_query && add_extension(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+    // bbport: the ray-tracing-pipeline variant of the RTAO trace (an A/B against ray queries).
+    ray_tracing_pipeline = ray_query && add_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
     dynamic_state_3 = add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
     if (dynamic_state_3) {
         dynamic_state_3_features =
@@ -647,6 +649,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceRayQueryFeaturesKHR{
             .rayQuery = true,
         },
+        vk::PhysicalDeviceRayTracingPipelineFeaturesKHR{
+            .rayTracingPipeline = true,
+        },
         vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR{
             .rayTracingPositionFetch = true,
         },
@@ -654,6 +659,9 @@ bool Instance::CreateDevice() {
     if (!ray_query) {
         device_chain.unlink<vk::PhysicalDeviceAccelerationStructureFeaturesKHR>();
         device_chain.unlink<vk::PhysicalDeviceRayQueryFeaturesKHR>();
+    }
+    if (!ray_tracing_pipeline) {
+        device_chain.unlink<vk::PhysicalDeviceRayTracingPipelineFeaturesKHR>();
     }
     if (!position_fetch) {
         device_chain.unlink<vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR>();

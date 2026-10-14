@@ -20,6 +20,9 @@
 #include "video_core/host_shaders/rtao_expand_comp.h"
 #include "video_core/host_shaders/rtao_probe_comp.h"
 #include "video_core/host_shaders/rtao_trace_comp.h"
+#include "video_core/host_shaders/rtao_trace_rchit.h"
+#include "video_core/host_shaders/rtao_trace_rgen.h"
+#include "video_core/host_shaders/rtao_trace_rmiss.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
@@ -98,6 +101,8 @@ u32 EnvU32(const char* name, u32 fallback) {
 }
 constexpr auto AsBuild = vk::PipelineStageFlagBits2::eAccelerationStructureBuildKHR;
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
+// The trace runs in compute (ray queries) or as a ray-generation shader (pipeline=1).
+constexpr auto TraceStages = Compute | vk::PipelineStageFlagBits2::eRayTracingShaderKHR;
 } // namespace
 
 RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
@@ -172,11 +177,19 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     };
     using DT = vk::DescriptorType;
     const std::array expand_bindings = {binding(0, DT::eStorageBuffer), binding(1, DT::eStorageBuffer)};
-    const std::array trace_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
-                                       binding(2, DT::eSampledImage), binding(3, DT::eSampledImage),
-                                       binding(4, DT::eStorageImage),
-                                       binding(5, DT::eAccelerationStructureKHR),
-                                       binding(6, DT::eUniformBuffer)};
+    const bool rt_pipeline_supported = instance.IsRayTracingPipelineSupported();
+    const auto trace_binding = [&](u32 index, vk::DescriptorType type) {
+        auto b = binding(index, type);
+        if (rt_pipeline_supported) {
+            b.stageFlags |= vk::ShaderStageFlagBits::eRaygenKHR;
+        }
+        return b;
+    };
+    const std::array trace_bindings = {trace_binding(0, DT::eSampledImage), trace_binding(1, DT::eSampledImage),
+                                       trace_binding(2, DT::eSampledImage), trace_binding(3, DT::eSampledImage),
+                                       trace_binding(4, DT::eStorageImage),
+                                       trace_binding(5, DT::eAccelerationStructureKHR),
+                                       trace_binding(6, DT::eUniformBuffer)};
     const std::array apply_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eStorageImage)};
     make_layouts(expand_bindings, sizeof(ExpandConstants), expand_desc_layout, expand_layout);
@@ -191,6 +204,11 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     expand_pipeline = make_pipeline(RTAO_EXPAND_COMP, *expand_layout);
     trace_pipeline = make_pipeline(RTAO_TRACE_COMP, *trace_layout);
     apply_pipeline = make_pipeline(RTAO_APPLY_COMP, *apply_layout);
+    if (rt_pipeline_supported) {
+        CreateTracePipeline();
+        // Measured at the Doll: trace 1.40-1.44 ms as a pipeline vs 1.62-1.64 ms with ray queries.
+        use_rt_pipeline = rt_trace_pipeline && EnvU32("BB_RTAO_PIPELINE", 1) != 0;
+    }
     // Names for validation messages and captures.
     SetObjectName(device, *expand_pipeline, "rtao expand");
     SetObjectName(device, *probe_pipeline, "rtao probe");
@@ -257,6 +275,7 @@ void RayTracedAO::PollSettings() {
         else if (key == "maxsize") cache_max_size = std::max(value, 0.0f);
         else if (key == "ringtest") ring_test = value != 0.0f;
         else if (key == "normals") depth_normals = value != 0.0f;
+        else if (key == "pipeline") use_rt_pipeline = value != 0.0f && rt_trace_pipeline;
         else if (key == "offset") origin_offset = std::clamp(value, 0.0f, 0.1f);
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
@@ -291,9 +310,79 @@ RayTracedAO::~RayTracedAO() {
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
                          &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
-                         &promo_scratch, &constants_buffer}) {
+                         &promo_scratch, &constants_buffer, &sbt_buffer}) {
         DestroyBuffer(*buffer);
     }
+}
+
+void RayTracedAO::CreateTracePipeline() {
+    const auto device = instance.GetDevice();
+    const std::array modules = {CompileSPV(RTAO_TRACE_RGEN, device), CompileSPV(RTAO_TRACE_RMISS, device),
+                                CompileSPV(RTAO_TRACE_RCHIT, device)};
+    const std::array stages = {
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eRaygenKHR, .module = modules[0], .pName = "main"},
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eMissKHR, .module = modules[1], .pName = "main"},
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eClosestHitKHR, .module = modules[2], .pName = "main"},
+    };
+    const std::array groups = {
+        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 0,
+                                               .closestHitShader = VK_SHADER_UNUSED_KHR,
+                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
+        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 1,
+                                               .closestHitShader = VK_SHADER_UNUSED_KHR,
+                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
+        vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup,
+                                               .generalShader = VK_SHADER_UNUSED_KHR, .closestHitShader = 2,
+                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .intersectionShader = VK_SHADER_UNUSED_KHR},
+    };
+    const auto result = device.createRayTracingPipelinesKHR(
+        {}, {}, vk::RayTracingPipelineCreateInfoKHR{
+                    .stageCount = u32(stages.size()),
+                    .pStages = stages.data(),
+                    .groupCount = u32(groups.size()),
+                    .pGroups = groups.data(),
+                    .maxPipelineRayRecursionDepth = 1,
+                    .layout = *trace_layout,
+                });
+    for (const auto module : modules) {
+        device.destroyShaderModule(module);
+    }
+    if (result.result != vk::Result::eSuccess || result.value.empty()) {
+        std::printf("RTAO: the ray-tracing-pipeline trace could not be created (%s)\n",
+                    vk::to_string(result.result).c_str());
+        return;
+    }
+    rt_trace_pipeline = vk::UniquePipeline(result.value[0], device);
+    // Shader binding table: raygen, miss, hit, each at a base-aligned offset.
+    const auto props = instance.GetPhysicalDevice()
+                           .getProperties2<vk::PhysicalDeviceProperties2,
+                                           vk::PhysicalDeviceRayTracingPipelinePropertiesKHR>()
+                           .get<vk::PhysicalDeviceRayTracingPipelinePropertiesKHR>();
+    const u32 handle_size = props.shaderGroupHandleSize;
+    const u32 stride = (handle_size + props.shaderGroupHandleAlignment - 1) / props.shaderGroupHandleAlignment *
+                       props.shaderGroupHandleAlignment;
+    const u32 base = std::max(props.shaderGroupBaseAlignment, stride);
+    std::vector<u8> handles(size_t(handle_size) * groups.size());
+    if (device.getRayTracingShaderGroupHandlesKHR(*rt_trace_pipeline, 0, u32(groups.size()), handles.size(),
+                                                  handles.data()) != vk::Result::eSuccess ||
+        !CreateBuffer(sbt_buffer, vk::DeviceSize(base) * groups.size(),
+                      vk::BufferUsageFlagBits::eShaderBindingTableKHR, true, props.shaderGroupBaseAlignment)) {
+        std::puts("RTAO: the shader binding table could not be created; the pipeline trace is off");
+        rt_trace_pipeline.reset();
+        return;
+    }
+    for (size_t i = 0; i < groups.size(); ++i) {
+        std::memcpy(static_cast<u8*>(sbt_buffer.mapped) + i * base, handles.data() + i * handle_size, handle_size);
+    }
+    vmaFlushAllocation(instance.GetAllocator(), sbt_buffer.allocation, 0, VK_WHOLE_SIZE);
+    sbt_rgen = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address, .stride = stride, .size = stride};
+    sbt_miss = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + base, .stride = stride, .size = stride};
+    sbt_hit = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + 2 * base, .stride = stride, .size = stride};
+    SetObjectName(device, *rt_trace_pipeline, "rtao trace (ray-tracing pipeline)");
+    std::puts("RTAO: the trace runs as a ray-tracing pipeline (pipeline=0 in rtao.txt: ray queries)");
 }
 
 bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
@@ -951,8 +1040,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
 
     scheduler.EndRendering();
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
-    runtime.Transit(&depth, vk::ImageLayout::eGeneral, Compute, vk::AccessFlagBits2::eShaderRead);
-    runtime.Transit(&normal, vk::ImageLayout::eGeneral, Compute, vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, TraceStages, vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&normal, vk::ImageLayout::eGeneral, TraceStages, vk::AccessFlagBits2::eShaderRead);
     runtime.Transit(&mask, vk::ImageLayout::eGeneral, Compute, rw);
     runtime.FlushBarriers();
 
@@ -963,7 +1052,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         const vk::ImageMemoryBarrier2 b{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .srcAccessMask = src_access,
-            .dstStageMask = Compute,
+            .dstStageMask = TraceStages,
             .dstAccessMask = dst_access,
             .oldLayout = old_layout,
             .newLayout = vk::ImageLayout::eGeneral,
@@ -1537,7 +1626,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         };
         const vk::AccelerationStructureBuildRangeInfoKHR tlas_range{.primitiveCount = num_instances};
         cmdbuf.buildAccelerationStructuresKHR(tlas_info, &tlas_range);
-        memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, Compute,
+        memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, TraceStages,
                        vk::AccessFlagBits2::eAccelerationStructureReadKHR);
     });
 
@@ -1549,6 +1638,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     scheduler.RecordCrumb(
         {.name = "rtao trace"},
         [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
+         rt = use_rt_pipeline && rt_trace_pipeline ? *rt_trace_pipeline : vk::Pipeline{},
+         sbt_rgen = sbt_rgen, sbt_miss = sbt_miss, sbt_hit = sbt_hit,
          ao_image = vk::Image(ao_images[write])](vk::CommandBuffer cmdbuf) {
             const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
                        o = info(ao_write);
@@ -1571,11 +1662,18 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 vk::WriteDescriptorSet{.dstBinding = 6, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eUniformBuffer,
                                        .pBufferInfo = &constants_info}};
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, trace_pipeline);
-            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, trace_layout, 0, writes);
-            cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+            if (rt) {
+                cmdbuf.bindPipeline(vk::PipelineBindPoint::eRayTracingKHR, rt);
+                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eRayTracingKHR, trace_layout, 0, writes);
+                cmdbuf.traceRaysKHR(sbt_rgen, sbt_miss, sbt_hit, vk::StridedDeviceAddressRegionKHR{},
+                                    (w + 1) / 2, (h + 1) / 2, 1);
+            } else {
+                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, trace_pipeline);
+                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, trace_layout, 0, writes);
+                cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 3) / 4, 1); // 8x4 groups
+            }
             const vk::ImageMemoryBarrier2 ao_barrier{
-                .srcStageMask = Compute,
+                .srcStageMask = TraceStages,
                 .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
                 .dstStageMask = Compute | vk::PipelineStageFlagBits2::eTransfer,
                 .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead,
