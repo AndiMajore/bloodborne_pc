@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace Rtao {
 
@@ -53,6 +54,32 @@ bool StatsMatch(const ProbeStats& a, const ProbeStats& b, const std::array<float
 /// The bounding box's diagonal is longer than max_size (0: no limit).
 bool TooBig(const ProbeStats& stats, float max_size);
 
+/// An axis-aligned box (min x y z, max x y z); empty when min > max.
+struct Box {
+    float min[3]{1e30f, 1e30f, 1e30f};
+    float max[3]{-1e30f, -1e30f, -1e30f};
+    bool Empty() const { return min[0] > max[0]; }
+    void Add(const Box& other);
+    void Add(const float* point);
+    float Diagonal() const;
+    /// Squared distance from a point to the box (0 inside).
+    float Distance2(const std::array<float, 3>& p) const;
+};
+
+/// A piece of a big mesh that gets its own BLAS: a range of the reordered triangles.
+struct ChunkGroup {
+    u32 first_triangle, triangles;
+    Box box;
+};
+
+/// Big static meshes (terrain, building blocks) are cached in spatially compact pieces, each
+/// instanced only within the far cut. The world-space triangles (9 floats each; NaN: inactive)
+/// are split at the median centroid of the longest axis until a piece fits in `cell` metres
+/// (box diagonal) and `max_triangles`, or has at most `min_triangles`. Writes the active
+/// triangles reordered piece by piece to `out` (9 floats each) and returns the pieces.
+std::vector<ChunkGroup> SplitTriangles(const float* triangles, u32 count, float cell, u32 max_triangles,
+                                       u32 min_triangles, float* out);
+
 /// What the static cache knows of a draw, without its Vulkan objects.
 struct CacheState {
     u64 base = 0;
@@ -87,6 +114,7 @@ struct Settings {
     bool cache_enabled = true;
     u32 promote_after = 8;
     float cache_max_size = 20.0f;
+    float chunk_cell = 10.0f; // > 0: meshes bigger than cache_max_size are cached in pieces of this size
     bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
     float dump_request = 0.0f;
 };

@@ -4,7 +4,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdio>
+#include <limits>
 #include <set>
+#include <vector>
 #include "video_core/renderer_vulkan/rtao_geometry.h"
 
 using namespace Rtao;
@@ -106,6 +108,60 @@ static void StateMachine() {
     assert(!Promotable(s, false, false, 8));
 }
 
+static void Split() {
+    // A 100 m x 100 m floor of 1 m quads (two triangles each), shuffled like a game's index order,
+    // plus two inactive triangles.
+    std::vector<float> tris;
+    const auto tri = [&](float x0, float z0, float x1, float z1, float x2, float z2) {
+        for (float v : {x0, 0.0f, z0, x1, 0.0f, z1, x2, 0.0f, z2}) {
+            tris.push_back(v);
+        }
+    };
+    for (int i = 0; i < 100 * 100; ++i) {
+        const int q = (i * 7919) % (100 * 100); // a permutation of the quads
+        const float x = float(q % 100), z = float(q / 100);
+        tri(x, z, x + 1, z, x, z + 1);
+        tri(x + 1, z, x + 1, z + 1, x, z + 1);
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    tri(nan, 0, 0, 0, 0, 0);
+    tri(std::numeric_limits<float>::infinity(), 0, 0, 0, 0, 0);
+    const u32 count = u32(tris.size() / 9);
+    std::vector<float> out(tris.size());
+    const auto groups = SplitTriangles(tris.data(), count, 10.0f, 4096, 16, out.data());
+    u32 covered = 0, slivers = 0;
+    for (const auto& g : groups) {
+        assert(g.first_triangle == covered); // consecutive
+        assert(g.box.Diagonal() <= 10.0f || g.triangles <= 16); // the floor may leave a sliver
+        slivers += g.box.Diagonal() > 10.0f ? 1 : 0;
+        assert(g.triangles <= 4096);
+        // Every triangle of the piece lies in its box.
+        for (u32 t = g.first_triangle; t < g.first_triangle + g.triangles; ++t) {
+            for (int k = 0; k < 3; ++k) {
+                const float* v = &out[size_t(t) * 9 + k * 3];
+                for (int i = 0; i < 3; ++i) {
+                    assert(v[i] >= g.box.min[i] && v[i] <= g.box.max[i]);
+                }
+            }
+        }
+        covered += g.triangles;
+    }
+    assert(covered == 20000); // the two inactive triangles dropped
+    assert(slivers * 20 < groups.size());
+    // 10 m diagonal: pieces of at most ~7 x 7 m, so at least 100 * 100 / 49 of them; the median
+    // split keeps them balanced, not thousands of slivers.
+    assert(groups.size() >= 204 && groups.size() <= 1024);
+    // The triangle cap alone (no cell limit) and the floor on piece size.
+    assert(SplitTriangles(tris.data(), count, 1e9f, 5000, 16, out.data()).size() == 4); // 20000 / 2^2 <= 5000
+    assert(SplitTriangles(tris.data(), count, 0.1f, 1u << 30, 4096, out.data()).size() == 8);
+    // Distance from a point to a box.
+    Box b;
+    const float lo[3] = {0, 0, 0}, hi[3] = {2, 1, 1};
+    b.Add(lo);
+    b.Add(hi);
+    assert(b.Distance2({-3.0f, 0.5f, 0.5f}) == 9.0f && b.Distance2({1.0f, 0.5f, 0.5f}) == 0.0f);
+}
+
 static void SettingsParsing() {
     Settings s;
     bool reset = false;
@@ -133,6 +189,7 @@ int main() {
     Keys();
     Matching();
     StateMachine();
+    Split();
     SettingsParsing();
     std::puts("rtao-geometry-test: ok");
     return 0;

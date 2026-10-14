@@ -9,6 +9,7 @@
 
 #include <array>
 #include <chrono>
+#include <future>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -91,16 +92,42 @@ private:
     static constexpr u32 GeoWorld = Rtao::GeoWorld, GeoProbe = Rtao::GeoProbe;
 
     /// A draw seen over several frames: static ones get their own world-space BLAS.
-    struct CacheEntry : Rtao::CacheState {
-        u32 last_seen = 0;     // frame
+    /// One BLAS of a cached draw: the whole draw, or a group of its chunks (big meshes).
+    struct CachePart {
         vk::AccelerationStructureKHR blas{};
         VmaAllocation allocation{};
         vk::Buffer buffer{};
         vk::DeviceAddress address = 0;
         u64 bytes = 0;
         u32 triangles = 0;
+        Rtao::Box box; // world space: instanced only within the far cut
+    };
+    struct CacheEntry : Rtao::CacheState {
+        u32 last_seen = 0;     // frame
+        std::vector<CachePart> parts; // empty: not cached
+        bool chunked = false;  // parts are pieces of a mesh bigger than maxsize
+        bool split_pending = false; // its triangles are being read back and split
+        u64 bytes = 0;         // all parts
+        u32 triangles = 0;
         u32 ready_from = 0;    // frame from which the BLAS may be instanced
     };
+    /// Big meshes (chunk > 0) are cached in pieces: their world-space triangles are copied to the
+    /// host once, split into compact pieces on a worker thread (Rtao::SplitTriangles), written to
+    /// a staging buffer, and the pieces are built from there. One batch at a time.
+    struct SplitMesh {
+        u64 key;
+        Rtao::ProbeStats stats;   // the draw's summary when it was read: built only if unchanged
+        u32 offset, triangles;    // in the fetched batch (triangles)
+        u32 staging_offset = 0;   // in the staging buffer (triangles), after the split
+        std::vector<Rtao::ChunkGroup> groups;
+        bool done = false;
+    };
+    enum class SplitState { Idle, Fetching, Splitting, Building };
+    void UpdateSplit();       // advance the batch: fetched -> worker -> pieces to build
+    SplitState split_state = SplitState::Idle;
+    std::vector<SplitMesh> split_meshes;
+    u64 split_tick = 0;       // Fetching: the copy's tick; Building: the last build's
+    std::future<std::pair<std::vector<SplitMesh>, float>> split_result; // the pieces, worker ms
     /// One draw of the frame before classification (dynamic, cached instance or promotion).
     struct Draw {
         GpuGeometry gpu;
@@ -119,7 +146,7 @@ private:
         vk::DeviceSize size{};
     };
     bool CreateBuffer(Buffer& buffer, vk::DeviceSize size, vk::BufferUsageFlags usage, bool host,
-                      vk::DeviceSize alignment = 0, bool quiet = false);
+                      vk::DeviceSize alignment = 0, bool quiet = false, bool readback = false);
     void UpdateCacheBudget();
     void DestroyBuffer(Buffer& buffer);
     bool EnsureResources(u32 width, u32 height);
@@ -162,6 +189,10 @@ private:
     std::unordered_map<u64, CacheEntry> cache;
     u64 cache_bytes = 0;
     u32 cache_instances = 0, cache_instance_tris = 0, promotions = 0, evictions_total = 0;
+    u32 chunk_groups_built = 0, chunked_meshes_built = 0, split_skipped = 0; // (per report)
+    float split_ms = 0.0f;                                                    // (per report)
+    u32 chunk_instances = 0, chunk_instance_tris = 0;    // the last pass
+    bool chunking_reported = false;
     u32 probes_read = 0, probes_stale = 0, probes_matched = 0, probes_changed = 0;
     u32 probes_reordered = 0;
     // Why per-frame triangles are not cached (the last pass): skinned, too big, blacklisted,
@@ -179,6 +210,9 @@ private:
     u64 index_bytes_frame = 0, index_bytes_small = 0; // measurement: index data per frame (all, < 16 KiB ranges)
     static constexpr u32 MaxInstances = 8192;
     static constexpr u32 PromoTriangles = 400000; // world-space triangles built per frame at most
+    static constexpr u32 MaxPromoBuilds = 1024;   // cache BLAS builds per frame at most
+    static constexpr u32 ChunkGroupTriangles = 65536; // a piece of a big mesh: triangles at most
+    static constexpr u32 MinPieceTriangles = 256;     // ... and pieces are not split below this
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
     u32 skipped_topology = 0, skipped_no_address = 0, skipped_alpha = 0, skipped_nowrite = 0;
@@ -229,6 +263,8 @@ private:
     Buffer probe_chunks;      // host: (geometry, first index) per 4096-index chunk x TableSlots
     Buffer probe_ranges;      // host: (first chunk, chunks) per table entry x TableSlots
     Buffer probe_partials;    // device: per chunk sum/count, min, max
+    Buffer split_fetch;       // host (read back, cached): a batch of big meshes' world triangles
+    Buffer split_staging;     // host: the same, reordered piece by piece (build input)
     static constexpr u32 MaxProbeChunks = 32768;
     Buffer promo_scratch;     // device: scratch for the frame's cache builds
     Buffer constants_buffer;  // host: the trace's per-frame constants x TableSlots

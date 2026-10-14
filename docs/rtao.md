@@ -56,9 +56,14 @@ space, built for trace speed) and is instanced from then on; it leaves the per-f
 budget. Cached draws are rechecked every 8th pass and evicted when they change; three evictions
 and a draw is never cached again. Copies of a mesh drawn several times a frame are matched by
 content (the game sorts draws by distance) and leave the per-frame BLAS only as a group. Draws
-with a character-size skeleton are never cached; draws bigger than `maxsize` stay per frame (whole
-in a cached BLAS, their far triangles would come back into every ray's path). Least recently seen
-BLASes go first beyond 1.5 GiB.
+with a character-size skeleton are never cached. Draws bigger than `maxsize` (terrain, building
+blocks) are cached in pieces (`chunk`, metres): their world-space triangles are copied to the host
+once, split on a worker thread at the median of the longest axis until a piece fits in `chunk`
+metres (box diagonal), and each piece gets its own BLAS, instanced only within the far cut. Whole,
+their far triangles would come back into every ray's path; per frame, they cost a third of the
+BLAS build. (Pieces of 4096-index chunks in the game's order were tried first: the game's index
+order is not spatial, the chunks overlapped, and the trace went from 0.5 to 5.7 ms.) Least
+recently seen BLASes go first beyond 1.5 GiB.
 
 ### Index buffers
 
@@ -108,7 +113,8 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | | `BB_RTAO_DATA_ACCESS` | 1 | ALLOW_DATA_ACCESS on the per-frame BLAS (see measurements) |
 | `cache` | `BB_RTAO_CACHE` | 1 | static cache on/off |
 | `promote` | | 8 | matching observations before a draw is cached |
-| `maxsize` | | 20 | bigger draws stay per frame (metres, bounding-box diagonal) |
+| `maxsize` | | 20 | bigger draws are cached in pieces, or with `chunk=0` stay per frame (metres, bounding-box diagonal) |
+| `chunk` | | 10 | size of the pieces of big draws (metres; 0: big draws stay per frame) |
 | `build` | | 0 | 1: per-frame BLAS built for trace speed (no difference on RADV) |
 | `alpha`, `decals` | | 0 | 1: keep alpha-tested draws / draws without depth write |
 | | `BB_RTAO_MAX_TRIANGLES` | 3000000 | per-frame triangle budget (buffers are sized for it) |
@@ -147,12 +153,14 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Denoiser 2 clip floor (2 rays) | 0: mean 0.803 (biased light: all-miss 3x3 neighbourhoods clipped history to 1) | 0.1: 0.787 (raw trace mean 0.791) |
 | Static-cache probe in chunks of 4096 indices | probe 0.61 ms | < 0.1 ms |
 | Defaults at the end of 2026-10-14 vs RT off | GPU busy 13.37 ms | 15.16 ms (60 FPS; BLAS 1.61, trace 0.69, expand 0.18 ms) |
+| Big draws per frame (`chunk=0`) vs whole in the cache (`maxsize=0`) vs in pieces (Doll, snap off) | 14.90-15.03 ms (BLAS 1.60, trace 0.44-0.51) / 14.21-14.36 (BLAS 0.61, trace 0.86-0.89) | pieces of 5 / 10 / 20 / 40 m: 14.30 / 14.20-14.33 / 14.42 / 14.44 (trace 0.75 / 0.75 / 0.90 / 0.90) |
+| The same at the workshop door (denser) | `chunk=0`: GPU busy 15.15 ms (BLAS 1.51, trace 0.81) | `chunk=10`: 15.05-15.06 (BLAS 0.71, trace 1.46) |
 
-Known cost drivers: the per-frame BLAS (1.73M triangles at the Doll: 928k from static meshes
-larger than `maxsize`, kept per frame for the per-triangle far cut, and 803k skinned) is rebuilt
-from a non-indexed expansion every frame; every pixel near the camera is traced, so looking at
-the ground is the worst case; instances that overlap the per-frame BLAS make nearby rays
-traverse two trees.
+Known cost drivers: instances that overlap make nearby rays traverse several trees (with big
+draws in pieces, 700-830 instances: the trace grows from 0.5-0.8 to 0.75-1.46 ms while the build
+shrinks by 1 ms); the per-frame BLAS (803k skinned triangles at the Doll) is rebuilt from a
+non-indexed expansion every frame; every pixel near the camera is traced, so looking at the ground
+is the worst case.
 
 ## Memory
 
@@ -202,4 +210,3 @@ used: on RADV it saves nothing.
 - The capture's positions are post-vertex-shader: anything the game moves in a later stage is not
   seen.
 - With the game's SSAO patched out there is nothing to write into.
-- Draws of more than `maxsize` are rebuilt every frame (the cache would keep their far triangles).

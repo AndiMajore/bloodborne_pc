@@ -96,7 +96,7 @@ void RayTracedAO::CreateTracePipeline() {
 }
 
 bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
-                               bool host, vk::DeviceSize alignment, bool quiet) {
+                               bool host, vk::DeviceSize alignment, bool quiet, bool readback) {
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = size,
@@ -104,13 +104,16 @@ bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsage
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
     VmaAllocationCreateInfo alloc_ci{
-        .flags = host ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+        .flags = host ? (readback ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                                  : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT) |
                             VMA_ALLOCATION_CREATE_MAPPED_BIT
                       : VmaAllocationCreateFlags{},
         .usage = host ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
         .requiredFlags = host ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
                               : VkMemoryPropertyFlags{},
+        // Read back by the CPU (megabytes at a time): cached memory, not write-combined.
+        .preferredFlags = readback ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_CACHED_BIT) : VkMemoryPropertyFlags{},
     };
     VkBuffer raw{};
     VmaAllocationInfo info{};
@@ -182,7 +185,10 @@ bool RayTracedAO::CreateAccelerationStructures() {
         !CreateBuffer(probe_ranges, vk::DeviceSize(TableSlots) * max_geometries * 8, BU::eStorageBuffer, true) ||
         !CreateBuffer(probe_partials, vk::DeviceSize(MaxProbeChunks) * 48, BU::eStorageBuffer, false) ||
         !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
-                      BU::eTransferDst, true)) {
+                      BU::eTransferDst, true) ||
+        !CreateBuffer(split_fetch, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferDst, true, 0, false, true) ||
+        !CreateBuffer(split_staging, vk::DeviceSize(PromoTriangles) * 36,
+                      BU::eAccelerationStructureBuildInputReadOnlyKHR, true)) {
         return false;
     }
 
@@ -248,8 +254,9 @@ bool RayTracedAO::CreateAccelerationStructures() {
         blas_geometry.geometry.triangles.maxVertex = PromoTriangles * 3 - 1;
         const auto promo_sizes = device.getAccelerationStructureBuildSizesKHR(
             vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, PromoTriangles);
-        // Room for the alignment of many small builds.
-        if (!CreateBuffer(promo_scratch, promo_sizes.buildScratchSize + 512 * scratch_alignment,
+        // Room for the alignment of many small builds (chunk groups: up to MaxPromoBuilds a frame,
+        // whose scratch together is more than one build of the same triangles).
+        if (!CreateBuffer(promo_scratch, promo_sizes.buildScratchSize * 3 / 2 + MaxPromoBuilds * scratch_alignment,
                           BU::eStorageBuffer, false, scratch_alignment)) {
             return false;
         }
@@ -295,7 +302,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
     SetObjectName(device, blas, "rtao per-frame BLAS");
     SetObjectName(device, tlas, "rtao TLAS");
     for (const Buffer* buffer : {&table_buffer, &triangle_buffer, &instance_buffer, &probe_buffer, &constants_buffer,
-                                 &index_ring, &probe_chunks, &probe_ranges, &probe_partials, &blas_buffer,
+                                 &index_ring, &probe_chunks, &probe_ranges, &probe_partials, &split_fetch, &split_staging, &blas_buffer,
                                  &blas_scratch, &promo_scratch, &tlas_buffer, &tlas_scratch, &readback_buffer}) {
         static_bytes += buffer->size;
     }
@@ -310,22 +317,58 @@ bool RayTracedAO::CreateAccelerationStructures() {
 }
 
 void RayTracedAO::Evict(CacheEntry& entry) {
-    if (entry.blas) {
+    if (!entry.parts.empty()) {
         const auto device = instance.GetDevice();
-        scheduler.DeferOperation([device, allocator = instance.GetAllocator(), blas = entry.blas,
-                                  buffer = entry.buffer, allocation = entry.allocation] {
-            device.destroyAccelerationStructureKHR(blas);
-            vmaDestroyBuffer(allocator, buffer, allocation);
+        scheduler.DeferOperation([device, allocator = instance.GetAllocator(), parts = std::move(entry.parts)] {
+            for (const auto& part : parts) {
+                device.destroyAccelerationStructureKHR(part.blas);
+                vmaDestroyBuffer(allocator, part.buffer, part.allocation);
+            }
         });
         cache_bytes -= entry.bytes;
     }
-    entry.blas = vk::AccelerationStructureKHR{};
+    entry.parts.clear();
+    entry.chunked = false;
     entry.cached = false;
-    entry.buffer = vk::Buffer{};
-    entry.allocation = VmaAllocation{};
-    entry.address = 0;
     entry.bytes = 0;
     entry.triangles = 0;
+}
+
+void RayTracedAO::UpdateSplit() {
+    if (split_state == SplitState::Fetching && scheduler.IsFree(split_tick)) {
+        // The batch is on the host: split it on a worker, which writes the staging buffer (nothing
+        // reads it until the batch is built, and no new batch starts before that is done).
+        vmaInvalidateAllocation(instance.GetAllocator(), split_fetch.allocation, 0, VK_WHOLE_SIZE);
+        split_state = SplitState::Splitting;
+        split_result = std::async(std::launch::async, [meshes = split_meshes,
+                                                       fetch = static_cast<const float*>(split_fetch.mapped),
+                                                       staging = static_cast<float*>(split_staging.mapped),
+                                                       cell = settings.chunk_cell]() mutable {
+            const auto start = std::chrono::steady_clock::now();
+            for (auto& mesh : meshes) {
+                mesh.staging_offset = mesh.offset; // a piece never grows: the same layout
+                mesh.groups = Rtao::SplitTriangles(fetch + size_t(mesh.offset) * 9, mesh.triangles, cell,
+                                                   ChunkGroupTriangles, MinPieceTriangles,
+                                                   staging + size_t(mesh.staging_offset) * 9);
+            }
+            const float ms =
+                std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+            return std::make_pair(std::move(meshes), ms);
+        });
+    }
+    if (split_state == SplitState::Splitting &&
+        split_result.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto [meshes, ms] = split_result.get();
+        split_meshes = std::move(meshes);
+        split_ms += ms;
+        split_state = SplitState::Building;
+    }
+    if (split_state == SplitState::Building &&
+        std::all_of(split_meshes.begin(), split_meshes.end(), [](const SplitMesh& m) { return m.done; }) &&
+        scheduler.IsFree(split_tick)) {
+        split_state = SplitState::Idle; // the staging buffer is free again
+        split_meshes.clear();
+    }
 }
 
 void RayTracedAO::ReadProbes(u32 ring) {
@@ -393,7 +436,7 @@ void RayTracedAO::TrimCache() {
     if (cache_bytes > cache_budget) {
         std::vector<std::pair<u32, u64>> order; // last seen, key
         for (const auto& [key, e] : cache) {
-            if (e.blas && e.last_seen != frame) {
+            if (!e.parts.empty() && e.last_seen != frame) {
                 order.emplace_back(e.last_seen, key);
             }
         }
@@ -413,7 +456,7 @@ void RayTracedAO::TrimCache() {
     if (frame % 600 == 0) { // forget draws not seen for a minute
         for (auto it = cache.begin(); it != cache.end();) {
             if (frame - it->second.last_seen > 3600) {
-                if (it->second.blas) {
+                if (!it->second.parts.empty()) {
                     Evict(it->second);
                 }
                 it = cache.erase(it);

@@ -210,6 +210,9 @@ void RayTracedAO::PollSettings() {
 }
 
 RayTracedAO::~RayTracedAO() {
+    if (split_result.valid()) {
+        split_result.wait(); // it writes into the staging buffer
+    }
     const auto device = instance.GetDevice();
     for (auto& entry : view_cache) {
         if (entry.view) {
@@ -223,15 +226,15 @@ RayTracedAO::~RayTracedAO() {
         device.destroyAccelerationStructureKHR(blas);
     }
     for (auto& [key, entry] : cache) {
-        if (entry.blas) {
-            device.destroyAccelerationStructureKHR(entry.blas);
-            vmaDestroyBuffer(instance.GetAllocator(), entry.buffer, entry.allocation);
+        for (const auto& part : entry.parts) {
+            device.destroyAccelerationStructureKHR(part.blas);
+            vmaDestroyBuffer(instance.GetAllocator(), part.buffer, part.allocation);
         }
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
                          &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
                          &promo_scratch, &constants_buffer, &sbt_buffer, &index_ring, &probe_chunks,
-                         &probe_ranges, &probe_partials}) {
+                         &probe_ranges, &probe_partials, &split_fetch, &split_staging}) {
         DestroyBuffer(*buffer);
     }
 }
@@ -274,6 +277,15 @@ void RayTracedAO::OnFrameStart() {
                     probes_stale, probes_matched, probes_reordered, probes_changed, camera_world[0],
                     camera_world[1], camera_world[2]);
         probes_read = probes_stale = probes_matched = probes_changed = probes_reordered = 0;
+        if (chunking_reported || settings.chunk_cell > 0.0f) {
+            chunking_reported = true;
+            std::printf("RTAO: big meshes in pieces: %u built (%u pieces, split %.1f ms on the worker), %u dropped "
+                        "(changed meanwhile) in 600 frames; last pass %u piece instances (%u triangles)\n",
+                        chunked_meshes_built, chunk_groups_built, split_ms, split_skipped, chunk_instances,
+                        chunk_instance_tris);
+            chunked_meshes_built = chunk_groups_built = split_skipped = 0;
+            split_ms = 0.0f;
+        }
         std::printf("RTAO: per-frame triangles by reason: %u skinned, %u bigger than maxsize, %u kept changing, "
                     "%u not stable yet, %u copies of a mesh not all cached, %u cache off\n",
                     per_frame_reasons[0], per_frame_reasons[1], per_frame_reasons[2], per_frame_reasons[3],
@@ -564,7 +576,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const auto device = instance.GetDevice();
     struct Promotion {
         vk::AccelerationStructureKHR blas;
-        u32 out_base, triangles;
+        vk::DeviceAddress vertices; // world-space triangles (the triangle list, or the split staging)
+        u32 triangles;
         vk::DeviceAddress scratch;
     };
     std::vector<GpuGeometry> dynamic_list, verify_list, promo_list;
@@ -577,6 +590,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     per_frame_reasons = {};
     cache_instances = 0;
     cache_instance_tris = 0;
+    chunk_instances = 0;
+    chunk_instance_tris = 0;
     const auto make_instance = [&](vk::DeviceAddress address, bool world) {
         vk::AccelerationStructureInstanceKHR as_instance{
             .instanceCustomIndex = world ? 1u : 0u,
@@ -596,20 +611,22 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     // A mesh leaves the per-frame BVH only when every copy drawn this frame is cached: which draw
     // is which copy changes with the draw order, but the set of cached copies covers them all.
     std::unordered_map<u64, bool> mesh_cached;
-    // Huge draws (terrain, building blocks) stay per frame: whole in a cached BLAS, their far
-    // triangles came back into the BVH (the far cut works per frame) and rays slowed down.
+    // Huge draws (terrain, building blocks): whole in a cached BLAS, their far triangles came
+    // back into the BVH (the far cut works per frame) and rays slowed down. They stay per frame,
+    // or (chunk > 0) are cached as groups of chunks, each instanced only within the far cut.
     const auto too_big = [&](const CacheEntry& e) {
         return e.have_stats && Rtao::TooBig(e.stats, settings.cache_max_size);
     };
+    const bool chunking = settings.chunk_cell > 0.0f;
     for (const Draw& d : draws) {
         CacheEntry& e = cache[d.key];
         e.base = d.base;
         e.last_seen = frame;
-        if (e.blas && too_big(e)) {
-            Evict(e);
+        if (!e.parts.empty() && (e.chunked ? !chunking || !too_big(e) : too_big(e))) {
+            Evict(e); // the settings changed: cached the other way, or not at all
         }
         auto [it, inserted] = mesh_cached.try_emplace(d.base, true);
-        it->second = it->second && use_cache && e.blas && frame >= e.ready_from;
+        it->second = it->second && use_cache && !e.parts.empty() && frame >= e.ready_from;
     }
     // Probing costs a pass over the draw's indices: cached draws are rechecked every 8th pass,
     // draws waiting for a build slot every 4th; characters and draws that kept changing never.
@@ -618,10 +635,10 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             return false;
         }
         const u32 phase = u32(d.key >> 7) + probe_id;
-        if (e.blas) {
+        if (!e.parts.empty()) {
             return phase % 8 == 0;
         }
-        if (too_big(e)) {
+        if (too_big(e) && !chunking) {
             return phase % 64 == 0; // it will stay per frame; an occasional look is enough
         }
         if (e.stable >= settings.promote_after) {
@@ -629,26 +646,133 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         }
         return true;
     };
+    // New cached BLASes for a draw: one per piece, from world-space triangles at `vertices` (the
+    // pieces' ranges follow each other). False when this frame's builds have no room left, or the
+    // allocation failed (then the cache backs off).
+    const auto build_parts = [&](CacheEntry& e, const std::vector<Rtao::ChunkGroup>& groups,
+                                 vk::DeviceAddress vertices) {
+        if (groups.empty() || promos.size() + groups.size() > MaxPromoBuilds) {
+            return false;
+        }
+        std::vector<vk::AccelerationStructureBuildSizesInfoKHR> sizes(groups.size());
+        vk::DeviceSize scratch_end = promo_scratch_used;
+        for (size_t g = 0; g < groups.size(); ++g) {
+            vk::AccelerationStructureGeometryKHR geometry{
+                .geometryType = vk::GeometryTypeKHR::eTriangles,
+                .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                                 .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                                 .vertexStride = 3 * sizeof(float),
+                                 .maxVertex = groups[g].triangles * 3 - 1,
+                                 .indexType = vk::IndexType::eNoneKHR,
+                             }},
+                .flags = vk::GeometryFlagBitsKHR::eOpaque,
+            };
+            const vk::AccelerationStructureBuildGeometryInfoKHR info{
+                .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
+                .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+                .geometryCount = 1,
+                .pGeometries = &geometry,
+            };
+            sizes[g] = device.getAccelerationStructureBuildSizesKHR(vk::AccelerationStructureBuildTypeKHR::eDevice,
+                                                                    info, groups[g].triangles);
+            scratch_end = (scratch_end + scratch_alignment - 1) / scratch_alignment * scratch_alignment +
+                          sizes[g].buildScratchSize;
+        }
+        if (scratch_end > promo_scratch.size) {
+            return false;
+        }
+        std::vector<CachePart> parts;
+        bool failed = false;
+        for (size_t g = 0; g < groups.size() && !failed; ++g) {
+            Buffer storage;
+            static u32 attempts = 0;
+            const bool forced_failure = fail_test && ++attempts % fail_test == 0;
+            if (forced_failure || !CreateBuffer(storage, sizes[g].accelerationStructureSize,
+                                                vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR, false,
+                                                0, true)) {
+                failed = true;
+                break;
+            }
+            const auto as = device.createAccelerationStructureKHR({
+                .buffer = storage.buffer,
+                .size = sizes[g].accelerationStructureSize,
+                .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+            });
+            if (as.result != vk::Result::eSuccess) {
+                DestroyBuffer(storage);
+                failed = true;
+                break;
+            }
+            CachePart& part = parts.emplace_back();
+            part.blas = as.value;
+            SetObjectName(device, part.blas, groups.size() > 1 ? "rtao cached BLAS (piece)" : "rtao cached BLAS");
+            part.buffer = storage.buffer;
+            part.allocation = storage.allocation;
+            part.address = device.getAccelerationStructureAddressKHR({.accelerationStructure = part.blas});
+            part.bytes = sizes[g].accelerationStructureSize;
+            part.triangles = groups[g].triangles;
+            part.box = groups[g].box;
+        }
+        if (failed) {
+            for (const auto& part : parts) { // nothing recorded yet: destroyed right away
+                device.destroyAccelerationStructureKHR(part.blas);
+                vmaDestroyBuffer(instance.GetAllocator(), part.buffer, part.allocation);
+            }
+            // Out of memory (or the test): the cache is full. Halve its budget, trim it, and build
+            // nothing more for ten seconds.
+            ++alloc_failures;
+            cache_budget = std::max<u64>(cache_budget / 2, 64ull << 20);
+            promotion_pause_until = frame + 600;
+            TrimCache();
+            return false;
+        }
+        for (size_t g = 0; g < groups.size(); ++g) {
+            const vk::DeviceSize scratch_at =
+                (promo_scratch_used + scratch_alignment - 1) / scratch_alignment * scratch_alignment;
+            promo_scratch_used = scratch_at + sizes[g].buildScratchSize;
+            promos.push_back({parts[g].blas, vertices + vk::DeviceSize(groups[g].first_triangle) * 36,
+                              groups[g].triangles, promo_scratch.address + scratch_at});
+            e.bytes += parts[g].bytes;
+            e.triangles += parts[g].triangles;
+        }
+        e.parts = std::move(parts);
+        e.chunked = false;
+        e.cached = true;
+        e.ready_from = frame + 1; // built in this pass, instanced from the next
+        cache_bytes += e.bytes;
+        ++promotions;
+        return true;
+    };
+    // Big meshes are collected for a split only while no batch is in flight.
+    UpdateSplit();
+    const bool collect_split = chunking && use_cache && split_state == SplitState::Idle &&
+                               frame >= promotion_pause_until;
+    if (collect_split) {
+        split_meshes.clear();
+    }
     for (const Draw& d : draws) {
         CacheEntry& e = cache[d.key];
         GpuGeometry gpu = d.gpu;
         const u32 probe_flag = probe_now(d, e) ? GeoProbe : 0u;
         if (mesh_cached[d.base]) {
-            bool far = false;
-            if (cull > 0.0f) { // distance from the camera to the draw's box
-                float d2 = 0.0f;
-                for (int i = 0; i < 3; ++i) {
-                    const float v = std::max({e.stats.min[i] - camera_world[i], 0.0f,
-                                              camera_world[i] - e.stats.max[i]});
-                    d2 += v * v;
-                }
-                far = d2 > cull * cull;
+            // Each part (the draw, or a chunk group) within the far cut: by distance to its box.
+            u32 near_parts = 0;
+            for (const auto& part : e.parts) {
+                near_parts += cull <= 0.0f || part.box.Distance2(camera_world) <= cull * cull ? 1 : 0;
             }
-            if (far || instances.size() < MaxInstances) {
-                if (!far) {
-                    instances.push_back(make_instance(e.address, true));
+            if (instances.size() + near_parts <= MaxInstances) {
+                for (const auto& part : e.parts) {
+                    if (cull > 0.0f && part.box.Distance2(camera_world) > cull * cull) {
+                        continue;
+                    }
+                    instances.push_back(make_instance(part.address, true));
                     ++cache_instances;
-                    cache_instance_tris += e.triangles;
+                    cache_instance_tris += part.triangles;
+                    if (e.chunked) {
+                        ++chunk_instances;
+                        chunk_instance_tris += part.triangles;
+                    }
                 }
                 if (probe_flag) { // still checked: a door that starts moving leaves the cache
                     gpu.triangles = 0;
@@ -671,8 +795,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             continue;
         }
         {
-            const int reason = !use_cache ? 5 : d.skinned ? 0 : too_big(e) ? 1 : e.evictions >= 3 ? 2
-                               : !e.blas ? 3 : 4;
+            const int reason = !use_cache ? 5 : d.skinned ? 0 : too_big(e) && !chunking ? 1 : e.evictions >= 3 ? 2
+                               : e.parts.empty() ? 3 : 4;
             per_frame_reasons[reason] += gpu.triangles;
         }
         gpu.triangle_offset = frame_triangles;
@@ -681,9 +805,11 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         frame_triangles += gpu.triangles;
         dynamic_list.push_back(gpu);
         dynamic_keys.push_back(d.key);
-        if (!use_cache || !Rtao::Promotable(e, d.skinned, too_big(e), settings.promote_after) ||
+        const bool big = too_big(e);
+        if (!use_cache || e.split_pending ||
+            !Rtao::Promotable(e, d.skinned, big && !chunking, settings.promote_after) ||
             frame < promotion_pause_until ||
-            gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles || promos.size() >= 256) {
+            gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles || promos.size() >= MaxPromoBuilds) {
             continue;
         }
         { // the same copy cached under another slot (before a reorder): not twice
@@ -691,80 +817,70 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             const auto copies = max_copies.find(d.base);
             for (u32 o = 0; copies != max_copies.end() && o < copies->second && !duplicate; ++o) {
                 const auto other = cache.find(Rtao::KeyOf(d.base, o));
-                duplicate = other != cache.end() && &other->second != &e && other->second.blas &&
+                duplicate = other != cache.end() && &other->second != &e && !other->second.parts.empty() &&
                             Rtao::StatsMatch(other->second.stats, e.stats, camera_world);
             }
             if (duplicate) {
                 continue;
             }
         }
-        // Promotion: a world-space copy of the triangles, built into the draw's own BLAS.
-        vk::AccelerationStructureGeometryKHR geometry{
-            .geometryType = vk::GeometryTypeKHR::eTriangles,
-            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                             .vertexStride = 3 * sizeof(float),
-                             .maxVertex = gpu.triangles * 3 - 1,
-                             .indexType = vk::IndexType::eNoneKHR,
-                         }},
-            .flags = vk::GeometryFlagBitsKHR::eOpaque,
-        };
-        const vk::AccelerationStructureBuildGeometryInfoKHR info{
-            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
-            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-            .geometryCount = 1,
-            .pGeometries = &geometry,
-        };
-        const auto sizes = device.getAccelerationStructureBuildSizesKHR(
-            vk::AccelerationStructureBuildTypeKHR::eDevice, info, gpu.triangles);
-        const vk::DeviceSize scratch_at =
-            (promo_scratch_used + scratch_alignment - 1) / scratch_alignment * scratch_alignment;
-        if (scratch_at + sizes.buildScratchSize > promo_scratch.size) {
-            continue;
+        const u32 out_base = max_triangles + promo_used;
+        if (big) {
+            // A big mesh: its world-space triangles go to the host for the split (one batch at a time).
+            if (!collect_split) {
+                continue;
+            }
+            split_meshes.push_back({.key = d.key, .stats = e.stats, .offset = promo_used, .triangles = gpu.triangles});
+            e.split_pending = true;
+        } else {
+            // Promotion: a world-space copy of the triangles, built into the draw's own BLAS.
+            Rtao::Box box;
+            for (int i = 0; i < 3; ++i) {
+                box.min[i] = e.stats.min[i];
+                box.max[i] = e.stats.max[i];
+            }
+            if (!build_parts(e, {{0, gpu.triangles, box}}, triangle_buffer.address + vk::DeviceSize(out_base) * 36)) {
+                continue;
+            }
         }
-        Buffer storage;
-        static u32 attempts = 0;
-        const bool forced_failure = fail_test && ++attempts % fail_test == 0;
-        if (forced_failure || !CreateBuffer(storage, sizes.accelerationStructureSize,
-                                            vk::BufferUsageFlagBits::eAccelerationStructureStorageKHR, false,
-                                            0, true)) {
-            // Out of memory (or the test): the cache is full. Halve its budget, trim it, and build
-            // nothing more for ten seconds.
-            ++alloc_failures;
-            cache_budget = std::max<u64>(cache_budget / 2, 64ull << 20);
-            promotion_pause_until = frame + 600;
-            TrimCache();
-            continue;
-        }
-        const auto as = device.createAccelerationStructureKHR({
-            .buffer = storage.buffer,
-            .size = sizes.accelerationStructureSize,
-            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-        });
-        if (as.result != vk::Result::eSuccess) {
-            DestroyBuffer(storage);
-            continue;
-        }
-        e.blas = as.value;
-        e.cached = true;
-        SetObjectName(device, e.blas, "rtao cached BLAS");
-        e.buffer = storage.buffer;
-        e.allocation = storage.allocation;
-        e.address = device.getAccelerationStructureAddressKHR({.accelerationStructure = e.blas});
-        e.bytes = sizes.accelerationStructureSize;
-        e.triangles = gpu.triangles;
-        e.ready_from = frame + 1; // built in this pass, instanced from the next
-        cache_bytes += e.bytes;
-        ++promotions;
-        promo_scratch_used = scratch_at + sizes.buildScratchSize;
-        promos.push_back({e.blas, max_triangles + promo_used, gpu.triangles,
-                          promo_scratch.address + scratch_at});
         GpuGeometry world = gpu;
-        world.out_base = max_triangles + promo_used;
+        world.out_base = out_base;
         world.flags = GeoWorld;
         promo_list.push_back(world);
         promo_used += gpu.triangles;
+    }
+    const bool split_fetch_now = collect_split && !split_meshes.empty();
+    if (split_fetch_now) {
+        split_state = SplitState::Fetching;
+    }
+    // Pieces of split big meshes, built from the staging buffer as far as this frame has room.
+    if (split_state == SplitState::Building) {
+        for (auto& mesh : split_meshes) {
+            if (mesh.done) {
+                continue;
+            }
+            const auto it = cache.find(mesh.key);
+            CacheEntry* e = it != cache.end() ? &it->second : nullptr;
+            if (!e || !e->parts.empty() || !chunking || !use_cache || !e->have_stats ||
+                !Rtao::StatsMatch(mesh.stats, e->stats, camera_world) || mesh.groups.empty()) {
+                mesh.done = true; // changed or gone since it was read: not built
+                ++split_skipped;
+                if (e) {
+                    e->split_pending = false;
+                }
+                continue;
+            }
+            if (frame < promotion_pause_until ||
+                !build_parts(*e, mesh.groups, split_staging.address + vk::DeviceSize(mesh.staging_offset) * 36)) {
+                break; // no room this frame (or out of memory): the rest waits
+            }
+            e->chunked = true;
+            e->split_pending = false;
+            mesh.done = true;
+            ++chunked_meshes_built;
+            chunk_groups_built += u32(mesh.groups.size());
+            split_tick = scheduler.CurrentTick(); // the staging buffer is read until this pass is done
+        }
     }
     // The table: per-frame entries, then the world-space copies (expanded after them), then the
     // entries that are only measured (no triangles; their offset lies past the expand range).
@@ -823,6 +939,11 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     recorded_this_frame = true;
     // This pass's commands go out with the current tick: the slots are busy until it is reached.
     slot_ticks[slot] = scheduler.CurrentTick();
+    if (split_fetch_now) {
+        split_tick = slot_ticks[slot]; // the copy of the batch to the host
+    }
+    const vk::Buffer split_fetch_handle = split_fetch.buffer;
+    const vk::DeviceSize split_fetch_bytes = vk::DeviceSize(promo_used) * 36;
     probe_ticks[ring] = slot_ticks[slot];
     auto* table = static_cast<GpuGeometry*>(table_buffer.mapped) + size_t(slot) * max_geometries;
     std::memcpy(table, geometries.data(), geometries.size() * sizeof(GpuGeometry));
@@ -1032,6 +1153,12 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 const vk::BufferCopy region{0, 0, vk::DeviceSize(std::min(ReadbackTriangles, total_triangles)) * 9 * sizeof(float)};
                 cmdbuf.copyBuffer(triangles_handle, readback_handle, region);
             }
+            if (split_fetch_now) { // the world-space copies of this frame, big meshes among them
+                const vk::BufferCopy region{vk::DeviceSize(max_triangles) * 36, 0, split_fetch_bytes};
+                cmdbuf.copyBuffer(triangles_handle, split_fetch_handle, region);
+                memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                               vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
+            }
         });
 
     // 1b. The static cache's measurements (its own crumb and profiler segment).
@@ -1087,8 +1214,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                     .geometryType = vk::GeometryTypeKHR::eTriangles,
                     .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
                                      .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                                     .vertexData = {.deviceAddress = triangles_address +
-                                                                     vk::DeviceSize(pr.out_base) * 36},
+                                     .vertexData = {.deviceAddress = pr.vertices},
                                      .vertexStride = 3 * sizeof(float),
                                      .maxVertex = pr.triangles * 3 - 1,
                                      .indexType = vk::IndexType::eNoneKHR,

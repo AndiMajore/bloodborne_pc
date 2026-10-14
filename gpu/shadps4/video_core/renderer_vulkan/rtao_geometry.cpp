@@ -47,6 +47,103 @@ bool TooBig(const ProbeStats& stats, float max_size) {
     return dx * dx + dy * dy + dz * dz > max_size * max_size;
 }
 
+void Box::Add(const Box& other) {
+    for (int i = 0; i < 3; ++i) {
+        min[i] = std::min(min[i], other.min[i]);
+        max[i] = std::max(max[i], other.max[i]);
+    }
+}
+
+void Box::Add(const float* p) {
+    for (int i = 0; i < 3; ++i) {
+        min[i] = std::min(min[i], p[i]);
+        max[i] = std::max(max[i], p[i]);
+    }
+}
+
+float Box::Diagonal() const {
+    if (Empty()) {
+        return 0.0f;
+    }
+    const float dx = max[0] - min[0], dy = max[1] - min[1], dz = max[2] - min[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+float Box::Distance2(const std::array<float, 3>& p) const {
+    float d2 = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        const float v = std::max({min[i] - p[i], 0.0f, p[i] - max[i]});
+        d2 += v * v;
+    }
+    return d2;
+}
+
+std::vector<ChunkGroup> SplitTriangles(const float* triangles, u32 count, float cell, u32 max_triangles,
+                                       u32 min_triangles, float* out) {
+    std::vector<u32> order;
+    std::vector<std::array<float, 3>> centre(count);
+    order.reserve(count);
+    for (u32 t = 0; t < count; ++t) {
+        const float* v = triangles + size_t(t) * 9;
+        bool active = true;
+        for (int k = 0; k < 9; ++k) {
+            active = active && std::isfinite(v[k]);
+        }
+        if (active) {
+            for (int i = 0; i < 3; ++i) {
+                centre[t][i] = (v[i] + v[3 + i] + v[6 + i]) / 3.0f;
+            }
+            order.push_back(t);
+        }
+    }
+    std::vector<ChunkGroup> groups;
+    const auto bounds = [&](size_t begin, size_t end) {
+        Box box;
+        for (size_t i = begin; i < end; ++i) {
+            const float* v = triangles + size_t(order[i]) * 9;
+            box.Add(v);
+            box.Add(v + 3);
+            box.Add(v + 6);
+        }
+        return box;
+    };
+    // Depth first, so neighbouring pieces stay next to each other in the output.
+    std::vector<std::pair<size_t, size_t>> stack{{0, order.size()}};
+    while (!stack.empty()) {
+        const auto [begin, end] = stack.back();
+        stack.pop_back();
+        const size_t n = end - begin;
+        if (n == 0) {
+            continue;
+        }
+        const Box box = bounds(begin, end);
+        Box centres;
+        for (size_t i = begin; i < end; ++i) {
+            centres.Add(centre[order[i]].data());
+        }
+        int axis = 0;
+        for (int i = 1; i < 3; ++i) {
+            if (centres.max[i] - centres.min[i] > centres.max[axis] - centres.min[axis]) {
+                axis = i;
+            }
+        }
+        const bool fits = n <= max_triangles && box.Diagonal() <= cell;
+        if (fits || n <= min_triangles || centres.max[axis] <= centres.min[axis]) {
+            groups.push_back({u32(begin), u32(n), box});
+            continue;
+        }
+        const size_t mid = begin + n / 2;
+        std::nth_element(order.begin() + begin, order.begin() + mid, order.begin() + end,
+                         [&](u32 a, u32 b) { return centre[a][axis] < centre[b][axis]; });
+        stack.push_back({mid, end}); // the lower half is taken first
+        stack.push_back({begin, mid});
+    }
+    for (size_t i = 0; i < order.size(); ++i) {
+        std::copy_n(triangles + size_t(order[i]) * 9, 9, out + i * 9);
+    }
+    return groups;
+}
+
 Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match,
                     const std::array<float, 3>& camera) {
     if (!state.have_stats) {
@@ -105,6 +202,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "cache") flag(s.cache_enabled);
     else if (key == "promote") s.promote_after = std::clamp(u32(std::max(value, 0.0f)), 2u, 600u);
     else if (key == "maxsize") s.cache_max_size = std::max(value, 0.0f);
+    else if (key == "chunk") s.chunk_cell = std::max(value, 0.0f);
     else if (key == "alpha") flag(s.include_alpha);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
