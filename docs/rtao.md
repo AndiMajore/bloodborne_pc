@@ -89,9 +89,12 @@ The pass reads each draw's index buffer by device address when the game's AO pas
 later. Small ranges (up to 16 KiB, streamed by the buffer cache through a ring that is reused once
 the draw's tick is done) are copied from the game's memory at draw time into the RTAO's own ring.
 With layer memory (`BB_LAYER_MEMORY=1`, default off on AMD) the buffer cache holds the mirrors it
-retires during a frame until the pass is recorded. `BB_RTAO_TEST_MOVE=1` (with layer memory and
-`BB_DRAW_PIPE=0`) forces every mirror back in place between the AO upsample and the pass: without
-the hold (`BB_RTAO_HOLD=0`) that faults the GPU within a minute, with it it does not.
+retires during a frame over an index range the pass reads by address (the rasterizer registers
+each with `HoldRange`; `retire_hold.h`) until the pass is recorded, and only while the pass is on;
+every other retirement, the collector's pressure compaction included, is as without RTAO.
+`BB_RTAO_TEST_MOVE=1` (with layer memory and `BB_DRAW_PIPE=0`) forces every mirror back in place
+between the AO upsample and the pass: without the hold (`BB_RTAO_HOLD=0`) the GPU faults at once,
+with it it does not (24 to 30 of 50 retired mirrors held per move at the Doll).
 
 ### Host rings
 

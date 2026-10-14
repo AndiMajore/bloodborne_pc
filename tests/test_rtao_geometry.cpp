@@ -7,6 +7,7 @@
 #include <limits>
 #include <set>
 #include <vector>
+#include "video_core/buffer_cache/retire_hold.h"
 #include "video_core/renderer_vulkan/rtao_geometry.h"
 
 using namespace Rtao;
@@ -179,6 +180,23 @@ static void Pool() {
     assert(!pool.Alloc(0));
 }
 
+static void Hold() {
+    VideoCore::RetireHold hold;
+    hold.Add(100, 10); // before Begin: ignored
+    assert(!hold.Holds(0, 1000));
+    hold.Begin();
+    hold.Add(0x1000, 0x100);   // an index range read by address
+    hold.Add(0x8000, 0);       // empty: ignored
+    assert(hold.Ranges() == 1);
+    assert(hold.Holds(0x0, 0x2000));     // a mirror over it
+    assert(hold.Holds(0x10ff, 1));       // its last byte
+    assert(!hold.Holds(0x1100, 0x1000)); // right after it
+    assert(!hold.Holds(0x0, 0x1000));    // right before it
+    assert(!hold.Holds(0x8000, 0x1000)); // pressure compaction elsewhere: not held
+    hold.End();
+    assert(!hold.Holds(0x0, 0x2000));    // released: nothing held
+}
+
 static void SettingsParsing() {
     Settings s;
     bool reset = false;
@@ -208,6 +226,7 @@ int main() {
     StateMachine();
     Split();
     Pool();
+    Hold();
     SettingsParsing();
     std::puts("rtao-geometry-test: ok");
     return 0;

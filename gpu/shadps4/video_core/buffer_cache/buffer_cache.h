@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "video_core/buffer_cache/retire_hold.h"
 #include "bbport_copy.h"
 
 #include <atomic>
@@ -401,16 +402,19 @@ private:
     /// Frees retired mirrors the GPU is done with.
     void LayerMaintain();
 public:
-    /// bbport (ray-traced AO): buffers retired while held are not freed until released with a tick:
-    /// the RTAO reads the frame's index buffers by device address when the game's AO pass ends,
-    /// draws after the draw that bound them.
+    /// bbport (ray-traced AO): from here to ReleaseRetirements, mirrors retired over a range
+    /// given to HoldRange (an index range the RTAO reads by address this frame, draws after the
+    /// draw that bound it) are not freed before the release's tick; all others retire as usual.
     void HoldRetirements() {
-        retire_hold = true;
+        retire_hold.Begin();
+    }
+    void HoldRange(VAddr address, u64 size) {
+        retire_hold.Add(address, size);
     }
     /// Test (BB_RTAO_TEST_MOVE=1): every layer mirror back in place now, as a demotion does.
     void DemoteAllMirrors();
     void ReleaseRetirements(u64 tick) {
-        retire_hold = false;
+        retire_hold.End();
         for (auto& retired : layer_retired) {
             if (retired.second == HeldTick) {
                 retired.second = tick;
@@ -419,8 +423,8 @@ public:
     }
 private:
     static constexpr u64 HeldTick = ~0ull;
-    bool retire_hold = false;
-    u64 RetireTick() const; // buffer_cache_layer.cpp
+    RetireHold retire_hold;
+    u64 RetireTick(VAddr base, u64 size) const; // buffer_cache_layer.cpp
     /// Mirrored blocks not bound for BB_VRAM_IDLE_SECONDS go back in place.
     void LayerProcessIdle();
     /// VRAM near the texture collector's critical mark: idle mirrors go back in place.

@@ -1663,13 +1663,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const char* env = std::getenv("BB_RTAO_HOLD"); // 0: off (to test what it protects)
             return !env || env[0] != '0';
         }();
-        if (rtao->Enabled() && rtao_hold) {
-            // Buffers the buffer cache retires during the frame wait for the RTAO pass (it reads
-            // the frame's index buffers by address when the game's AO pass ends).
+        rtao->OnFrameStart(); // first: it may make its buffers now, and capture from this frame
+        // Mirrors over the index ranges the RTAO reads by address this frame wait for its pass
+        // (it reads them when the game's AO pass ends); nothing else is held.
+        if (rtao->Enabled()) {
             buffer_cache.ReleaseRetirements(scheduler.CurrentTick());
-            buffer_cache.HoldRetirements();
+            if (rtao->Active() && rtao_hold) {
+                buffer_cache.HoldRetirements();
+            }
         }
-        rtao->OnFrameStart();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
@@ -1835,6 +1837,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                             memory->ClampRangeSize(index_address, index_bytes) == index_bytes
                         ? reinterpret_cast<const void*>(index_address)
                         : nullptr;
+                if (is_indexed && !rtao_index_host) { // read by address at the pass
+                    buffer_cache.HoldRange(index_address, index_bytes);
+                }
                 rtao->AddGeometry({
                     .store = alloc.store,
                     .vertices = alloc.vertices,
