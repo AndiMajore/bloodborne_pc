@@ -55,6 +55,16 @@ with a character-size skeleton are never cached; draws bigger than `maxsize` sta
 in a cached BLAS, their far triangles would come back into every ray's path). Least recently seen
 BLASes go first beyond 1.5 GiB.
 
+### Index buffers
+
+The pass reads each draw's index buffer by device address when the game's AO pass ends, many draws
+later. Small ranges (up to 16 KiB, streamed by the buffer cache through a ring that is reused once
+the draw's tick is done) are copied from the game's memory at draw time into the RTAO's own ring.
+With layer memory (`BB_LAYER_MEMORY=1`, default off on AMD) the buffer cache holds the mirrors it
+retires during a frame until the pass is recorded. `BB_RTAO_TEST_MOVE=1` (with layer memory and
+`BB_DRAW_PIPE=0`) forces every mirror back in place between the AO upsample and the pass: without
+the hold (`BB_RTAO_HOLD=0`) that faults the GPU within a minute, with it it does not.
+
 ### Host rings
 
 The geometry table, the instance list and the trace constants rotate over three slots, the probe
