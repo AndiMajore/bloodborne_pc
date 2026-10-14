@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: ray-traced ambient occlusion (BB_RTAO=1). The G-buffer draws' clip positions, captured
-// by the object-motion feature, are expanded into a view-space triangle list, built into an
-// acceleration structure every frame, and traced with ray queries at half resolution; the result
-// replaces the game's own SSAO in its R8 mask (min of both). Design, settings, measurements and
+// by the object-motion feature, are expanded into a view-space triangle list and built into an
+// acceleration structure every frame; draws that do not move are kept in world space in one static
+// BLAS, rebuilt when the camera moved. Traced at half resolution; the result replaces the game's
+// own SSAO in its R8 mask (min of both). Design, settings, measurements and
 // the debugging procedure: docs/rtao.md.
 
 #pragma once
@@ -92,24 +93,22 @@ private:
     static constexpr u32 GeoWorld = Rtao::GeoWorld, GeoProbe = Rtao::GeoProbe;
 
     /// A draw seen over several frames: static ones get their own world-space BLAS.
-    /// One BLAS of a cached draw: the whole draw, or a group of its chunks (big meshes).
+    /// A cached draw's world-space triangles in the static pool: the whole draw, or a piece of a
+    /// big one.
     struct CachePart {
-        vk::AccelerationStructureKHR blas{};
-        VmaAllocation allocation{};
-        vk::Buffer buffer{};
-        vk::DeviceAddress address = 0;
-        u64 bytes = 0;
+        u32 pool_offset = 0;   // triangles
         u32 triangles = 0;
-        Rtao::Box box; // world space: instanced only within the far cut
+        Rtao::Box box;         // world space: in the static BLAS only within reach
     };
     struct CacheEntry : Rtao::CacheState {
         u32 last_seen = 0;     // frame
         std::vector<CachePart> parts; // empty: not cached
         bool chunked = false;  // parts are pieces of a mesh bigger than maxsize
         bool split_pending = false; // its triangles are being read back and split
-        u64 bytes = 0;         // all parts
+        bool in_static = false;     // the static BLAS holds all its parts within reach
+        bool static_skip = false;   // left out of the last static build (its triangle budget)
         u32 triangles = 0;
-        u32 ready_from = 0;    // frame from which the BLAS may be instanced
+        u32 ready_from = 0;    // frame from which it may join the static BLAS
     };
     /// Big meshes (chunk > 0) are cached in pieces: their world-space triangles are copied to the
     /// host once, split into compact pieces on a worker thread (Rtao::SplitTriangles), written to
@@ -147,7 +146,14 @@ private:
     };
     bool CreateBuffer(Buffer& buffer, vk::DeviceSize size, vk::BufferUsageFlags usage, bool host,
                       vk::DeviceSize alignment = 0, bool quiet = false, bool readback = false);
-    void UpdateCacheBudget();
+    void RebuildStatic(float reach); // choose the static BLAS's parts; built in this pass
+    /// The static BLAS's build flags (staticbuild=; the buffers are sized for all of them).
+    static vk::BuildAccelerationStructureFlagsKHR StaticFlags(u32 mode) {
+        using F = vk::BuildAccelerationStructureFlagBitsKHR;
+        return mode == 0 ? vk::BuildAccelerationStructureFlagsKHR{F::ePreferFastTrace}
+               : mode == 1 ? vk::BuildAccelerationStructureFlagsKHR{F::ePreferFastBuild}
+                           : F::ePreferFastBuild | F::eAllowDataAccess;
+    }
     void DestroyBuffer(Buffer& buffer);
     bool EnsureResources(u32 width, u32 height);
     bool CreateAccelerationStructures();
@@ -159,7 +165,7 @@ private:
     void WriteDump();      // vk_rtao_diagnostics.cpp
     void ReportReadback(); // vk_rtao_diagnostics.cpp
     void Evict(CacheEntry& entry);
-    void TrimCache();
+    void TrimCache(); // forget draws not seen for a minute
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -169,30 +175,42 @@ private:
     ObjectMotion& object_motion;
 
     bool enabled = false;
+    bool resources_ready = false; // the buffers and acceleration structures (made in the world)
     Rtao::Settings settings; // environment at start, <user>/rtao.txt while the game runs
     bool fast_trace_allowed = false;
     bool data_access = true;       // BB_RTAO_DATA_ACCESS=0: the per-frame BLAS without ALLOW_DATA_ACCESS
-    u32 max_triangles = 3000000; // 1.5M dropped ~10 draws per frame in the Hunter's Dream (blinking occluders)
+    // The per-frame BLAS's budget. With the static cache it holds the characters (~0.8M at the
+    // Doll); without it (cache=0, chunk=0) 1.5M dropped ~10 draws per frame in the Hunter's Dream
+    // (BB_RTAO_MAX_TRIANGLES=3000000 then).
+    u32 max_triangles = 1500000;
     u32 max_geometries = 8192;
 
     std::vector<GpuGeometry> geometries; // the frame's table (built in Record)
     std::vector<Draw> draws;             // the frame's eligible draws (AddGeometry)
     std::unordered_map<u64, u32> occurrences;
     std::unordered_map<u64, u32> max_copies; // per mesh: the most copies seen in one frame
-    // Static cache
-    u64 cache_budget = 1536ull << 20;    // bytes of cached BLASes (least recently seen go first)
-    u64 cache_budget_cap = 1536ull << 20; // BB_RTAO_CACHE_MB; the heap budget may lower it further
-    u32 promotion_pause_until = 0;        // allocation failed: no cache builds until this frame
-    u32 alloc_failures = 0;               // (per report)
-    u32 fail_test = 0;                    // BB_RTAO_FAIL_ALLOC=N: every Nth cache allocation fails (test)
+    // Static cache: cached draws' world-space triangles in a pool, and one BLAS over the pool's
+    // triangles within reach of the camera (static_*), rebuilt when the camera moved or the set
+    // changed. The TLAS holds two instances: the per-frame BLAS (view space) and the static one.
     u64 static_bytes = 0;                 // the RTAO's fixed buffers (footprint report)
     std::unordered_map<u64, CacheEntry> cache;
-    u64 cache_bytes = 0;
-    u32 cache_instances = 0, cache_instance_tris = 0, promotions = 0, evictions_total = 0;
+    Rtao::RangeAllocator pool;            // triangles of static_pool
+    static constexpr u32 PoolTriangles = 3000000;
+    static constexpr u32 StaticTriangles = 2000000;  // the static BLAS's budget
+    static constexpr u32 StaticSeenFrames = 120;     // draws not seen for longer leave it
+    Buffer static_pool;                   // device: float3 x 3 x PoolTriangles
+    Buffer static_blas_buffer;
+    vk::AccelerationStructureKHR static_blas{};
+    vk::DeviceAddress static_blas_address = 0;
+    std::vector<std::array<u32, 2>> static_build; // (pool offset, triangles) per geometry, this pass
+    bool static_valid = false;            // built (instanced from the pass that builds it)
+    bool static_dirty = false;            // a draw in it was evicted: rebuild now
+    std::array<float, 3> static_anchor{}; // the camera when it was built
+    u32 static_frame = 0;
+    u32 static_triangles = 0, static_geometries = 0, static_rebuilds = 0; // (rebuilds per report)
+    u32 promotions = 0, evictions_total = 0, pool_evictions = 0;
     u32 chunk_groups_built = 0, chunked_meshes_built = 0, split_skipped = 0; // (per report)
     float split_ms = 0.0f;                                                    // (per report)
-    u32 chunk_instances = 0, chunk_instance_tris = 0;    // the last pass
-    bool chunking_reported = false;
     u32 probes_read = 0, probes_stale = 0, probes_matched = 0, probes_changed = 0;
     u32 probes_reordered = 0;
     // Why per-frame triangles are not cached (the last pass): skinned, too big, blacklisted,
@@ -209,8 +227,7 @@ private:
     u32 skipped_busy = 0;   // passes skipped because the slot was still in use (per report)
     u64 index_bytes_frame = 0, index_bytes_small = 0; // measurement: index data per frame (all, < 16 KiB ranges)
     static constexpr u32 MaxInstances = 8192;
-    static constexpr u32 PromoTriangles = 400000; // world-space triangles built per frame at most
-    static constexpr u32 MaxPromoBuilds = 1024;   // cache BLAS builds per frame at most
+    static constexpr u32 PromoTriangles = 400000; // world-space triangles cached per frame at most
     static constexpr u32 ChunkGroupTriangles = 65536; // a piece of a big mesh: triangles at most
     static constexpr u32 MinPieceTriangles = 256;     // ... and pieces are not split below this
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
@@ -266,7 +283,6 @@ private:
     Buffer split_fetch;       // host (read back, cached): a batch of big meshes' world triangles
     Buffer split_staging;     // host: the same, reordered piece by piece (build input)
     static constexpr u32 MaxProbeChunks = 32768;
-    Buffer promo_scratch;     // device: scratch for the frame's cache builds
     Buffer constants_buffer;  // host: the trace's per-frame constants x TableSlots
     Buffer index_ring;        // host: small index ranges copied at draw time, IndexRingSlot x TableSlots
     static constexpr vk::DeviceSize IndexRingSlot = 4ull << 20;

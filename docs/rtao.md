@@ -27,13 +27,14 @@ it the port is unchanged.
 2. The game's AO upsample pass (pixel shader `0xc45c51cb` into an R8 scene-size target) ends;
    `Record()` runs:
    - static cache: the probe results of four passes ago are read (once their scheduler tick is
-     done) and the frame's draws sorted into cached instances, per-frame geometry and new cache
-     builds (see below);
-   - `rtao_expand.comp`: per-frame triangles into a view-space list (and world-space copies for
-     cache builds); triangles entirely beyond `far` + `radius` become inactive;
+     done), the static BLAS is rebuilt if due, and the frame's draws are sorted into covered by
+     the static BLAS, per-frame geometry and new cache entries (see below);
+   - `rtao_expand.comp`: per-frame triangles into a view-space list (and world-space copies of new
+     cache entries, copied into the static pool); triangles entirely beyond `far` + `radius`
+     become inactive;
    - `rtao_probe.comp`: world-space count, centroid, bounds and first vertex of probed draws;
-   - BLAS builds (per-frame list, fast build; cache builds, fast trace), then a TLAS of the
-     per-frame BLAS plus the cached instances placed with the view matrix;
+   - BLAS builds (the static BLAS when rebuilt; the per-frame list, fast build), then a TLAS of
+     two instances: the per-frame BLAS and the static BLAS placed with the view matrix;
    - the trace at half resolution (`rtao_trace_body.glsl`, as `rtao_trace.rgen` + `.rmiss` +
      `.rchit` or `rtao_trace.comp`): a geometric normal from four depth taps, optionally (`snap`) a
      short ray that snaps the origin onto the BVH surface (depth-biased draws sit centimetres
@@ -51,19 +52,28 @@ it the port is unchanged.
 ### Static cache
 
 A draw's identity is its shader, buffers, index range, counts and occurrence in the frame. A draw
-whose world-space summary stays the same for `promote` observations gets its own BLAS (world
-space, built for trace speed) and is instanced from then on; it leaves the per-frame BLAS and its
-budget. Cached draws are rechecked every 8th pass and evicted when they change; three evictions
-and a draw is never cached again. Copies of a mesh drawn several times a frame are matched by
-content (the game sorts draws by distance) and leave the per-frame BLAS only as a group. Draws
-with a character-size skeleton are never cached. Draws bigger than `maxsize` (terrain, building
-blocks) are cached in pieces (`chunk`, metres): their world-space triangles are copied to the host
-once, split on a worker thread at the median of the longest axis until a piece fits in `chunk`
-metres (box diagonal), and each piece gets its own BLAS, instanced only within the far cut. Whole,
-their far triangles would come back into every ray's path; per frame, they cost a third of the
-BLAS build. (Pieces of 4096-index chunks in the game's order were tried first: the game's index
-order is not spatial, the chunks overlapped, and the trace went from 0.5 to 5.7 ms.) Least
-recently seen BLASes go first beyond 1.5 GiB.
+whose world-space summary stays the same for `promote` observations is cached: its world-space
+triangles are copied into a pool (3M triangles, 102 MiB), and it leaves the per-frame BLAS once
+the static BLAS holds it. Cached draws are rechecked every 8th pass and evicted when they change;
+three evictions and a draw is never cached again. Copies of a mesh drawn several times a frame are
+matched by content (the game sorts draws by distance) and leave the per-frame BLAS only as a
+group. Draws with a character-size skeleton are never cached.
+
+The static BLAS is one tree over the pool's triangles of every cached draw seen in the last 2
+seconds, within `far` + `radius` + `margin` of the camera, nearest first up to 2M triangles. It is
+rebuilt when the camera has moved more than `margin` (8 m) since the last build, when a draw in it
+was evicted, and at most every `rebuild` (30) frames when the set changed. One tree instead of an
+instance per cached draw: overlapping instances made every nearby ray traverse several trees
+(about 800 pieces of big meshes as instances: trace 0.5 -> 0.75-1.46 ms). A rebuild costs 1.4 ms
+on the GPU (956k triangles, fast build with ALLOW_DATA_ACCESS; fast trace 2.75 ms: `staticbuild`).
+
+Draws bigger than `maxsize` (terrain, building blocks) are cached in pieces (`chunk`, metres):
+their world-space triangles are copied to the host once, split on a worker thread at the median
+of the longest axis until a piece fits in `chunk` metres (box diagonal), and written to a staging
+buffer, from which the pieces are copied into the pool. Each piece joins the static BLAS only
+within reach; whole, their far triangles would be in every rebuild. (Pieces of 4096-index chunks in
+the game's order were tried first: the game's index order is not spatial.) When the pool is full,
+the least recently seen draws leave it.
 
 ### Index buffers
 
@@ -115,9 +125,12 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `promote` | | 8 | matching observations before a draw is cached |
 | `maxsize` | | 20 | bigger draws are cached in pieces, or with `chunk=0` stay per frame (metres, bounding-box diagonal) |
 | `chunk` | | 10 | size of the pieces of big draws (metres; 0: big draws stay per frame) |
+| `margin` | | 8 | the static BLAS reaches this far past `far` + `radius`; moving this far rebuilds it |
+| `rebuild` | | 30 | frames between rebuilds for a changed set of cached draws (0: every pass, to measure a rebuild) |
+| `staticbuild` | | 2 | static BLAS build: 0 fast trace, 1 fast build, 2 fast build + ALLOW_DATA_ACCESS |
 | `build` | | 0 | 1: per-frame BLAS built for trace speed (no difference on RADV) |
 | `alpha`, `decals` | | 0 | 1: keep alpha-tested draws / draws without depth write |
-| | `BB_RTAO_MAX_TRIANGLES` | 3000000 | per-frame triangle budget (buffers are sized for it) |
+| | `BB_RTAO_MAX_TRIANGLES` | 1500000 | per-frame triangle budget (buffers are sized for it; 3000000 for `cache=0` or `chunk=0`) |
 | `stage` | `BB_RTAO_STAGE` | 5 | stop after: 1 expand, 2 BLAS, 3 TLAS, 4 trace, 5 apply |
 | `debug` | `BB_RTAO_DEBUG` | 0 | 1 raw AO, 2 camera-ray test, 3 normal facing, 4 AO with t_min 0.1 |
 | `dump` | | | change the value: 8 consecutive frames of the AO the apply gets go to `out/rtao_dump_<frame>_<k>.pgm`; the log line gives mean, mean frame-to-frame change and the share of pixels changing > 0.05 |
@@ -155,32 +168,33 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Defaults at the end of 2026-10-14 vs RT off | GPU busy 13.37 ms | 15.16 ms (60 FPS; BLAS 1.61, trace 0.69, expand 0.18 ms) |
 | Big draws per frame (`chunk=0`) vs whole in the cache (`maxsize=0`) vs in pieces (Doll, snap off) | 14.90-15.03 ms (BLAS 1.60, trace 0.44-0.51) / 14.21-14.36 (BLAS 0.61, trace 0.86-0.89) | pieces of 5 / 10 / 20 / 40 m: 14.30 / 14.20-14.33 / 14.42 / 14.44 (trace 0.75 / 0.75 / 0.90 / 0.90) |
 | The same at the workshop door (denser) | `chunk=0`: GPU busy 15.15 ms (BLAS 1.51, trace 0.81) | `chunk=10`: 15.05-15.06 (BLAS 0.71, trace 1.46) |
+| One static BLAS instead of an instance per cached draw (lanterns lit, one session; RT off 13.59 ms) | Doll: `chunk=0` 14.67 ms (BLAS 1.44, trace 0.45) | static BLAS 13.70-13.75 (BLAS 0.55, trace 0.47-0.49) |
+| The same at the workshop door (RT off 13.59 ms) | `chunk=0` 15.09 ms (BLAS 1.59, trace 0.71) | 14.24 (BLAS 0.82, trace 0.70) |
+| Static BLAS rebuild (`rebuild=0`: every pass; 956k triangles) | fast trace: 2.75 ms, fast build 2.06 | fast build + data access 1.39 ms, trace +0.03 ms: default |
 
-Known cost drivers: instances that overlap make nearby rays traverse several trees (with big
-draws in pieces, 700-830 instances: the trace grows from 0.5-0.8 to 0.75-1.46 ms while the build
-shrinks by 1 ms); the per-frame BLAS (803k skinned triangles at the Doll) is rebuilt from a
-non-indexed expansion every frame; every pixel near the camera is traced, so looking at the ground
-is the worst case.
+Known cost drivers: the per-frame BLAS (the characters: 0.8M triangles at the Doll) is rebuilt from
+a non-indexed expansion every frame; a static rebuild (1.4 ms) when the camera moved 8 m; every
+pixel near the camera is traced, so looking at the ground is the worst case.
 
 ## Memory
 
-Fixed buffers at the default 3M-triangle budget (RX 9070 XT, RADV):
+Fixed buffers at the default 1.5M-triangle per-frame budget (RX 9070 XT, RADV):
 
 | What | MiB |
 |---|---|
-| Per-frame BLAS (3M triangles, ~200 B per triangle on RADV; same for fast build and fast trace) | 586 |
-| Its build scratch | 400 |
-| Triangle list (3M per-frame + 0.4M cache builds, 36 B each) | 117 |
-| Cache build scratch, TLAS, rings, probe buffers | ~93 |
-| Total RTAO fixed buffers | 1196 |
+| Per-frame BLAS (1.5M triangles, ~200 B per triangle with ALLOW_DATA_ACCESS) | 293 |
+| Static BLAS (2M triangles; sized for every `staticbuild` mode, plus a tenth) | 430 |
+| BLAS build scratch (shared: the static build, then the per-frame one) | 377 |
+| Static pool (3M triangles, 36 B each) | 102 |
+| Triangle list (1.5M per-frame + 0.4M cache copies) and the host staging for splits | ~95 |
+| TLAS, rings, probe buffers | ~30 |
 | Object-motion capture with `BB_RTAO=1` (8M positions x 2 frames) | 256 |
+| Total reported (`RTAO: fixed buffers`) | ~1320 |
 
-The static cache comes on top: at most `BB_RTAO_CACHE_MB` (1536) and at most a quarter of the
-device heap's remaining room (VMA's budget minus usage), re-checked every 10 seconds. A failed
-cache allocation halves the budget, trims the least recently seen BLASes and pauses cache builds
-for 10 seconds; the 10-second report says so (no per-allocation messages).
-`BB_RTAO_FAIL_ALLOC=N` makes every Nth cache allocation fail, to test that path. Compaction is not
-used: on RADV it saves nothing.
+Nothing is allocated per cached draw any more. The buffers are made at the first frame with a
+scene camera, not at start: made at start, before the game's own resources, the game's lights
+went out (lanterns, candles; reproducibly from about 1.3 GiB, with VRAM far from full; the same
+1.7 GiB made later left them lit). The cause in the port is not found yet.
 
 ## Debugging
 
@@ -190,8 +204,9 @@ used: on RADV it saves nothing.
   sits where the depth buffer says); `dump=` writes the image, `1.0 = 128`. The 600-frame log line
   reports draws, triangles, budget drops, skipped draw kinds, passes recorded and skipped; the
   first pass after start reads back expanded triangles (valid share, depth range).
-- **Static cache**: the `RTAO: cache:` line (known draws, instanced, MiB, built, evicted, probe
-  matches/changes).
+- **Static cache**: the `RTAO: cache:` line (known draws, pool use, cached and evicted draws,
+  static BLAS triangles, parts and rebuilds, probe matches/changes); `RTAO: big meshes in pieces:`
+  (split time on the worker). The static build has its own profiler segment, `rtao static`.
 - **Validation**: `BB_VK_VALIDATION=1` (core), `BB_VK_VALIDATION_SYNC=1` (synchronization),
   `BB_VK_VALIDATION_GPU=1` (GPU-assisted, about 25 FPS). RTAO objects carry debug names (`rtao
   trace`, `rtao triangles`, `rtao TLAS`, ...), so a message about them names them. To separate

@@ -135,23 +135,6 @@ bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsage
     return true;
 }
 
-// The cache's budget: at most BB_RTAO_CACHE_MB (1536), and at most a quarter of what the device
-// heap still has room for (VMA's budget minus usage, plus what the cache already holds).
-void RayTracedAO::UpdateCacheBudget() {
-    const auto& props = instance.GetPhysicalDevice().getMemoryProperties();
-    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
-    vmaGetHeapBudgets(instance.GetAllocator(), budgets.data());
-    u64 room = 0;
-    for (u32 i = 0; i < props.memoryHeapCount; ++i) {
-        if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
-            const u64 free = budgets[i].budget > budgets[i].usage ? budgets[i].budget - budgets[i].usage : 0;
-            room = std::max(room, free);
-        }
-    }
-    const u64 budget = std::min(cache_budget_cap, (room + cache_bytes) / 4);
-    cache_budget = std::max<u64>(budget, 64ull << 20);
-}
-
 void RayTracedAO::DestroyBuffer(Buffer& buffer) {
     if (buffer.buffer) {
         vmaDestroyBuffer(instance.GetAllocator(), buffer.buffer, buffer.allocation);
@@ -187,8 +170,9 @@ bool RayTracedAO::CreateAccelerationStructures() {
         !CreateBuffer(readback_buffer, vk::DeviceSize(ReadbackTriangles) * 9 * sizeof(float),
                       BU::eTransferDst, true) ||
         !CreateBuffer(split_fetch, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferDst, true, 0, false, true) ||
-        !CreateBuffer(split_staging, vk::DeviceSize(PromoTriangles) * 36,
-                      BU::eAccelerationStructureBuildInputReadOnlyKHR, true)) {
+        !CreateBuffer(split_staging, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferSrc, true) ||
+        !CreateBuffer(static_pool, vk::DeviceSize(PoolTriangles) * 36,
+                      BU::eAccelerationStructureBuildInputReadOnlyKHR | BU::eTransferDst, false)) {
         return false;
     }
 
@@ -235,32 +219,51 @@ bool RayTracedAO::CreateAccelerationStructures() {
             blas_sizes.buildScratchSize = std::max(blas_sizes.buildScratchSize, trace_sizes.buildScratchSize);
         }
     }
+    // The static BLAS: built rarely (staticbuild=); it shares the scratch (built before the
+    // per-frame BLAS, with a barrier between). A tenth more room: its builds have many geometries
+    // (one per part), sized again per build.
+    vk::AccelerationStructureBuildSizesInfoKHR static_sizes{};
+    {
+        auto static_info = blas_info;
+        for (u32 mode = 0; mode < 3; ++mode) { // sized for every staticbuild= mode
+            static_info.flags = StaticFlags(mode);
+            const auto sizes = device.getAccelerationStructureBuildSizesKHR(
+                vk::AccelerationStructureBuildTypeKHR::eDevice, static_info, StaticTriangles);
+            std::printf("RTAO: static BLAS, staticbuild=%u: %llu MiB + %llu scratch\n", mode,
+                        (unsigned long long)(sizes.accelerationStructureSize >> 20),
+                        (unsigned long long)(sizes.buildScratchSize >> 20));
+            static_sizes.accelerationStructureSize =
+                std::max(static_sizes.accelerationStructureSize, sizes.accelerationStructureSize);
+            static_sizes.buildScratchSize = std::max(static_sizes.buildScratchSize, sizes.buildScratchSize);
+        }
+        static_sizes.accelerationStructureSize += static_sizes.accelerationStructureSize / 10;
+        static_sizes.buildScratchSize += static_sizes.buildScratchSize / 10;
+    }
     if (!CreateBuffer(blas_buffer, blas_sizes.accelerationStructureSize,
                       BU::eAccelerationStructureStorageKHR, false) ||
-        !CreateBuffer(blas_scratch, blas_sizes.buildScratchSize, BU::eStorageBuffer, false,
-                      scratch_alignment)) {
+        !CreateBuffer(blas_scratch, std::max(blas_sizes.buildScratchSize, static_sizes.buildScratchSize),
+                      BU::eStorageBuffer, false, scratch_alignment) ||
+        !CreateBuffer(static_blas_buffer, static_sizes.accelerationStructureSize,
+                      BU::eAccelerationStructureStorageKHR, false)) {
         return false;
     }
+    static_blas = Check(device.createAccelerationStructureKHR({
+        .buffer = static_blas_buffer.buffer,
+        .size = static_sizes.accelerationStructureSize,
+        .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+    }));
+    static_blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = static_blas});
+    pool.Reset(PoolTriangles);
+    std::printf("RTAO: static cache: pool of %u triangles (%llu MiB), static BLAS for %u triangles %llu MiB "
+                "(+%llu scratch)\n", PoolTriangles, (unsigned long long)(static_pool.size >> 20), StaticTriangles,
+                (unsigned long long)(static_sizes.accelerationStructureSize >> 20),
+                (unsigned long long)(static_sizes.buildScratchSize >> 20));
     blas = Check(device.createAccelerationStructureKHR({
         .buffer = blas_buffer.buffer,
         .size = blas_sizes.accelerationStructureSize,
         .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
     }));
     blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = blas});
-    // The static cache's builds of a frame share one scratch (sized for PromoTriangles, built for
-    // trace speed: a cached BLAS is built once and traced for many frames).
-    {
-        blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace; // cache: compressed
-        blas_geometry.geometry.triangles.maxVertex = PromoTriangles * 3 - 1;
-        const auto promo_sizes = device.getAccelerationStructureBuildSizesKHR(
-            vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, PromoTriangles);
-        // Room for the alignment of many small builds (chunk groups: up to MaxPromoBuilds a frame,
-        // whose scratch together is more than one build of the same triangles).
-        if (!CreateBuffer(promo_scratch, promo_sizes.buildScratchSize * 3 / 2 + MaxPromoBuilds * scratch_alignment,
-                          BU::eStorageBuffer, false, scratch_alignment)) {
-            return false;
-        }
-    }
 
     // TLAS: one instance, identity (the triangles are already in view space).
     vk::AccelerationStructureGeometryKHR tlas_geometry{
@@ -294,16 +297,19 @@ bool RayTracedAO::CreateAccelerationStructures() {
              {&table_buffer, "rtao table"}, {&triangle_buffer, "rtao triangles"},
              {&instance_buffer, "rtao instances"}, {&probe_buffer, "rtao probe results"},
              {&constants_buffer, "rtao constants"}, {&blas_buffer, "rtao per-frame BLAS"},
-             {&blas_scratch, "rtao BLAS scratch"}, {&promo_scratch, "rtao cache scratch"},
+             {&blas_scratch, "rtao BLAS scratch"}, {&static_pool, "rtao static pool"},
+             {&static_blas_buffer, "rtao static BLAS"},
              {&tlas_buffer, "rtao TLAS"}, {&tlas_scratch, "rtao TLAS scratch"},
              {&readback_buffer, "rtao readback"}, {&index_ring, "rtao index ring"}}) {
         SetObjectName(device, buffer->buffer, name);
     }
     SetObjectName(device, blas, "rtao per-frame BLAS");
+    SetObjectName(device, static_blas, "rtao static BLAS");
     SetObjectName(device, tlas, "rtao TLAS");
     for (const Buffer* buffer : {&table_buffer, &triangle_buffer, &instance_buffer, &probe_buffer, &constants_buffer,
                                  &index_ring, &probe_chunks, &probe_ranges, &probe_partials, &split_fetch, &split_staging, &blas_buffer,
-                                 &blas_scratch, &promo_scratch, &tlas_buffer, &tlas_scratch, &readback_buffer}) {
+                                 &blas_scratch, &static_pool, &static_blas_buffer, &tlas_buffer, &tlas_scratch,
+                                 &readback_buffer}) {
         static_bytes += buffer->size;
     }
     std::printf("RTAO: fixed buffers %llu MiB (with the object-motion capture's %llu MiB of positions)\n",
@@ -317,21 +323,114 @@ bool RayTracedAO::CreateAccelerationStructures() {
 }
 
 void RayTracedAO::Evict(CacheEntry& entry) {
-    if (!entry.parts.empty()) {
-        const auto device = instance.GetDevice();
-        scheduler.DeferOperation([device, allocator = instance.GetAllocator(), parts = std::move(entry.parts)] {
-            for (const auto& part : parts) {
-                device.destroyAccelerationStructureKHR(part.blas);
-                vmaDestroyBuffer(allocator, part.buffer, part.allocation);
-            }
-        });
-        cache_bytes -= entry.bytes;
+    // The pool's ranges are free at once: a static BLAS keeps no reference to its input, and the
+    // next copy into the pool waits for the builds recorded before it.
+    for (const auto& part : entry.parts) {
+        pool.Free(part.pool_offset, part.triangles);
+    }
+    if (entry.in_static) {
+        static_dirty = true; // its old triangles must leave the static BLAS now
     }
     entry.parts.clear();
     entry.chunked = false;
     entry.cached = false;
-    entry.bytes = 0;
+    entry.in_static = false;
+    entry.static_skip = false;
     entry.triangles = 0;
+}
+
+void RayTracedAO::RebuildStatic(float reach) {
+    // Every pooled draw seen lately; its parts within reach, nearest first within the budget.
+    struct Candidate {
+        float d2;
+        u32 offset, triangles;
+        u64 key;
+    };
+    std::vector<Candidate> parts;
+    for (auto& [key, e] : cache) {
+        e.static_skip = false;
+        e.in_static = false;
+        if (e.parts.empty() || frame < e.ready_from || frame - e.last_seen > StaticSeenFrames) {
+            continue;
+        }
+        for (const auto& part : e.parts) {
+            const float d2 = part.box.Distance2(camera_world);
+            if (reach <= 0.0f || d2 <= reach * reach) {
+                parts.push_back({d2, part.pool_offset, part.triangles, key});
+            }
+        }
+        e.in_static = true; // unless a part is left out below
+    }
+    std::sort(parts.begin(), parts.end(), [](const Candidate& a, const Candidate& b) { return a.d2 < b.d2; });
+    const auto leave_out = [&](const Candidate& part) {
+        CacheEntry& e = cache[part.key];
+        e.in_static = false; // stays per frame
+        e.static_skip = true;
+    };
+    std::vector<Candidate> chosen;
+    u32 triangles = 0;
+    for (const auto& part : parts) {
+        if (triangles + part.triangles > StaticTriangles) {
+            leave_out(part);
+            continue;
+        }
+        triangles += part.triangles;
+        chosen.push_back(part);
+    }
+    // Many geometries need more room than one of the same triangles: the furthest parts go until
+    // the build fits the buffers.
+    const auto device = instance.GetDevice();
+    while (!chosen.empty()) {
+        std::vector<vk::AccelerationStructureGeometryKHR> geos(chosen.size());
+        std::vector<u32> counts(chosen.size());
+        for (size_t i = 0; i < chosen.size(); ++i) {
+            geos[i] = vk::AccelerationStructureGeometryKHR{
+                .geometryType = vk::GeometryTypeKHR::eTriangles,
+                .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                                 .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                                 .vertexStride = 3 * sizeof(float),
+                                 .maxVertex = chosen[i].triangles * 3 - 1,
+                                 .indexType = vk::IndexType::eNoneKHR,
+                             }},
+                .flags = vk::GeometryFlagBitsKHR::eOpaque,
+            };
+            counts[i] = chosen[i].triangles;
+        }
+        const vk::AccelerationStructureBuildGeometryInfoKHR info{
+            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
+            .flags = StaticFlags(settings.static_build),
+            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
+            .geometryCount = u32(geos.size()),
+            .pGeometries = geos.data(),
+        };
+        const auto sizes = device.getAccelerationStructureBuildSizesKHR(
+            vk::AccelerationStructureBuildTypeKHR::eDevice, info, counts);
+        if (sizes.accelerationStructureSize <= static_blas_buffer.size && sizes.buildScratchSize <= blas_scratch.size) {
+            break;
+        }
+        const size_t keep = chosen.size() * 9 / 10;
+        for (size_t i = keep; i < chosen.size(); ++i) {
+            triangles -= chosen[i].triangles;
+            leave_out(chosen[i]);
+        }
+        chosen.resize(keep);
+    }
+    static_build.clear();
+    for (const auto& part : chosen) {
+        static_build.push_back({part.offset, part.triangles});
+    }
+    static_triangles = triangles;
+    static_geometries = u32(static_build.size());
+    static_valid = !static_build.empty();
+    static_dirty = false;
+    static_anchor = camera_world;
+    static_frame = frame;
+    ++static_rebuilds;
+    if (!static_valid) {
+        for (auto& [key, e] : cache) {
+            e.in_static = false;
+        }
+    }
 }
 
 void RayTracedAO::UpdateSplit() {
@@ -433,32 +532,10 @@ void RayTracedAO::ReadProbes(u32 ring) {
 }
 
 void RayTracedAO::TrimCache() {
-    if (cache_bytes > cache_budget) {
-        std::vector<std::pair<u32, u64>> order; // last seen, key
-        for (const auto& [key, e] : cache) {
-            if (!e.parts.empty() && e.last_seen != frame) {
-                order.emplace_back(e.last_seen, key);
-            }
-        }
-        std::sort(order.begin(), order.end());
-        for (const auto& [seen, key] : order) {
-            if (cache_bytes <= cache_budget * 9 / 10) {
-                break;
-            }
-            Evict(cache[key]);
-        }
-    }
-    if (frame % 600 == 0) {
-        if (frame >= promotion_pause_until) {
-            UpdateCacheBudget();
-        }
-    }
     if (frame % 600 == 0) { // forget draws not seen for a minute
         for (auto it = cache.begin(); it != cache.end();) {
             if (frame - it->second.last_seen > 3600) {
-                if (!it->second.parts.empty()) {
-                    Evict(it->second);
-                }
+                Evict(it->second);
                 it = cache.erase(it);
             } else {
                 ++it;

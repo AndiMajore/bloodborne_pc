@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <iterator>
 #include <string>
 
 namespace Rtao {
@@ -144,6 +145,61 @@ std::vector<ChunkGroup> SplitTriangles(const float* triangles, u32 count, float 
     return groups;
 }
 
+void RangeAllocator::Reset(u32 new_size) {
+    free_ranges.clear();
+    size = new_size;
+    used = 0;
+    if (size) {
+        free_ranges[0] = size;
+    }
+}
+
+std::optional<u32> RangeAllocator::Alloc(u32 count) {
+    if (count == 0) {
+        return std::nullopt;
+    }
+    for (auto it = free_ranges.begin(); it != free_ranges.end(); ++it) {
+        if (it->second >= count) {
+            const u32 offset = it->first, rest = it->second - count;
+            free_ranges.erase(it);
+            if (rest) {
+                free_ranges[offset + count] = rest;
+            }
+            used += count;
+            return offset;
+        }
+    }
+    return std::nullopt;
+}
+
+void RangeAllocator::Free(u32 offset, u32 count) {
+    if (count == 0) {
+        return;
+    }
+    used -= count;
+    auto next = free_ranges.lower_bound(offset);
+    if (next != free_ranges.end() && offset + count == next->first) { // joins the range after
+        count += next->second;
+        next = free_ranges.erase(next);
+    }
+    if (next != free_ranges.begin()) {
+        auto prev = std::prev(next);
+        if (prev->first + prev->second == offset) { // and the one before
+            prev->second += count;
+            return;
+        }
+    }
+    free_ranges[offset] = count;
+}
+
+u32 RangeAllocator::LargestFree() const {
+    u32 largest = 0;
+    for (const auto& [offset, count] : free_ranges) {
+        largest = std::max(largest, count);
+    }
+    return largest;
+}
+
 Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match,
                     const std::array<float, 3>& camera) {
     if (!state.have_stats) {
@@ -203,6 +259,9 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "promote") s.promote_after = std::clamp(u32(std::max(value, 0.0f)), 2u, 600u);
     else if (key == "maxsize") s.cache_max_size = std::max(value, 0.0f);
     else if (key == "chunk") s.chunk_cell = std::max(value, 0.0f);
+    else if (key == "staticbuild") s.static_build = std::clamp(u32(std::max(value, 0.0f)), 0u, 2u);
+    else if (key == "margin") s.static_margin = std::clamp(value, 0.5f, 100.0f);
+    else if (key == "rebuild") s.static_interval = std::clamp(u32(std::max(value, 0.0f)), 0u, 6000u);
     else if (key == "alpha") flag(s.include_alpha);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);

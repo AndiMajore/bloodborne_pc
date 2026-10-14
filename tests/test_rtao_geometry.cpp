@@ -162,6 +162,23 @@ static void Split() {
     assert(b.Distance2({-3.0f, 0.5f, 0.5f}) == 9.0f && b.Distance2({1.0f, 0.5f, 0.5f}) == 0.0f);
 }
 
+static void Pool() {
+    RangeAllocator pool;
+    pool.Reset(100);
+    const auto a = pool.Alloc(30), b = pool.Alloc(30), c = pool.Alloc(30);
+    assert(a == 0u && b == 30u && c == 60u && pool.Used() == 90);
+    assert(!pool.Alloc(11) && pool.Alloc(10) == 90u);
+    pool.Free(30, 30); // a hole in the middle
+    assert(pool.LargestFree() == 30 && !pool.Alloc(31));
+    pool.Free(0, 30); // merges with the hole
+    assert(pool.LargestFree() == 60 && pool.Alloc(60) == 0u);
+    pool.Free(0, 60);
+    pool.Free(60, 30);
+    pool.Free(90, 10); // all merged again
+    assert(pool.Used() == 0 && pool.LargestFree() == 100);
+    assert(!pool.Alloc(0));
+}
+
 static void SettingsParsing() {
     Settings s;
     bool reset = false;
@@ -190,6 +207,7 @@ int main() {
     Matching();
     StateMachine();
     Split();
+    Pool();
     SettingsParsing();
     std::puts("rtao-geometry-test: ok");
     return 0;

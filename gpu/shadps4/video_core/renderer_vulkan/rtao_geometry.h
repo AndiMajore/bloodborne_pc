@@ -7,6 +7,8 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -80,6 +82,21 @@ struct ChunkGroup {
 std::vector<ChunkGroup> SplitTriangles(const float* triangles, u32 count, float cell, u32 max_triangles,
                                        u32 min_triangles, float* out);
 
+/// First-fit ranges in a fixed pool (the cached world-space triangles); freed neighbours merge.
+class RangeAllocator {
+public:
+    void Reset(u32 size);
+    std::optional<u32> Alloc(u32 count);
+    void Free(u32 offset, u32 count);
+    u32 Used() const { return used; }
+    u32 Size() const { return size; }
+    u32 LargestFree() const;
+
+private:
+    std::map<u32, u32> free_ranges; // offset -> count
+    u32 size = 0, used = 0;
+};
+
 /// What the static cache knows of a draw, without its Vulkan objects.
 struct CacheState {
     u64 base = 0;
@@ -114,7 +131,10 @@ struct Settings {
     bool cache_enabled = true;
     u32 promote_after = 8;
     float cache_max_size = 20.0f;
-    float chunk_cell = 10.0f; // > 0: meshes bigger than cache_max_size are cached in pieces of this size
+    float chunk_cell = 10.0f;
+    float static_margin = 8.0f;  // the static BLAS reaches this far past the far cut (metres)
+    u32 static_build = 2;        // the static BLAS: 0 fast trace, 1 fast build, 2 fast build + data access
+    u32 static_interval = 30;    // frames between rebuilds for a changed set (not for a move); 0: every pass // > 0: meshes bigger than cache_max_size are cached in pieces of this size
     bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
     float dump_request = 0.0f;
 };
