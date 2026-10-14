@@ -710,6 +710,10 @@ void RayTracedAO::OnFrameStart() {
                     probes_stale, probes_matched, probes_reordered, probes_changed, camera_world[0],
                     camera_world[1], camera_world[2]);
         probes_read = probes_stale = probes_matched = probes_changed = probes_reordered = 0;
+        std::printf("RTAO: per-frame triangles by reason: %u skinned, %u bigger than maxsize, %u kept changing, "
+                    "%u not stable yet, %u copies of a mesh not all cached, %u cache off\n",
+                    per_frame_reasons[0], per_frame_reasons[1], per_frame_reasons[2], per_frame_reasons[3],
+                    per_frame_reasons[4], per_frame_reasons[5]);
         promotions = 0;
         evictions_total = 0;
         if (recorded == 0 && !draws.empty() && active && !missing_pass_reported) {
@@ -1235,6 +1239,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     u32 promo_used = 0;
     vk::DeviceSize promo_scratch_used = 0;
     frame_triangles = 0;
+    per_frame_reasons = {};
     cache_instances = 0;
     cache_instance_tris = 0;
     const auto make_instance = [&](vk::DeviceAddress address, bool world) {
@@ -1334,6 +1339,11 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 verify_keys.push_back(d.key);
             }
             continue;
+        }
+        {
+            const int reason = !use_cache ? 5 : d.skinned ? 0 : too_big(e) ? 1 : e.evictions >= 3 ? 2
+                               : !e.blas ? 3 : 4;
+            per_frame_reasons[reason] += gpu.triangles;
         }
         gpu.triangle_offset = frame_triangles;
         gpu.out_base = frame_triangles;

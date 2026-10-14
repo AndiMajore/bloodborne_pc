@@ -207,6 +207,9 @@ private:
     u32 cache_instances = 0, cache_instance_tris = 0, promotions = 0, evictions_total = 0;
     u32 probes_read = 0, probes_stale = 0, probes_matched = 0, probes_changed = 0, mismatch_prints = 0;
     u32 probes_reordered = 0;
+    // Why per-frame triangles are not cached (the last pass): skinned, too big, blacklisted,
+    // not stable yet, part of a mesh whose copies are not all cached, cache off.
+    std::array<u32, 6> per_frame_reasons{};
     std::array<float, 3> camera_world{};
     static constexpr u32 ProbeSlots = 4;
     std::array<std::vector<u64>, ProbeSlots> probe_keys; // table index -> key (0: not probed)
