@@ -64,6 +64,8 @@ struct TraceConstants {
     u32 mode; // 0 ao, 2 primary-ray test
     float snap_far;
     float ao_far;
+    u32 normals;
+    float offset;
 };
 struct ApplyConstants {
     std::array<float, 4> proj;
@@ -77,7 +79,7 @@ struct ApplyConstants {
     u32 pad1;
 };
 static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
-static_assert(sizeof(TraceConstants) == 116 && offsetof(TraceConstants, ao_far) == 112);
+static_assert(sizeof(TraceConstants) == 124 && offsetof(TraceConstants, offset) == 120);
 struct BlurConstants {
     std::array<float, 2> half_size;
     std::array<s32, 2> dir;
@@ -111,10 +113,6 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
         std::puts("RTAO: ray queries unsupported by the driver, off");
         return;
     }
-    if (!instance.IsRayTracingPositionFetchSupported()) {
-        std::puts("RTAO: VK_KHR_ray_tracing_position_fetch unsupported by the driver, off");
-        return;
-    }
     if (!object_motion.Enabled() || !camera_motion.Enabled()) {
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
@@ -129,6 +127,11 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     max_triangles = std::clamp(EnvU32("BB_RTAO_MAX_TRIANGLES", 3000000), 10000u, 16000000u);
     stage = std::clamp(EnvU32("BB_RTAO_STAGE", 5), 0u, 5u);
     cache_enabled = EnvU32("BB_RTAO_CACHE", 1) != 0;
+    // ALLOW_DATA_ACCESS on the per-frame BLAS although nothing reads positions back: on RADV the
+    // flag turns RDNA4's compressed triangle-pair leaves off, and their build cost more than
+    // their traversal saved (Doll, three sessions: build 1.65 vs 2.41 ms, trace 1.79 vs 1.73 ms).
+    // Cached BLASes are built once and traced for many frames: compressed (no flag).
+    data_access = EnvU32("BB_RTAO_DATA_ACCESS", 1) != 0;
 
     const auto device = instance.GetDevice();
     const auto make_layouts = [&](std::span<const vk::DescriptorSetLayoutBinding> bindings,
@@ -253,6 +256,8 @@ void RayTracedAO::PollSettings() {
         else if (key == "promote") promote_after = std::clamp(u32(value), 2u, 600u);
         else if (key == "maxsize") cache_max_size = std::max(value, 0.0f);
         else if (key == "ringtest") ring_test = value != 0.0f;
+        else if (key == "normals") depth_normals = value != 0.0f;
+        else if (key == "offset") origin_offset = std::clamp(value, 0.0f, 0.1f);
         else if (key == "alpha") include_alpha = value != 0.0f;
         else if (key == "decals") include_nowrite = value != 0.0f;
     }
@@ -373,8 +378,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
     };
     vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
         .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild |
-                 vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
+        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{}),
         .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
         .geometryCount = 1,
         .pGeometries = &blas_geometry,
@@ -382,8 +386,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
     // Sized for both build preferences ("build=" in the settings switches them live).
     auto blas_sizes = device.getAccelerationStructureBuildSizesKHR(
         vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
-    blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
-                      vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess;
+    blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace | (data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{});
     const auto trace_sizes = device.getAccelerationStructureBuildSizesKHR(
         vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, max_triangles);
     blas_sizes.accelerationStructureSize =
@@ -404,8 +407,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
     // The static cache's builds of a frame share one scratch (sized for PromoTriangles, built for
     // trace speed: a cached BLAS is built once and traced for many frames).
     {
-        blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
-                          vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess;
+        blas_info.flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace; // cache: compressed
         blas_geometry.geometry.triangles.maxVertex = PromoTriangles * 3 - 1;
         const auto promo_sizes = device.getAccelerationStructureBuildSizesKHR(
             vk::AccelerationStructureBuildTypeKHR::eDevice, blas_info, PromoTriangles);
@@ -1167,8 +1169,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         };
         const vk::AccelerationStructureBuildGeometryInfoKHR info{
             .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
-                     vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
+            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
             .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
             .geometryCount = 1,
             .pGeometries = &geometry,
@@ -1321,6 +1322,8 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .mode = debug,
         .snap_far = snap_far,
         .ao_far = ao_far,
+        .normals = depth_normals ? 1u : 0u,
+        .offset = origin_offset,
     };
     const vk::DeviceSize constants_offset = vk::DeviceSize(slot) * ConstantsStride;
     std::memcpy(static_cast<u8*>(constants_buffer.mapped) + constants_offset, &trace, sizeof(trace));
@@ -1355,6 +1358,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
     const u32 last_stage = stage;
     const bool fast_trace = build_fast_trace;
+    const vk::BuildAccelerationStructureFlagsKHR extra_flags =
+        data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
+                    : vk::BuildAccelerationStructureFlagsKHR{};
     const auto memory_barrier = [](vk::CommandBuffer cmdbuf, vk::PipelineStageFlags2 src_stage,
                                    vk::AccessFlags2 src, vk::PipelineStageFlags2 dst_stage,
                                    vk::AccessFlags2 dst) {
@@ -1462,8 +1468,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                 };
                 infos[i] = vk::AccelerationStructureBuildGeometryInfoKHR{
                     .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-                    .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace |
-                             vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
+                    .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
                     .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
                     .dstAccelerationStructure = pr.blas,
                     .geometryCount = 1,
@@ -1495,7 +1500,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
             .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
             .flags = (fast_trace ? vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace
                                  : vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild) |
-                     vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess,
+                     extra_flags,
             .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
             .dstAccelerationStructure = blas,
             .geometryCount = 1,

@@ -162,6 +162,9 @@ private:
     bool blur = true;     // 4x4 depth-aware tent in the apply (blur=0 for the plain upsample)
     bool replace_mask = false; // settings "replace=1": the game's AO (or the GTAO pack) is ignored
     bool build_fast_trace = false; // settings "build=1": BVH built for trace speed
+    bool data_access = true;       // BB_RTAO_DATA_ACCESS=0: the per-frame BLAS without ALLOW_DATA_ACCESS
+    bool depth_normals = true;   // settings "normals=0": the G-buffer shading normal instead
+    float origin_offset = 0.0f;  // settings "offset=": metres along the normal on top of the ulp offset
     float snap_far = 30.0f;   // settings "snap=": the surface snap up to this depth (0 = off)
     float ao_far = 40.0f;     // settings "far=": no AO and no BVH beyond (0 = everything); 40 m saves ~2 ms
     float sigma = 1.5f;   // separable depth-aware blur of the half-res AO, in texels (0 = off)
