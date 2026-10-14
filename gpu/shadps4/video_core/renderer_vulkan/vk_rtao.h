@@ -11,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +28,9 @@ class BufferCache;
 
 namespace Vulkan {
 
+namespace RtaoInternal {
+class Worker;
+}
 class Instance;
 class Scheduler;
 class Runtime;
@@ -129,6 +133,7 @@ private:
     std::vector<SplitMesh> split_meshes;
     u64 split_tick = 0;       // Fetching: the copy's tick; Building: the last build's
     std::future<std::pair<std::vector<SplitMesh>, float>> split_result; // the pieces, worker ms
+    std::unique_ptr<RtaoInternal::Worker> worker; // bb:RtaoSplit
     /// One draw of the frame before classification (dynamic, cached instance or promotion).
     struct Draw {
         GpuGeometry gpu;

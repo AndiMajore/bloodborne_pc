@@ -5,8 +5,15 @@
 #pragma once
 
 #include <array>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
+#include <deque>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -81,6 +88,45 @@ struct BlurConstants {
 };
 static_assert(sizeof(ApplyConstants) == 56);
 static_assert(sizeof(BlurConstants) == 24);
+/// The pass's one helper thread (bb:RtaoSplit, on otherwise idle cores): jobs run in order,
+/// each hands its result back through a future. Started with the first job, joined on
+/// destruction after the jobs left (the owner waits for its futures before freeing what they use).
+class Worker {
+public:
+    ~Worker() {
+        {
+            std::scoped_lock lock{mutex};
+            stop = true;
+        }
+        wake.notify_one();
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    template <class F>
+    auto Post(F&& job) -> std::future<decltype(job())> {
+        using Result = decltype(job());
+        auto task = std::make_shared<std::packaged_task<Result()>>(std::forward<F>(job));
+        auto future = task->get_future();
+        {
+            std::scoped_lock lock{mutex};
+            jobs.emplace_back([task] { (*task)(); });
+            if (!thread.joinable()) {
+                thread = std::thread([this] { Run(); });
+            }
+        }
+        wake.notify_one();
+        return future;
+    }
+
+private:
+    void Run();
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<std::function<void()>> jobs;
+    bool stop = false;
+    std::thread thread;
+};
 inline float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
     return value ? std::strtof(value, nullptr) : fallback;

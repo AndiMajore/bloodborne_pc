@@ -2,6 +2,8 @@
 // bbport: ray-traced AO, buffers, pipelines, acceleration structures and the static cache's bookkeeping (see vk_rtao.cpp).
 #include "video_core/renderer_vulkan/vk_rtao.h"
 #include "video_core/renderer_vulkan/vk_rtao_internal.h"
+#include "bbport_threads.h"
+#include "common/thread.h"
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +95,24 @@ void RayTracedAO::CreateTracePipeline() {
     sbt_hit = vk::StridedDeviceAddressRegionKHR{.deviceAddress = sbt_buffer.address + 2 * base, .stride = stride, .size = stride};
     SetObjectName(device, *rt_trace_pipeline, "rtao trace (ray-tracing pipeline)");
     std::puts("RTAO: the trace runs as a ray-tracing pipeline (pipeline=0 in rtao.txt: ray queries)");
+}
+
+void RtaoInternal::Worker::Run() {
+    Common::SetCurrentThreadName("bb:RtaoSplit");
+    BbThreads::MakeBackground();
+    for (;;) {
+        std::function<void()> job;
+        {
+            std::unique_lock lock{mutex};
+            wake.wait(lock, [this] { return stop || !jobs.empty(); });
+            if (jobs.empty()) {
+                return; // stop, nothing left
+            }
+            job = std::move(jobs.front());
+            jobs.pop_front();
+        }
+        job();
+    }
 }
 
 bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
@@ -462,7 +482,10 @@ void RayTracedAO::UpdateSplit() {
         // reads it until the batch is built, and no new batch starts before that is done).
         vmaInvalidateAllocation(instance.GetAllocator(), split_fetch.allocation, 0, VK_WHOLE_SIZE);
         split_state = SplitState::Splitting;
-        split_result = std::async(std::launch::async, [meshes = split_meshes,
+        if (!worker) {
+            worker = std::make_unique<RtaoInternal::Worker>();
+        }
+        split_result = worker->Post([meshes = split_meshes,
                                                        fetch = static_cast<const float*>(split_fetch.mapped),
                                                        staging = static_cast<float*>(split_staging.mapped),
                                                        cell = settings.chunk_cell]() mutable {
