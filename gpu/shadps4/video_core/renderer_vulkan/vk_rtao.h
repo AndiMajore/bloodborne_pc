@@ -75,7 +75,7 @@ public:
     /// Running now: not switched off live (enabled=0) and its buffers made. The capture of
     /// positions follows this, not Enabled().
     [[nodiscard]] bool Active() const noexcept {
-        return enabled && resources_ready && settings.active;
+        return enabled && resources_ready && settings.active && !pass_missing;
     }
     void OnFrameStart();
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
@@ -259,6 +259,8 @@ private:
     bool heuristic_reported = false; // an R8 scene-size target without it (reported once)
     u32 world_frames = 0;            // frames with G-buffer draws
     bool missing_pass_reported = false;
+    bool pass_missing = false;    // the game's AO pass did not run for 600 frames (SSAO patched
+                                  // out): nothing is captured until its shader is seen
     bool done_this_frame = false;
     u32 frame = 0;
     u32 width = 0, height = 0;

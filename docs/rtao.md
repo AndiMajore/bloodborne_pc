@@ -216,6 +216,37 @@ scene camera, not at start: made at start, before the game's own resources, the 
 went out (lanterns, candles; reproducibly from about 1.3 GiB, with VRAM far from full; the same
 1.7 GiB made later left them lit). The cause in the port is not found yet.
 
+## Feature combinations (ticket 32)
+
+One game start per row at the Doll (2026-10-15, `bbworld --measure`, 25 s in the world): RTAO's
+log lines, the `Object motion:` stats line (600 frames), device losses, GPU busy, and the lantern
+left of the Doll in a screenshot (lit: 49-68, out: ~17). Base: FSR 4.1.1 Quality, SSGI on, the
+user's AO shader pack, SSAO on, layer memory off, draw pipe and async submit on. The Hunter's
+Dream starts with or without the Doll at the stairs (game state, not the port): 55920 motion draws
+with her, 48120 without; rows compare within the same case.
+
+| Row | RTAO | Outcome | Motion draws / with history | GPU busy |
+|---|---|---|---|---|
+| Base | off | | 55920 / 55560 | 13.39 ms |
+| Base | on | on, pass found by shader, static BLAS 957k | 55920 / 55560 | 13.83-13.87 ms |
+| TAA | off | | 48120 / 47760 (no Doll) | 13.36 ms |
+| TAA | on | on | 55920 / 55560 | 13.40 ms |
+| No upscaler | on | off: "needs the object motion vectors" (object motion is off) | - | 12.82 ms |
+| SSGI off | off | | 55920 / 55560 | 13.38 ms |
+| SSGI off | on | on | 55920 / 55560 | 13.44 ms |
+| No shader pack | on | on, pass found by shader | 55920 / 55560 | 13.81 ms |
+| SSAO patched out | on | "OFF in practice" once; no capture (0 draws) | 48120 / 47760 (no Doll) | 13.36 ms |
+| Layer memory | off / on | on; RTAO live off/on in one session: 13.82 / 15.42-15.57 ms | 55920 / 55560 | see left |
+| Draw pipe off | on | on | 55920 / 55560 | 13.79 ms |
+| Async submit off | on | on | 48120 / 47760 (no Doll) | 13.64 ms |
+
+No device loss and lit lanterns in every row; the motion stats with RTAO on equal those with it
+off in every row with the same scene. GPU busy understates RTAO where the frame has idle gaps
+it fills: its own work is ~1.1 ms (segments 1.04 ms plus the AO upsample's difference); with
+layer memory the frame is fuller and GPU busy grows by 1.6 ms (idle -1.66 ms). With no
+upscaler the RT device extensions are still enabled (BB_RTAO=1 asks for them before object
+motion is known to be off).
+
 ## Debugging
 
 - **GPU hangs**: breadcrumbs name the stage (`STUCK: pass rtao <stage>`); `stage=N` stops after a

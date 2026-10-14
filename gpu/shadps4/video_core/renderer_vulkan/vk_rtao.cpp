@@ -305,6 +305,9 @@ void RayTracedAO::OnFrameStart() {
                     (unsigned long long)(static_bytes >> 20));
         promotions = 0;
         evictions_total = 0;
+        if (recorded == 0 && !draws.empty() && settings.active && !upsample_seen) {
+            pass_missing = true; // no capture for a pass that never runs
+        }
         if (recorded == 0 && !draws.empty() && settings.active && !missing_pass_reported) {
             missing_pass_reported = true;
             std::puts("RTAO: OFF in practice: the game's AO pass never ran, so there is no AO mask to "
@@ -488,6 +491,7 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
         return;
     }
     if (ps_hash == AoUpsampleShader) {
+        pass_missing = false;
         if (!upsample_seen) {
             upsample_seen = true;
             std::printf("RTAO: the game's AO pass found by its upsample shader 0x%llx\n",
