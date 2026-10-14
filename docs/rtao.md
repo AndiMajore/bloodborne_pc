@@ -144,12 +144,14 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Trace vs ray count (pipeline, snap on) | 1 ray 0.50, 2 rays 0.70 ms | 6 rays 1.55, 12 rays 2.62 ms |
 | Denoiser 2 at 2 rays vs denoiser 1 at 6 (still camera, 8 frames) | GPU busy 16.63 ms, 4.40% of pixels change > 0.05, mean 0.787 | 15.68 ms, 2.78%, mean 0.786 |
 | Denoiser 2 clip floor (2 rays) | 0: mean 0.803 (biased light: all-miss 3x3 neighbourhoods clipped history to 1) | 0.1: 0.787 (raw trace mean 0.791) |
-| Defaults at the end of 2026-10-14 vs RT off | GPU busy 13.37 ms | 15.73 ms (60 FPS) |
+| Static-cache probe in chunks of 4096 indices | probe 0.61 ms | < 0.1 ms |
+| Defaults at the end of 2026-10-14 vs RT off | GPU busy 13.37 ms | 15.16 ms (60 FPS; BLAS 1.61, trace 0.69, expand 0.18 ms) |
 
-Known cost drivers: trace cost hardly depends on the ray count (it is traversal-bound: rays
-start in dense geometry and misses walk the whole local BVH); every pixel near the camera is
-traced, so looking at the ground is the worst case; the per-frame BLAS is rebuilt from a
-non-indexed expansion every frame.
+Known cost drivers: the per-frame BLAS (1.73M triangles at the Doll: 928k from static meshes
+larger than `maxsize`, kept per frame for the per-triangle far cut, and 803k skinned) is rebuilt
+from a non-indexed expansion every frame; every pixel near the camera is traced, so looking at
+the ground is the worst case; instances that overlap the per-frame BLAS make nearby rays
+traverse two trees.
 
 ## Memory
 
