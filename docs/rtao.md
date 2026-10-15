@@ -47,7 +47,7 @@ it the port is unchanged.
    - BLAS builds (the static BLAS when rebuilt; the per-frame list, fast build), then a TLAS of
      two instances: the per-frame BLAS and the static BLAS placed with the view matrix;
    - the trace at half resolution (`rtao_trace_body.glsl`, as `rtao_trace.rgen` + `.rmiss` +
-     `.rchit` or `rtao_trace.comp`): a geometric normal from four depth taps, optionally (`snap`) a
+     `.rchit` or `rtao_trace.comp`): a geometric normal from four depth taps, (`snap`, default on) a
      short ray that snaps the origin onto the BVH surface (depth-biased draws sit centimetres
      off it), a Waechter-Binder ulp offset, then `rays` cosine-weighted rays over `radius`; temporal blend
      with a bilinear, depth-tested, clamped history (denoiser 1), or raw output (denoiser 2);
@@ -132,7 +132,7 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `blur` | | 1 | 4x4 depth-aware upsample, 0: 2x2 |
 | `replace` | | 0 | 1: ignore the game's AO (or a shader pack's) in the mask |
 | `far` | | 40 | no AO and no per-frame geometry beyond this distance (fades over the last quarter) |
-| `snap` | | 0 | the surface snap runs up to this distance (0 off; no measurable effect with depth normals) |
+| `snap` | | 30 | the surface snap runs up to this distance (0 off; without it depth-biased draws such as the protruding bricks of the Hunter's Dream garden wall flicker in motion) |
 | `normals` | | 1 | 1: geometric normal from the depth buffer, 0: the G-buffer's shading normal |
 | `offset` | | 0 | metres along the normal on top of the ulp offset |
 | `pipeline` | `BB_RTAO_PIPELINE` | 1 | the trace as a ray-tracing pipeline (where supported), 0: ray queries |
@@ -178,7 +178,7 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Depth-derived normals vs shading normals, self-hit share (pixels > 0.15 darker than with rays from 10 cm out; the snap was on in all four runs, a settings bug) | shading 6.4% / 9.1% | depth 4.4% / 6.2% |
 | Snap ray on vs off (6 rays / 1 ray) | trace 1.43 / 0.27 ms | 1.55 / 0.50 ms |
 | Trace vs ray count (pipeline, snap on) | 1 ray 0.50, 2 rays 0.70 ms | 6 rays 1.55, 12 rays 2.62 ms |
-| Snap distance at 2 rays, Doll / looking down at the paving (pixels > 0.15 darker than snap 30 at 16 rays, 8-frame means; noise snap 30 vs 30: 0.85% / 0.55%) | snap 30: trace 0.71-0.75 / 0.70-0.78 ms | snap 0: 0.50 / 0.50 ms, darker 0.89% / 0.33%; 4 m: 0.55 / 0.54 ms, 0.84% / 0.20%: default 0 |
+| Snap distance at 2 rays, Doll / looking down at the paving (pixels > 0.15 darker than snap 30 at 16 rays, 8-frame means; noise snap 30 vs 30: 0.85% / 0.55%) | snap 30: trace 0.71-0.75 / 0.70-0.78 ms | snap 0: 0.50 / 0.50 ms, darker 0.89% / 0.33%; 4 m: 0.55 / 0.54 ms, 0.84% / 0.20%: default 0, back to 30 after the garden-wall flicker (still frames could not show it) |
 | Denoiser 2 at 2 rays vs denoiser 1 at 6 (still camera, 8 frames) | GPU busy 16.63 ms, 4.40% of pixels change > 0.05, mean 0.787 | 15.68 ms, 2.78%, mean 0.786 |
 | Denoiser 2 clip floor (2 rays) | 0: mean 0.803 (biased light: all-miss 3x3 neighbourhoods clipped history to 1) | 0.1: 0.787 (raw trace mean 0.791) |
 | Static-cache probe in chunks of 4096 indices | probe 0.61 ms | < 0.1 ms |
