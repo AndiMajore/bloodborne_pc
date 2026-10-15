@@ -277,6 +277,8 @@ motion is known to be off).
 ## Known limitations
 
 - Foliage and other alpha-tested draws cast no AO (they would be solid quads); decals are left out.
+- RTAO darkens everywhere, also where the game scales its own AO to zero (the Workshop): a
+  chosen look (compared in game against honouring the per-area scale), not an oversight.
 - Strips and other non-list topologies are skipped (counted in the log).
 - The capture's positions are post-vertex-shader: anything the game moves in a later stage is not
   seen.
