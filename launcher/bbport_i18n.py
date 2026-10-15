@@ -126,7 +126,9 @@ EN = {
     # Screen
     "Экран": "Display",
     "Разрешение вывода": "Output resolution",
-    "Апскейлер дорисовывает кадр; Steam Deck — 720p": "The upscaler fills the frame; Steam Deck: 720p",
+    "Апскейлер дорисовывает кадр; Steam Deck — 1280×800 (16:10)": "The upscaler fills the frame; Steam Deck: 1280×800 (16:10)",
+    "Соотношение сторон": "Aspect ratio",
+    "Шире 16:9 — больше обзор по бокам, выше — сверху и снизу; интерфейс у краёв экрана": "Wider than 16:9 sees more to the sides, taller more above and below; the UI keeps to the screen edges",
     "Полноэкранный режим": "Fullscreen",
     "Смена разрешения на лету": "Live resolution changes",
     "Без перезапуска, но медленнее на Steam Deck и старых GPU":
@@ -204,16 +206,18 @@ EN = {
     "Эта сборка без модуля онлайна (libbbnet.so): игра только офлайн": "This build has no online module (libbbnet.so): offline play only",
     'Online ID — это имя учётной записи (NPID), зарегистрированное на сервере, а не адрес email': 'The Online ID is the account name (NPID) you registered on the server, not your email address',
     'UPnP (открыть порт на роутере автоматически)': 'UPnP (open a port on the router automatically)',
-    'srv.shadps4.net:31313 — публичный сервер shadPS4. Для частного сервера укажите host:port от его владельца. WebAPI: оставьте пустым, тогда берётся адрес сервера с портом 31315': "srv.shadps4.net:31313 is shadPS4's public server. For a private server, enter host:port from the person who runs it. WebAPI: leave it empty to use the server address with port 31315",
+    'play.seamlesshunt.com:31313 — сервер Seamless Hunt (BBSC). Публичный сервер shadPS4 принимает только сборки shadPS4. Для частного сервера укажите host:port от его владельца. WebAPI: оставьте пустым, тогда берётся адрес сервера с портом 31315': "play.seamlesshunt.com:31313 is Seamless Hunt's server (BBSC). shadPS4's public server accepts only shadPS4 builds. For a private server, enter host:port from the person who runs it. WebAPI: leave it empty to use the server address with port 31315",
     'Адрес WebAPI': 'WebAPI address',
     'Адрес сервера': 'Server address',
     'Выключено: игра остаётся офлайн, как раньше': 'Off: the game stays offline, as before',
     'Выключите при Tailscale или другом VPN': 'Turn it off with Tailscale or another VPN',
     'Играть онлайн': 'Play online',
+    'Бесшовный кооператив (BBSC)': 'Seamless co-op (BBSC)',
+    'Сессия переживает смерти, лампы, смену локаций и боссов; до 5 охотников. Нужен сервер с игровым сервером BBSC, у всех игроков включено': 'The session survives deaths, lamps, area changes and bosses; up to 5 hunters. Needs a server running the BBSC game server, and every player turns it on',
     'Играть офлайн': 'Play offline',
     'Игровой сервер': 'Game server',
     'Игровой сервер (сообщения, пятна крови, призраки)': 'Game server (messages, bloodstains, ghosts)',
-    'Имя учётной записи shadNet, не email. Зарегистрируйтесь на shadnet.shadps4.net или спросите владельца частного сервера. Пароль хранится на этом компьютере вместе с настройками лаунчера': 'Your shadNet account name, not your email. Register at shadnet.shadps4.net or ask the owner of a private server. The password is saved on this computer with the launcher settings',
+    'Имя учётной записи shadNet, не email. Зарегистрируйтесь на seamlesshunt.com или спросите владельца частного сервера. Пароль хранится на этом компьютере вместе с настройками лаунчера': 'Your shadNet account name, not your email. Register at seamlesshunt.com or ask the owner of a private server. The password is saved on this computer with the launcher settings',
     'Онлайн': 'Online',
     'Отмена': 'Cancel',
     'Пароль': 'Password',
@@ -223,7 +227,7 @@ EN = {
     'Сервер shadNet': 'shadNet server',
     'Сервер кооператива (колокола и призывы)': 'Co-op server (bells and summons)',
     'Соединение': 'Connection',
-    "Сообщения, пятна крови и призраки приходят с The Hunter's Dream; колокола и призывы идут через сервер shadNet. Игра по сети совместима с версией для Windows: нужны версия игры 1.09 и тот же сервер": "Messages, bloodstains and ghosts come from The Hunter's Dream; bells and summons go through a shadNet server. Online play works together with the Windows version: everyone needs game version 1.09 and the same server",
+    "Сообщения, пятна крови и призраки приходят с игрового сервера; колокола и призывы идут через сервер shadNet. По умолчанию оба — Seamless Hunt (сервер BBSC). Игра по сети совместима с версией для Windows: нужны версия игры 1.09 и тот же сервер": "Messages, bloodstains and ghosts come from the game server; bells and summons go through a shadNet server. By default both are Seamless Hunt's (BBSC's server). Online play works together with the Windows version: everyone needs game version 1.09 and the same server",
     'У всех в сессии должны быть одна версия игры (1.09) и один сервер. Читы меняют игру и для других игроков: выключайте их при совместной игре': 'Everyone in a session needs the same game version (1.09) and the same server. Cheats change the game for the other players too: turn them off when you play together',
     'Учётная запись': 'Account',
     'Учётная запись для игры онлайн указана, но «Играть онлайн» выключено': 'An online account is filled in, but “Play online” is off',
@@ -277,7 +281,7 @@ EN = {
     "Частота кадров": "Frame rate",
     "Режим": "Mode",
     "Какой патч частоты кадров применить к игре": "Which frame rate patch to apply to the game",
-    "Без ограничения (патч)": "Unlocked (patch)",
+    "Без ограничения": "Unlocked",
     "30 (как на PS4)": "30 (as on PS4)",
     "Ограничение FPS": "FPS limit",
     "0 — без ограничения; укажите число, чтобы ограничить FPS":
@@ -304,7 +308,7 @@ EN = {
     "Новая: видеокарта работает с памятью игры напрямую, как в игре для ПК, а команды графики переводятся, а не эмулируются. Старая — модель памяти 0.3 со всеми исправлениями. Если драйвер не проходит проверку при запуске — старая":
         "The new one: the GPU works with the game's memory directly, as in a PC game, and graphics commands are translated rather than emulated. The old one: the memory model of 0.3 with all the fixes. If the driver fails the startup check, the old one",
     "Модель памяти и трансляции": "Memory and translation model",
-    "Авто: новая на AMD, старая на других": "Auto: new on AMD, old on others",
+    "Авто: новая на любой видеокарте": "Auto: new on every GPU",
     "Новая": "New",
     "Старая (как в 0.3)": "Old (as in 0.3)",
     "Синхронизация как в 0.3": "Synchronisation as in 0.3",
@@ -399,7 +403,10 @@ PT_BR = {
     # Screen
     "Экран": "Tela",
     "Разрешение вывода": "Resolução de saída",
-    "Апскейлер дорисовывает кадр; Steam Deck — 720p": "O upscaler preenche o quadro; Steam Deck: 720p",
+    "Апскейлер дорисовывает кадр; Steam Deck — 1280×800 (16:10)": "O upscaler preenche o quadro; Steam Deck: 1280×800 (16:10)",
+    "Соотношение сторон": "Proporção da tela",
+    "Шире 16:9 — больше обзор по бокам, выше — сверху и снизу; интерфейс у краёв экрана": "Mais larga que 16:9 mostra mais dos lados, mais alta mais acima e abaixo; a interface fica nas bordas da tela",
+    "Авто": "Auto",
     "Полноэкранный режим": "Tela cheia",
     "Смена разрешения на лету": "Alteração de resolução em tempo real",
     "Без перезапуска, но медленнее на Steam Deck и старых GPU":
@@ -503,7 +510,7 @@ PT_BR = {
     "Частота кадров": "Taxa de quadros",
     "Режим": "Modo",
     "Какой патч частоты кадров применить к игре": "Qual patch de taxa de quadros aplicar ao jogo",
-    "Без ограничения (патч)": "Sem limite (patch)",
+    "Без ограничения": "Sem limite",
     "30 (как на PS4)": "30 (como no PS4)",
     "Ограничение FPS": "Limite de FPS",
     "0 — по частоте экрана (не выше 120 Гц); укажите число, чтобы ограничить иначе":
@@ -525,7 +532,7 @@ PT_BR = {
     "Новая: видеокарта работает с памятью игры напрямую, как в игре для ПК, а команды графики переводятся, а не эмулируются. Старая — модель памяти 0.3 со всеми исправлениями. Если драйвер не проходит проверку при запуске — старая":
         "O novo: a GPU usa a memória do jogo diretamente, como em um jogo de PC, e os comandos gráficos são traduzidos em vez de emulados. O antigo: o modelo de memória da 0.3 com todas as correções. Se o driver falhar na verificação inicial, o antigo",
     "Модель памяти и трансляции": "Modelo de memória e tradução",
-    "Авто: новая на AMD, старая на других": "Automático: novo na AMD, antigo nas outras",
+    "Авто: новая на любой видеокарте": "Automático: novo em qualquer placa de vídeo",
     "Новая": "Novo",
     "Старая (как в 0.3)": "Antigo (como na 0.3)",
     "Синхронизация как в 0.3": "Sincronização como na 0.3",
@@ -647,7 +654,9 @@ ZH_CN = {
     # Screen
     "Экран": "显示",
     "Разрешение вывода": "输出分辨率",
-    "Апскейлер дорисовывает кадр; Steam Deck — 720p": "超分辨率会将画面放大到此分辨率；Steam Deck 建议 720p",
+    "Апскейлер дорисовывает кадр; Steam Deck — 1280×800 (16:10)": "超分辨率会将画面放大到此分辨率；Steam Deck 建议 1280×800（16:10）",
+    "Соотношение сторон": "宽高比",
+    "Шире 16:9 — больше обзор по бокам, выше — сверху и снизу; интерфейс у краёв экрана": "比 16:9 更宽可看到两侧更多内容，更高可看到上下更多内容；界面贴靠屏幕边缘",
     "Полноэкранный режим": "全屏模式",
     "Смена разрешения на лету": "实时切换分辨率",
     "Без перезапуска, но медленнее на Steam Deck и старых GPU":
@@ -769,7 +778,7 @@ ZH_CN = {
     "Частота кадров": "帧率",
     "Режим": "模式",
     "Какой патч частоты кадров применить к игре": "对游戏应用哪种帧率补丁",
-    "Без ограничения (патч)": "不限制（补丁解锁）",
+    "Без ограничения": "不限制",
     "30 (как на PS4)": "30（与 PS4 一致）",
     "Ограничение FPS": "帧率上限",
     "0 — без ограничения; укажите число, чтобы ограничить FPS":
@@ -796,7 +805,7 @@ ZH_CN = {
     "Новая: видеокарта работает с памятью игры напрямую, как в игре для ПК, а команды графики переводятся, а не эмулируются. Старая — модель памяти 0.3 со всеми исправлениями. Если драйвер не проходит проверку при запуске — старая":
         "新模型：显卡像 PC 游戏那样直接读写游戏内存，图形指令被转译而非模拟。旧模型：0.3 版的内存模型，包含所有修复。如果驱动未通过启动检查，则使用旧模型",
     "Модель памяти и трансляции": "内存与指令转译模型",
-    "Авто: новая на AMD, старая на других": "自动：AMD 用新模型，其他显卡用旧模型",
+    "Авто: новая на любой видеокарте": "自动：所有显卡都用新模型",
     "Новая": "新模型",
     "Старая (как в 0.3)": "旧模型（与 0.3 版相同）",
     "Синхронизация как в 0.3": "与 0.3 版相同的同步方式",

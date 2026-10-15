@@ -10,6 +10,7 @@ text is the key).
 """
 
 import json
+import math
 import shutil
 import os
 import re
@@ -40,13 +41,13 @@ DATA_DIR = Path(os.environ.get("BB_DATA_DIR", PORT_DIR))
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "bbport-launcher"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 MAX_LOG_LINES = 5000
-# The memory model (run.sh: BB_PC_MODEL): "auto" leaves it to the GPU (the new one on AMD, the
-# 0.3 one elsewhere), or either by hand. The new one goes through the layer's memory module on
+# The memory model (run.sh: BB_PC_MODEL): "auto" is the new one on every GPU (0.6), or either by
+# hand. The new one goes through the layer's memory module on
 # every GPU (no sparse binding of the game's memory; BB_LAYER_MEMORY=0: AMD's sparse arena).
 PC_MODEL_SUBTITLE = ("Новая: видеокарта работает с памятью игры напрямую, как в игре для ПК, а команды "
                      "графики переводятся, а не эмулируются. Старая — модель памяти 0.3 со всеми "
                      "исправлениями. Если драйвер не проходит проверку при запуске — старая")
-MEMORY_MODELS = [("Авто: новая на AMD, старая на других", "auto"), ("Новая", "new"),
+MEMORY_MODELS = [("Авто: новая на любой видеокарте", "auto"), ("Новая", "new"),
                  ("Старая (как в 0.3)", "old")]
 # FSR 4.1.1 assets built from the user's AMD DLL (tools/fsr4cap, also in the package).
 FSR4CAP_DIR = PORT_DIR / "tools" / "fsr4cap"
@@ -85,7 +86,53 @@ UPSCALERS = [("FSR 4", "fsr4"), ("FSR 4.1.1", "fsr411"), ("FSR 3", "fsr3"),
              ("TAA (нативное сглаживание)", "taa"), ("Выключен", "off")]
 PRESETS = [("Native AA", 0), ("Quality (x1.5)", 1), ("Balanced (x1.7)", 2),
            ("Performance (x2)", 3), ("Ultra Performance (x3)", 4)]
-OUTPUT_RES = [("1280×720 (Steam Deck)", "1280x720"), ("1920×1080", "1920x1080"), ("2560×1440", "2560x1440"), ("3840×2160", "3840x2160")]
+# Output aspect ratios and their resolutions (gpu/shim/bbport_settings.cpp, the same lists): the
+# game keeps its 1920x1080 frame; for another aspect ratio its camera sees more to the sides (above
+# and below) and the UI keeps to the screen edges, changed live. Auto: the monitor's group.
+ASPECTS = ["auto", "4:3", "16:10", "16:9", "21:9", "32:9"]
+ASPECT_RATIOS = {"4:3": 4 / 3, "16:10": 16 / 10, "16:9": 16 / 9, "21:9": 64 / 27, "32:9": 32 / 9}
+OUTPUTS = {
+    "4:3": [(640, 480), (800, 600), (1024, 768), (1280, 960), (1440, 1080), (1600, 1200), (2048, 1536),
+            (2880, 2160)],
+    "16:10": [(640, 400), (960, 600), (1280, 800), (1440, 900), (1680, 1050), (1920, 1200), (2560, 1600),
+              (3840, 2400)],
+    "16:9": [(640, 360), (854, 480), (960, 540), (1280, 720), (1600, 900), (1920, 1080), (2560, 1440),
+             (3200, 1800), (3840, 2160)],
+    "21:9": [(860, 360), (1280, 540), (1720, 720), (2560, 1080), (3440, 1440), (3840, 1600), (5120, 2160)],
+    "32:9": [(1280, 360), (1920, 540), (2560, 720), (3840, 1080), (5120, 1440), (7680, 2160)],
+}
+
+
+def resolved_aspect(aspect, monitor):
+    """The aspect ratio group: Auto is the one nearest the monitor's (16:9 when unknown)."""
+    if aspect in OUTPUTS:
+        return aspect
+    if not monitor:
+        return "16:9"
+    ratio = monitor[0] / monitor[1]
+    return min(OUTPUTS, key=lambda a: abs(math.log(ratio / ASPECT_RATIOS[a])))
+
+
+def output_sizes(aspect, monitor):
+    """The resolutions of an aspect ratio; Auto adds the monitor's own size."""
+    sizes = list(OUTPUTS[resolved_aspect(aspect, monitor)])
+    if (aspect == "auto" and monitor and monitor not in sizes and 640 <= monitor[0] <= 7680
+            and 360 <= monitor[1] <= 4320):
+        sizes = sorted(sizes + [monitor], key=lambda size: (size[1], size[0]))
+    return sizes
+
+
+def nearest_output(sizes, size):
+    """The size itself if listed, else the one nearest in height (another aspect ratio keeps it)."""
+    return size if size in sizes else min(sizes, key=lambda s: abs(s[1] - size[1]))
+
+
+def parse_size(text, default=(1920, 1080)):
+    try:
+        w, h = (int(v) for v in text.lower().split("x"))
+        return (w, h) if w > 0 and h > 0 else default
+    except ValueError:
+        return default
 # Game effects (patches applied at start): bbport.ini key, title, default.
 EFFECTS = [
     ("effect_chromatic_aberration", "Хроматическая аберрация", True),
@@ -101,7 +148,7 @@ EFFECTS = [
 ]
 MODEL_LOD = [("Как в игре", "0"), ("Максимальная (-2)", "-2"), ("Ниже (1)", "1"),
              ("Минимальная (2)", "2")]
-FPS_MODES = [("Без ограничения (патч)", "uncap"), ("60", "60"), ("90", "90"),
+FPS_MODES = [("Без ограничения", "uncap"), ("60", "60"), ("90", "90"),
              ("30 (как на PS4)", "30")]
 PRESENT_MODES = [("Mailbox", "Mailbox"), ("FIFO (VSync)", "Fifo"),
                  ("FIFO Relaxed", "FifoRelaxed"), ("Immediate", "Immediate")]
@@ -146,12 +193,15 @@ DEFAULTS = {
     "gpu_profile": False,
     "vk_validation": False,
     "extra_env": "",
-    # Online play (Online page, the online module gpu/bbnet): off by default; shadPS4's public
-    # shadNet server and The Hunter's Dream.
+    # Online play (Online page, the online module gpu/bbnet): off by default; Seamless Hunt's
+    # servers (BBSC's: shadNet, its WebAPI and the game server).
     "online": False,
+    # BBSC, Bloodborne seamless co-op (seamlesshunt.com): needs a server running its
+    # game server next to shadNet (Seamless Hunt's does).
+    "online_bbsc": True,
     "online_community": online.COMMUNITY_SERVER,
     "online_server": online.SHADNET_SERVER,
-    "online_webapi": "",
+    "online_webapi": online.WEBAPI_SERVER,
     "online_npid": "",
     "online_password": "",
     "online_upnp": True,
@@ -181,6 +231,11 @@ def load_settings():
         settings.update(json.loads(CONFIG_FILE.read_text(encoding='utf-8')))
     except (OSError, ValueError):
         pass
+    # Addresses saved as the old defaults (shadPS4's public shadNet, which accepts only shadPS4's
+    # own builds since 2026-10-12, and The Hunter's Dream) become the new ones.
+    for key, old_values in online.OLD_DEFAULTS.items():
+        if str(settings.get(key, '')).strip() in old_values:
+            settings[key] = DEFAULTS[key]
     return settings
 
 
@@ -325,8 +380,7 @@ def game_environment(s):
         env["BB_FRAME_STATS"] = "1"
     if s.get("save_log"):
         env["BB_SAVE_LOG"] = "1"
-    # The memory model: "auto" is run.sh's choice by GPU (the new one on AMD, the 0.3 one
-    # elsewhere). "pc_model", "pc_memory", "old_memory_model", "new_memory_model" and
+    # The memory model: "auto" is run.sh's choice (the new one on every GPU). "pc_model", "pc_memory", "old_memory_model", "new_memory_model" and
     # "legacy_memory_model" of older settings are ignored (0.5: auto for everyone).
     # BB_PC_MODEL from the shell (or the extra variables) still wins over "auto".
     model = s.get("memory_model", "auto")
@@ -353,6 +407,8 @@ def game_environment(s):
         env["BB_SHADNET_PASSWORD"] = s["online_password"]
         env["BB_UPNP"] = "1" if s["online_upnp"] else "0"
         env["BB_COMMUNITY_SERVER"] = community
+        if s.get("online_bbsc"):
+            env["BB_BBSC"] = "1"
     for item in s["extra_env"].split():
         if "=" in item:
             key, value = item.split("=", 1)
@@ -397,35 +453,36 @@ def combo_value(row):
     return row.values[row.get_selected()]
 
 
-# Controls (runtime_pad.c): input, label, default keyboard keys, default gamepad buttons (SDL names).
+# Controls (runtime_pad.c): input, label, default keyboard keys (Dark Souls III-like; a chord
+# is "Left Shift+Mouse Left"), default gamepad buttons (SDL names).
 # bbport.ini key.<input>= / pad.<input>= replace a default; no line keeps it. Mouse buttons and the
 # wheel are keys ("Mouse Left", "Wheel Down"); they act while the game holds the mouse.
 CONTROLS = [
-    ("cross", "Крест", "Space", "a"),
-    ("circle", "Круг", "Left Shift", "b"),
-    ("square", "Квадрат", "E", "x"),
-    ("triangle", "Треугольник", "Q", "y"),
-    ("l1", "L1", "1, Mouse X2", "leftshoulder"),
-    ("r1", "R1", "3, Mouse Left", "rightshoulder"),
-    ("l2", "L2", "R, Mouse Right", "lefttrigger"),
-    ("r2", "R2", "F, Mouse X1", "righttrigger"),
-    ("l3", "L3", "Z", "leftstick"),
-    ("r3", "R3", "C, Mouse Middle", "rightstick"),
-    ("options", "Options", "Return", "start"),
-    ("touchpad", "Тачпад, левая половина (жесты)", "Tab", "back, touchpad"),
+    ("cross", "Крест (взаимодействие)", "F, Return", "a"),
+    ("circle", "Круг (уклонение, бег)", "Space", "b"),
+    ("square", "Квадрат (быстрый предмет)", "Tab, R", "x"),
+    ("triangle", "Треугольник (флакон крови)", "Q", "y"),
+    ("l1", "L1 (трансформация оружия)", "E, Mouse X2", "leftshoulder"),
+    ("r1", "R1 (атака)", "Mouse Left", "rightshoulder"),
+    ("l2", "L2 (выстрел)", "Mouse Right", "lefttrigger"),
+    ("r2", "R2 (сильная атака)", "Left Shift+Mouse Left, Mouse X1", "righttrigger"),
+    ("l3", "L3", "Left Ctrl", "leftstick"),
+    ("r3", "R3 (захват цели)", "C, Mouse Middle", "rightstick"),
+    ("options", "Options (меню)", "Escape", "start"),
+    ("touchpad", "Тачпад, левая половина (жесты)", "G", "back, touchpad"),
     ("touchpad_right", "Тачпад, правая половина (личные вещи)", "Backspace", ""),
-    ("up", "Крестовина вверх", "I, Wheel Up", "dpup"),
-    ("down", "Крестовина вниз", "K, Wheel Down", "dpdown"),
-    ("left", "Крестовина влево", "J", "dpleft"),
-    ("right", "Крестовина вправо", "L", "dpright"),
+    ("up", "Крестовина вверх", "3, Up, Wheel Up", "dpup"),
+    ("down", "Крестовина вниз", "4, Down, Wheel Down", "dpdown"),
+    ("left", "Крестовина влево (оружие левой руки)", "1, Left", "dpleft"),
+    ("right", "Крестовина вправо (оружие правой руки)", "2, Right", "dpright"),
     ("move_up", "Движение вперёд", "W", None),
     ("move_down", "Движение назад", "S", None),
     ("move_left", "Движение влево", "A", None),
     ("move_right", "Движение вправо", "D", None),
-    ("look_up", "Камера вверх", "Up", None),
-    ("look_down", "Камера вниз", "Down", None),
-    ("look_left", "Камера влево", "Left", None),
-    ("look_right", "Камера вправо", "Right", None),
+    ("look_up", "Камера вверх", "I", None),
+    ("look_down", "Камера вниз", "K", None),
+    ("look_left", "Камера влево", "J", None),
+    ("look_right", "Камера вправо", "L", None),
 ]
 
 
@@ -440,8 +497,9 @@ def connected_gamepads():
 
 
 def connected_displays():
-    """(BB_DISPLAY value, label) of the monitors (bb-gpu-capabilities --displays), [] if unknown.
-    The value is the monitor's name, or its number when two monitors share a name."""
+    """(BB_DISPLAY value, label, (w, h) or None, primary) of the monitors (bb-gpu-capabilities
+    --displays), [] if unknown. The value is the monitor's name, or its number when two monitors
+    share a name."""
     tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
     try:
         run = subprocess.run([str(tool), "--displays"], capture_output=True, text=True, timeout=5)
@@ -450,7 +508,8 @@ def connected_displays():
     rows = [line.split("\t") for line in run.stdout.splitlines() if line.count("\t") == 2]
     names = [name for name, _, _ in rows]
     return [(name if names.count(name) == 1 else str(number),
-             f"{number}: {name} ({size})" + (tr(", основной") if primary == "1" else ""))
+             f"{number}: {name} ({size})" + (tr(", основной") if primary == "1" else ""),
+             parse_size(size, None), primary == "1")
             for number, (name, size, primary) in enumerate(rows, 1)]
 
 
@@ -564,7 +623,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         game.add(self.language_row)
         page.add(game)
 
-        # Auto: the new memory model on AMD, the 0.3 one elsewhere; or either by hand.
+        # Auto: the new memory model on every GPU; or either by hand.
         mode = Adw.PreferencesGroup(title=tr("Режим работы"))
         self.memory_model_row = combo_row(tr("Модель памяти и трансляции"), tr(PC_MODEL_SUBTITLE),
                                           MEMORY_MODELS, self.settings.get("memory_model", "auto"))
@@ -608,9 +667,14 @@ class LauncherWindow(Adw.ApplicationWindow):
         page.add(self.patches_group)
 
         screen = Adw.PreferencesGroup(title=tr("Экран"))
-        self.output_row = combo_row(tr("Разрешение вывода"),
-                                    tr("Апскейлер дорисовывает кадр; Steam Deck — 720p"),
-                                    OUTPUT_RES, self.ini.get("output_res", "1920x1080"))
+        # The aspect ratio, then its resolutions (rebuilt when it changes, the height kept).
+        self.aspect_row = Adw.ComboRow(title=tr("Соотношение сторон"), subtitle=tr(
+            "Шире 16:9 — больше обзор по бокам, выше — сверху и снизу; интерфейс у краёв экрана"))
+        self.aspect_row.values = ASPECTS
+        self.output_row = Adw.ComboRow(title=tr("Разрешение вывода"),
+                                       subtitle=tr("Апскейлер дорисовывает кадр; Steam Deck — 1280×800 (16:10)"))
+        self.output_row.values = []
+        screen.add(self.aspect_row)
         screen.add(self.output_row)
         self.live_row = combo_row(tr("Смена разрешения на лету"),
                                   tr("Без перезапуска, но медленнее на Steam Deck и старых GPU"),
@@ -625,6 +689,12 @@ class LauncherWindow(Adw.ApplicationWindow):
                                                 lambda _button: self.fill_displays()))
         self.fill_displays()
         screen.add(self.display_row)
+        aspect = self.ini.get("aspect_ratio", "auto")
+        self.fill_aspects(aspect if aspect in ASPECTS else "auto")
+        self.fill_outputs(parse_size(self.ini.get("output_res", "1920x1080")))
+        self.aspect_row.connect("notify::selected",
+                                lambda *_: self.fill_outputs(parse_size(combo_value(self.output_row))))
+        self.display_row.connect("notify::selected", lambda *_: self.on_display_changed())
         self.present_row = combo_row(tr("Режим показа кадров"), None, PRESENT_MODES,
                                      self.settings["present_mode"])
         screen.add(self.present_row)
@@ -660,7 +730,8 @@ class LauncherWindow(Adw.ApplicationWindow):
                 self.control_rows[(kind, name)] = (row, default)
                 self.show_control(kind, name)
             controls.add(expander)
-        # Mouse look (runtime_pad.c): a click in the game takes the mouse, F1 lets it go.
+        # Mouse look (runtime_pad.c): a click in the game takes the mouse, F1 lets it go; the mouse
+        # turns the game camera itself (gpu/shim/bbport_guest_hooks.cpp, BB_NATIVE_MOUSE).
         self.mouse_look_row = Adw.SwitchRow(
             title=tr("Камера мышью"),
             subtitle=tr("Щелчок в окне игры захватывает мышь, F1 — отпускает"),
@@ -995,11 +1066,41 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.gamepad_row.set_selected(self.gamepad_row.values.index(current) if current in self.gamepad_row.values else 0)
         self.show_gamepad()
 
+    def monitor_size(self):
+        """The size of the monitor chosen for the game (Auto's aspect ratio), None if unknown."""
+        value = combo_value(self.display_row) if self.display_row.values else ""
+        sizes = getattr(self, "display_sizes", {})
+        return sizes.get(value) or sizes.get("")
+
+    def fill_aspects(self, current):
+        labels = [tr("Авто") + f" ({resolved_aspect('auto', self.monitor_size())})"] + ASPECTS[1:]
+        self.aspect_row.set_model(Gtk.StringList.new(labels))
+        self.aspect_row.set_selected(ASPECTS.index(current))
+
+    def fill_outputs(self, keep):
+        """The chosen aspect ratio's resolutions; the one of `keep`'s height selected."""
+        sizes = output_sizes(combo_value(self.aspect_row), self.monitor_size())
+        chosen = nearest_output(sizes, keep)
+        self.output_row.values = [f"{w}x{h}" for w, h in sizes]
+        self.output_row.set_model(Gtk.StringList.new(
+            [f"{w}×{h}" + (" (Steam Deck)" if (w, h) == (1280, 800) else "") for w, h in sizes]))
+        self.output_row.set_selected(sizes.index(chosen))
+
+    def on_display_changed(self):
+        aspect, output = combo_value(self.aspect_row), parse_size(combo_value(self.output_row))
+        self.fill_aspects(aspect)
+        self.fill_outputs(output)
+
     def fill_displays(self):
         """The monitor choices: the primary one, the connected ones, and the saved choice while it
         is not connected."""
         current = self.settings.get("display", "")
-        choices = [(tr("Основной"), "")] + [(label, value) for value, label in connected_displays()]
+        displays = connected_displays()
+        self.display_sizes = {value: size for value, _label, size, _primary in displays}
+        primary = [size for _value, _label, size, is_primary in displays if is_primary]
+        if primary:
+            self.display_sizes[""] = primary[0]
+        choices = [(tr("Основной"), "")] + [(label, value) for value, label, _size, _primary in displays]
         if current and current not in [value for _, value in choices]:
             choices.append((tr("{} (не подключён)").format(current), current))
         self.display_row.set_model(Gtk.StringList.new([label for label, _ in choices]))
@@ -1038,6 +1139,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["extra_env"] = self.extra_row.get_text().strip()
         s["mods_enabled"] = self.mods_enabled_row.get_active()
         s["online"] = self.online_row.get_active()
+        s["online_bbsc"] = self.bbsc_row.get_active()
         s["online_community"] = self.community_row.get_text().strip()
         s["online_server"] = self.server_row.get_text().strip()
         s["online_webapi"] = self.webapi_row.get_text().strip()
@@ -1054,6 +1156,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             "sharpness": f"{self.sharpness_row.get_value():.2f}",
             "object_motion": "1" if self.motion_row.get_active() else "0",
             "show_fps": "1" if self.show_fps_row.get_active() else "0",
+            "aspect_ratio": combo_value(self.aspect_row),
             "output_res": combo_value(self.output_row),
             "model_lod": combo_value(self.lod_row),
             "live_resolution": combo_value(self.live_row),
@@ -1185,9 +1288,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         s = self.settings
         page = Adw.PreferencesPage()
         play = Adw.PreferencesGroup(description=tr(
-            "Сообщения, пятна крови и призраки приходят с The Hunter's Dream; колокола и призывы "
-            "идут через сервер shadNet. Игра по сети совместима с версией для Windows: нужны версия "
-            "игры 1.09 и тот же сервер"))
+            "Сообщения, пятна крови и призраки приходят с игрового сервера; колокола и призывы "
+            "идут через сервер shadNet. По умолчанию оба — Seamless Hunt (сервер BBSC). Игра по сети "
+            "совместима с версией для Windows: нужны версия игры 1.09 и тот же сервер"))
         self.online_row = Adw.SwitchRow(title=tr("Играть онлайн"),
                                         subtitle=tr("Выключено: игра остаётся офлайн, как раньше"),
                                         active=s["online"])
@@ -1204,19 +1307,26 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         coop = Adw.PreferencesGroup(
             title=tr("Сервер кооператива (колокола и призывы)"),
-            description=tr("srv.shadps4.net:31313 — публичный сервер shadPS4. Для частного сервера "
+            description=tr("play.seamlesshunt.com:31313 — сервер Seamless Hunt (BBSC). Публичный "
+                           "сервер shadPS4 принимает только сборки shadPS4. Для частного сервера "
                            "укажите host:port от его владельца. WebAPI: оставьте пустым, тогда "
                            "берётся адрес сервера с портом 31315"))
         self.server_row = Adw.EntryRow(title=tr("Адрес сервера"), text=s["online_server"])
         self.webapi_row = Adw.EntryRow(title=tr("Адрес WebAPI"), text=s["online_webapi"])
         coop.add(self.server_row)
         coop.add(self.webapi_row)
+        self.bbsc_row = Adw.SwitchRow(
+            title=tr("Бесшовный кооператив (BBSC)"),
+            subtitle=tr("Сессия переживает смерти, лампы, смену локаций и боссов; до 5 охотников. "
+                        "Нужен сервер с игровым сервером BBSC, у всех игроков включено"),
+            active=s.get("online_bbsc", False))
+        coop.add(self.bbsc_row)
         page.add(coop)
 
         account = Adw.PreferencesGroup(
             title=tr("Учётная запись"),
             description=tr("Имя учётной записи shadNet, не email. Зарегистрируйтесь на "
-                           "shadnet.shadps4.net или спросите владельца частного сервера. Пароль "
+                           "seamlesshunt.com или спросите владельца частного сервера. Пароль "
                            "хранится на этом компьютере вместе с настройками лаунчера"))
         self.npid_row = Adw.EntryRow(title=tr("Online ID (NPID)"), text=s["online_npid"])
         self.password_row = Adw.PasswordEntryRow(title=tr("Пароль"), text=s["online_password"])
@@ -1695,6 +1805,9 @@ class LauncherApp(Adw.Application):
 def play():
     """--play: the game with the saved settings, no window (Steam Deck game mode)."""
     settings = load_settings()
+    # The launcher window does this in its constructor; without it the in-game menu's language
+    # was the module default (Russian) whatever was chosen (#134).
+    set_language(settings.get("ui_language", ""))
     if not (Path(settings["game_dir"]).expanduser() / "eboot.bin").is_file():
         print("bbport: choose the game folder in the launcher first", file=sys.stderr)
         return 1
