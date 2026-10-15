@@ -644,21 +644,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         last_camera_world = camera_world;
     }
     const bool use_cache = settings.cache_enabled && settings.stage >= 3;
-    const float cull = settings.ao_far > 0.0f ? settings.ao_far + settings.radius : 0.0f;
-    const auto device = instance.GetDevice();
-    // Copies into the static pool: world-space triangles from the triangle list (promotions) or the
-    // split staging buffer (pieces of big meshes).
-    struct PoolCopy {
-        bool from_staging;
-        vk::DeviceSize src, dst, bytes;
-    };
-    std::vector<GpuGeometry> dynamic_list, verify_list, promo_list;
-    std::vector<u64> dynamic_keys, verify_keys;
-    std::vector<PoolCopy> pool_copies;
     std::vector<vk::AccelerationStructureInstanceKHR> instances;
-    u32 promo_used = 0;
-    frame_triangles = 0;
-    per_frame_reasons = {};
     const auto make_instance = [&](vk::DeviceAddress address, bool world) {
         vk::AccelerationStructureInstanceKHR as_instance{
             .instanceCustomIndex = world ? 1u : 0u,
@@ -674,235 +660,16 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         }
         return as_instance;
     };
-    // Huge draws (terrain, building blocks): whole, their far triangles came back into the BVH
-    // (the far cut works per frame) and rays slowed down. They stay per frame, or (chunk > 0) are
-    // split into pieces, each in the static BLAS only within reach.
-    const auto too_big = [&](const CacheEntry& e) {
-        return e.have_stats && Rtao::TooBig(e.stats, settings.cache_max_size);
-    };
-    const bool chunking = settings.chunk_cell > 0.0f;
-    for (const Draw& d : draws) {
-        CacheEntry& e = cache[d.key];
-        e.base = d.base;
-        e.last_seen = frame;
-        if (!e.parts.empty() && (!use_cache || (e.chunked ? !chunking || !too_big(e) : too_big(e)))) {
-            Evict(e); // the settings changed: cached the other way, or not at all
-        }
-    }
-    UpdateSplit();
-    // The static BLAS: every pooled draw seen lately, its parts within reach of the camera (the far
-    // cut plus a margin), in one tree. Rebuilt when the camera left the margin, a draw in it was
-    // evicted, or (at most every `rebuild` frames) the set changed.
-    {
-        const float reach = cull > 0.0f ? cull + settings.static_margin : 0.0f;
-        bool set_changed = false;
-        for (const auto& [key, e] : cache) {
-            const bool candidate = !e.parts.empty() && frame >= e.ready_from &&
-                                   frame - e.last_seen <= StaticSeenFrames && !e.static_skip;
-            if (candidate != e.in_static) {
-                set_changed = true;
-                break;
-            }
-        }
-        const float dx = camera_world[0] - static_anchor[0], dy = camera_world[1] - static_anchor[1],
-                    dz = camera_world[2] - static_anchor[2];
-        const bool moved = cull > 0.0f && dx * dx + dy * dy + dz * dz > settings.static_margin * settings.static_margin;
-        const bool due = frame - static_frame >= settings.static_interval;
-        const bool always = settings.static_interval == 0; // measurement: the rebuild's cost
-        if (use_cache && (always || static_dirty || (static_valid && moved) || (set_changed && (due || !static_valid)))) {
-            RebuildStatic(reach);
-        } else if (!use_cache && static_valid) {
-            static_valid = false;
-            for (auto& [key, e] : cache) {
-                e.in_static = false;
-            }
-        }
-    }
-    // A mesh leaves the per-frame BVH only when every copy drawn this frame is in the static BLAS:
-    // which draw is which copy changes with the draw order, but the set covers them all.
-    std::unordered_map<u64, bool> mesh_cached;
-    for (const Draw& d : draws) {
-        const CacheEntry& e = cache[d.key];
-        auto [it, inserted] = mesh_cached.try_emplace(d.base, true);
-        it->second = it->second && use_cache && e.in_static;
-    }
-    // Probing costs a pass over the draw's indices: cached draws are rechecked every 8th pass,
-    // draws waiting for a build slot every 4th; characters and draws that kept changing never.
-    const auto probe_now = [&](const Draw& d, const CacheEntry& e) {
-        if (d.skinned || e.evictions >= 3) {
-            return false;
-        }
-        const u32 phase = u32(d.key >> 7) + probe_id;
-        if (!e.parts.empty()) {
-            return phase % 8 == 0;
-        }
-        if (too_big(e) && !chunking) {
-            return phase % 64 == 0; // it will stay per frame; an occasional look is enough
-        }
-        if (e.stable >= settings.promote_after) {
-            return phase % 4 == 0;
-        }
-        return true;
-    };
-    // Room in the pool: least recently seen draws (not seen this frame) go first.
-    const auto pool_alloc = [&](u32 triangles) -> std::optional<u32> {
-        if (auto offset = pool.Alloc(triangles)) {
-            return offset;
-        }
-        std::vector<std::pair<u32, u64>> order; // last seen, key
-        for (const auto& [key, e] : cache) {
-            if (!e.parts.empty() && e.last_seen != frame) {
-                order.emplace_back(e.last_seen, key);
-            }
-        }
-        std::sort(order.begin(), order.end());
-        for (const auto& [seen, key] : order) {
-            Evict(cache[key]);
-            ++pool_evictions;
-            if (auto offset = pool.Alloc(triangles)) {
-                return offset;
-            }
-        }
-        return std::nullopt;
-    };
-    // Big meshes are collected for a split only while no batch is in flight.
-    const bool collect_split = chunking && use_cache && split_state == SplitState::Idle;
-    if (collect_split) {
-        split_meshes.clear();
-    }
-    for (const Draw& d : draws) {
-        CacheEntry& e = cache[d.key];
-        GpuGeometry gpu = d.gpu;
-        const u32 probe_flag = probe_now(d, e) ? GeoProbe : 0u;
-        if (mesh_cached[d.base]) {
-            if (probe_flag) { // still checked: a door that starts moving leaves the cache
-                gpu.triangles = 0;
-                gpu.flags = probe_flag;
-                verify_list.push_back(gpu);
-                verify_keys.push_back(d.key);
-            }
-            continue;
-        }
-        if (frame_triangles + gpu.triangles > max_triangles) {
-            ++dropped_draws;
-            dropped_triangles += gpu.triangles;
-            if (probe_flag) { // measured all the same: once cached it no longer needs budget
-                gpu.triangles = 0;
-                gpu.flags = probe_flag;
-                verify_list.push_back(gpu);
-                verify_keys.push_back(d.key);
-            }
-            continue;
-        }
-        {
-            const int reason = !use_cache ? 5 : d.skinned ? 0 : too_big(e) && !chunking ? 1 : e.evictions >= 3 ? 2
-                               : e.parts.empty() ? 3 : 4;
-            per_frame_reasons[reason] += gpu.triangles;
-        }
-        gpu.triangle_offset = frame_triangles;
-        gpu.out_base = frame_triangles;
-        gpu.flags = probe_flag;
-        frame_triangles += gpu.triangles;
-        dynamic_list.push_back(gpu);
-        dynamic_keys.push_back(d.key);
-        const bool big = too_big(e);
-        if (!use_cache || e.split_pending || !e.parts.empty() ||
-            !Rtao::Promotable(e, d.skinned, big && !chunking, settings.promote_after) ||
-            gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles) {
-            continue;
-        }
-        { // the same copy cached under another slot (before a reorder): not twice
-            bool duplicate = false;
-            const auto copies = max_copies.find(d.base);
-            for (u32 o = 0; copies != max_copies.end() && o < copies->second && !duplicate; ++o) {
-                const auto other = cache.find(Rtao::KeyOf(d.base, o));
-                duplicate = other != cache.end() && &other->second != &e && !other->second.parts.empty() &&
-                            Rtao::StatsMatch(other->second.stats, e.stats, camera_world);
-            }
-            if (duplicate) {
-                continue;
-            }
-        }
-        const u32 out_base = max_triangles + promo_used;
-        if (big) {
-            // A big mesh: its world-space triangles go to the host for the split (one batch at a time).
-            if (!collect_split) {
-                continue;
-            }
-            split_meshes.push_back({.key = d.key, .stats = e.stats, .offset = promo_used, .triangles = gpu.triangles});
-            e.split_pending = true;
-        } else {
-            // Promotion: a world-space copy of the triangles into the pool, for the static BLAS.
-            const auto offset = pool_alloc(gpu.triangles);
-            if (!offset) {
-                continue;
-            }
-            CachePart& part = e.parts.emplace_back();
-            part.pool_offset = *offset;
-            part.triangles = gpu.triangles;
-            for (int i = 0; i < 3; ++i) {
-                part.box.min[i] = e.stats.min[i];
-                part.box.max[i] = e.stats.max[i];
-            }
-            e.triangles = gpu.triangles;
-            e.cached = true;
-            e.ready_from = frame + 1; // copied in this pass, in the static BLAS from a later one
-            ++promotions;
-            pool_copies.push_back({false, vk::DeviceSize(out_base) * 36, vk::DeviceSize(*offset) * 36,
-                                   vk::DeviceSize(gpu.triangles) * 36});
-        }
-        GpuGeometry world = gpu;
-        world.out_base = out_base;
-        world.flags = GeoWorld;
-        promo_list.push_back(world);
-        promo_used += gpu.triangles;
-    }
-    const bool split_fetch_now = collect_split && !split_meshes.empty();
-    if (split_fetch_now) {
-        split_state = SplitState::Fetching;
-    }
-    // Pieces of split big meshes: copied from the staging buffer into the pool.
-    if (split_state == SplitState::Building) {
-        for (auto& mesh : split_meshes) {
-            if (mesh.done) {
-                continue;
-            }
-            mesh.done = true;
-            const auto it = cache.find(mesh.key);
-            CacheEntry* e = it != cache.end() ? &it->second : nullptr;
-            u32 active = 0;
-            for (const auto& g : mesh.groups) {
-                active += g.triangles;
-            }
-            const auto offset = e && e->parts.empty() && chunking && use_cache && e->have_stats &&
-                                        Rtao::StatsMatch(mesh.stats, e->stats, camera_world) && active
-                                    ? pool_alloc(active)
-                                    : std::nullopt;
-            if (e) {
-                e->split_pending = false;
-            }
-            if (!offset) {
-                ++split_skipped; // changed or gone since it was read, or no room
-                continue;
-            }
-            for (const auto& g : mesh.groups) {
-                CachePart& part = e->parts.emplace_back();
-                part.pool_offset = *offset + g.first_triangle;
-                part.triangles = g.triangles;
-                part.box = g.box;
-            }
-            e->triangles = active;
-            e->chunked = true;
-            e->cached = true;
-            e->ready_from = frame + 1;
-            ++promotions;
-            ++chunked_meshes_built;
-            chunk_groups_built += u32(mesh.groups.size());
-            pool_copies.push_back({true, vk::DeviceSize(mesh.staging_offset) * 36, vk::DeviceSize(*offset) * 36,
-                                   vk::DeviceSize(active) * 36});
-            split_tick = scheduler.CurrentTick(); // the staging buffer is read until this pass is done
-        }
-    }
+    FrameDraws classified;
+    ClassifyDraws(classified, use_cache, probe_id);
+    auto& dynamic_list = classified.dynamic_list;
+    auto& verify_list = classified.verify_list;
+    auto& promo_list = classified.promo_list;
+    auto& dynamic_keys = classified.dynamic_keys;
+    auto& verify_keys = classified.verify_keys;
+    auto& pool_copies = classified.pool_copies;
+    const u32 promo_used = classified.promo_used;
+    const bool split_fetch_now = classified.split_fetch_now;
     // The table: per-frame entries, then the world-space copies (expanded after them), then the
     // entries that are only measured (no triangles; their offset lies past the expand range).
     geometries.clear();
@@ -1118,423 +885,68 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const BlurConstants blur_v{.half_size = blur_h.half_size, .dir = {0, 1}, .sigma = settings.sigma, .use_n = blur_h.use_n};
     const vk::ImageView motion = *motion_view;
 
-    // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
-    const u32 last_stage = settings.stage;
-    const bool fast_trace = settings.build_fast_trace;
-    const vk::BuildAccelerationStructureFlagsKHR extra_flags =
-        data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess
-                    : vk::BuildAccelerationStructureFlagsKHR{};
-    const auto memory_barrier = [](vk::CommandBuffer cmdbuf, vk::PipelineStageFlags2 src_stage,
-                                   vk::AccessFlags2 src, vk::PipelineStageFlags2 dst_stage,
-                                   vk::AccessFlags2 dst) {
-        const vk::MemoryBarrier2 b{.srcStageMask = src_stage,
-                                   .srcAccessMask = src,
-                                   .dstStageMask = dst_stage,
-                                   .dstAccessMask = dst};
-        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
-    };
-    const auto info = [](vk::ImageView view) {
-        return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
-    };
-    // BB_GPU_PROFILE=1: one segment per stage.
-    const auto profile = [](u64 key, const char* name) {
-        if (auto* profiler = GpuProfiler::Get()) {
-            profiler->Mark(key, [name] { return std::string{name}; });
-        }
-    };
-
-    // 1. Expand: the vertex shaders wrote the positions (vertex stage), the table was written by
-    // the host, the index buffers by uploads: wait for all of it.
-    if (last_stage < 1) {
-        return;
-    }
-    profile(0x47A01ull, "rtao expand");
-    scheduler.RecordCrumb(
-        {.name = "rtao expand"},
-        [=, expand_pipeline = *expand_pipeline, expand_layout = *expand_layout,
-         probe_pipeline = *probe_pipeline, probe_layout = *probe_layout](vk::CommandBuffer cmdbuf) {
-            // The inputs: captured positions (vertex shaders), index buffers (uploads, or game
-            // compute), the table and constants (host). Not ALL_COMMANDS: no render-target writes.
-            memory_barrier(cmdbuf,
-                           vk::PipelineStageFlagBits2::eVertexShader | Compute |
-                               vk::PipelineStageFlagBits2::eTransfer | vk::PipelineStageFlagBits2::eHost,
-                           vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
-                               vk::AccessFlagBits2::eHostWrite,
-                           Compute, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
-            if (dispatch_triangles) {
-                const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
-                const vk::DescriptorBufferInfo tri_info{triangles_handle, 0, triangles_bytes};
-                const std::array writes = {
-                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageBuffer,
-                                           .pBufferInfo = &table_info},
-                    vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageBuffer,
-                                           .pBufferInfo = &tri_info}};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, expand_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, expand_layout, 0, writes);
-                cmdbuf.pushConstants(expand_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(expand),
-                                     &expand);
-                cmdbuf.dispatch((dispatch_triangles + 63) / 64, 1, 1);
-            }
-
-            memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
-                           AsBuild | vk::PipelineStageFlagBits2::eTransfer,
-                           vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead);
-            if (do_readback) {
-                const vk::BufferCopy region{0, 0, vk::DeviceSize(std::min(ReadbackTriangles, total_triangles)) * 9 * sizeof(float)};
-                cmdbuf.copyBuffer(triangles_handle, readback_handle, region);
-            }
-            if (!pool_copies.empty()) {
-                // Into the static pool: after the static builds recorded before (they read it).
-                memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eNone, vk::PipelineStageFlagBits2::eTransfer,
-                               vk::AccessFlagBits2::eTransferWrite);
-                for (const auto& copy : pool_copies) {
-                    const vk::BufferCopy region{copy.src, copy.dst, copy.bytes};
-                    cmdbuf.copyBuffer(copy.from_staging ? split_staging_handle : triangles_handle, pool_handle, region);
-                }
-                memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
-                               AsBuild, vk::AccessFlagBits2::eShaderRead);
-            }
-            if (split_fetch_now) { // the world-space copies of this frame, big meshes among them
-                const vk::BufferCopy region{split_fetch_src, 0, split_fetch_bytes};
-                cmdbuf.copyBuffer(triangles_handle, split_fetch_handle, region);
-                memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
-                               vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
-            }
-        });
-
-    // 1b. The static cache's measurements (its own crumb and profiler segment).
-    if (num_geometries && num_chunks) {
-        profile(0x47A08ull, "rtao probe");
-        scheduler.RecordCrumb(
-            {.name = "rtao probe"},
-            [=, probe_pipeline = *probe_pipeline, probe_layout = *probe_layout](vk::CommandBuffer cmdbuf) {
-                const vk::DescriptorBufferInfo table_info{table_handle, table_offset, table_bytes};
-                const vk::DescriptorBufferInfo probe_info{probe_handle, probe_offset, probe_bytes};
-                const vk::DescriptorBufferInfo chunks_info{chunks_handle, chunks_offset,
-                                                           vk::DeviceSize(MaxProbeChunks) * 8};
-                const vk::DescriptorBufferInfo partials_info{partials_handle, 0, vk::DeviceSize(MaxProbeChunks) * 48};
-                const vk::DescriptorBufferInfo ranges_info{ranges_handle, ranges_offset,
-                                                           vk::DeviceSize(max_geometries) * 8};
-                const auto storage = [](u32 binding_index, const vk::DescriptorBufferInfo* buffer_info) {
-                    return vk::WriteDescriptorSet{.dstBinding = binding_index, .descriptorCount = 1,
-                                                  .descriptorType = vk::DescriptorType::eStorageBuffer,
-                                                  .pBufferInfo = buffer_info};
-                };
-                const std::array writes = {storage(0, &table_info), storage(1, &probe_info),
-                                           storage(2, &chunks_info), storage(3, &partials_info),
-                                           storage(4, &ranges_info)};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, probe_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, probe_layout, 0, writes);
-                cmdbuf.pushConstants(probe_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(probe), &probe);
-                cmdbuf.dispatch(num_chunks, 1, 1); // pass 1: chunks
-                memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite, Compute,
-                               vk::AccessFlagBits2::eShaderRead);
-                cmdbuf.pushConstants(probe_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(probe_combine),
-                                     &probe_combine);
-                cmdbuf.dispatch(num_geometries, 1, 1); // pass 2: per draw
-                memory_barrier(cmdbuf, Compute, vk::AccessFlagBits2::eShaderWrite,
-                               vk::PipelineStageFlagBits2::eHost, vk::AccessFlagBits2::eHostRead);
-            });
-    }
-
-    // 2. BLAS over the triangle list.
-    if (last_stage < 2) {
-        return;
-    }
-    // The static BLAS, when it was rebuilt in this pass (its own profiler segment: a rebuild is a
-    // one-frame cost).
-    if (!static_parts.empty()) {
-        profile(0x47A09ull, "rtao static");
-        scheduler.RecordCrumb({.name = "rtao static"}, [=, static_blas = static_blas,
-                                                        static_flags = StaticFlags(settings.static_build),
-                                                        static_parts = std::move(static_parts)](vk::CommandBuffer cmdbuf) {
-        {
-            // The last pass's trace still reads the old tree.
-            memory_barrier(cmdbuf, TraceStages, vk::AccessFlagBits2::eNone, AsBuild,
-                           vk::AccessFlagBits2::eAccelerationStructureWriteKHR);
-            std::vector<vk::AccelerationStructureGeometryKHR> geos(static_parts.size());
-            std::vector<vk::AccelerationStructureBuildRangeInfoKHR> ranges(static_parts.size());
-            for (size_t i = 0; i < static_parts.size(); ++i) {
-                const auto [offset, count] = static_parts[i];
-                geos[i] = vk::AccelerationStructureGeometryKHR{
-                    .geometryType = vk::GeometryTypeKHR::eTriangles,
-                    .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                                     .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                                     .vertexData = {.deviceAddress = pool_address + vk::DeviceSize(offset) * 36},
-                                     .vertexStride = 3 * sizeof(float),
-                                     .maxVertex = count * 3 - 1,
-                                     .indexType = vk::IndexType::eNoneKHR,
-                                 }},
-                    .flags = vk::GeometryFlagBitsKHR::eOpaque,
-                };
-                ranges[i] = vk::AccelerationStructureBuildRangeInfoKHR{.primitiveCount = count};
-            }
-            const vk::AccelerationStructureBuildGeometryInfoKHR info{
-                .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-                .flags = static_flags,
-                .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-                .dstAccelerationStructure = static_blas,
-                .geometryCount = u32(geos.size()),
-                .pGeometries = geos.data(),
-                .scratchData = {.deviceAddress = blas_scratch_address},
-            };
-            const vk::AccelerationStructureBuildRangeInfoKHR* range_ptr = ranges.data();
-            cmdbuf.buildAccelerationStructuresKHR(1, &info, &range_ptr);
-            // The scratch is the per-frame build's next.
-            memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
-                           vk::AccessFlagBits2::eAccelerationStructureReadKHR |
-                               vk::AccessFlagBits2::eAccelerationStructureWriteKHR);
-        }
-        });
-    }
-    profile(0x47A02ull, "rtao blas");
-    scheduler.RecordCrumb({.name = "rtao blas"}, [=, blas = blas](vk::CommandBuffer cmdbuf) {
-        if (!total_triangles) {
-            memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
-                           vk::AccessFlagBits2::eAccelerationStructureReadKHR);
-            return;
-        }
-        vk::AccelerationStructureGeometryKHR blas_geometry{
-            .geometryType = vk::GeometryTypeKHR::eTriangles,
-            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                             .vertexData = {.deviceAddress = triangles_address},
-                             .vertexStride = 3 * sizeof(float),
-                             .maxVertex = std::max<u32>(total_triangles * 3, 1) - 1,
-                             .indexType = vk::IndexType::eNoneKHR,
-                         }},
-            .flags = vk::GeometryFlagBitsKHR::eOpaque,
-        };
-        const vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
-            .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
-            .flags = (fast_trace ? vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace
-                                 : vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild) |
-                     extra_flags,
-            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-            .dstAccelerationStructure = blas,
-            .geometryCount = 1,
-            .pGeometries = &blas_geometry,
-            .scratchData = {.deviceAddress = blas_scratch_address},
-        };
-        const vk::AccelerationStructureBuildRangeInfoKHR blas_range{.primitiveCount = total_triangles};
-        cmdbuf.buildAccelerationStructuresKHR(blas_info, &blas_range);
-        memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
-                       vk::AccessFlagBits2::eAccelerationStructureReadKHR);
-    });
-
-    // 3. TLAS: the one instance.
-    if (last_stage < 3) {
-        return;
-    }
-    profile(0x47A03ull, "rtao tlas");
-    scheduler.RecordCrumb({.name = "rtao tlas"}, [=, tlas = tlas](vk::CommandBuffer cmdbuf) {
-        vk::AccelerationStructureGeometryKHR tlas_geometry{
-            .geometryType = vk::GeometryTypeKHR::eInstances,
-            .geometry = {.instances = vk::AccelerationStructureGeometryInstancesDataKHR{
-                             .arrayOfPointers = false,
-                             .data = {.deviceAddress = instances_address},
-                         }},
-        };
-        const vk::AccelerationStructureBuildGeometryInfoKHR tlas_info{
-            .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-            .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
-            .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-            .dstAccelerationStructure = tlas,
-            .geometryCount = 1,
-            .pGeometries = &tlas_geometry,
-            .scratchData = {.deviceAddress = tlas_scratch_address},
-        };
-        const vk::AccelerationStructureBuildRangeInfoKHR tlas_range{.primitiveCount = num_instances};
-        cmdbuf.buildAccelerationStructuresKHR(tlas_info, &tlas_range);
-        memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, TraceStages,
-                       vk::AccessFlagBits2::eAccelerationStructureReadKHR);
-    });
-
-    // 4. Trace at half resolution.
-    if (last_stage < 4) {
-        return;
-    }
-    profile(0x47A04ull, "rtao trace");
-    scheduler.RecordCrumb(
-        {.name = "rtao trace"},
-        [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
-         rt = settings.use_rt_pipeline && rt_trace_pipeline ? *rt_trace_pipeline : vk::Pipeline{},
-         sbt_rgen = sbt_rgen, sbt_miss = sbt_miss, sbt_hit = sbt_hit, noise = *noise_view,
-         ao_image = vk::Image(v2 ? raw_image : ao_images[write])](vk::CommandBuffer cmdbuf) {
-            const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
-                       o = info(v2 ? raw_rw : ao_write);
-            const vk::WriteDescriptorSetAccelerationStructureKHR as_write{
-                .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
-            const vk::DescriptorBufferInfo constants_info{constants_handle, constants_offset, sizeof(trace)};
-            const auto bn = info(noise);
-            const std::array writes = {
-                vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
-                vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &n},
-                vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &m},
-                vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &p},
-                vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &o},
-                vk::WriteDescriptorSet{.pNext = &as_write, .dstBinding = 5, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
-                vk::WriteDescriptorSet{.dstBinding = 6, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eUniformBuffer,
-                                       .pBufferInfo = &constants_info},
-                vk::WriteDescriptorSet{.dstBinding = 7, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &bn}};
-            if (rt) {
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eRayTracingKHR, rt);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eRayTracingKHR, trace_layout, 0, writes);
-                cmdbuf.traceRaysKHR(sbt_rgen, sbt_miss, sbt_hit, vk::StridedDeviceAddressRegionKHR{},
-                                    (w + 1) / 2, (h + 1) / 2, 1);
-            } else {
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, trace_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, trace_layout, 0, writes);
-                cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 3) / 4, 1); // 8x4 groups
-            }
-            const vk::ImageMemoryBarrier2 ao_barrier{
-                .srcStageMask = TraceStages,
-                .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                .dstStageMask = Compute | vk::PipelineStageFlagBits2::eTransfer,
-                .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead,
-                .oldLayout = vk::ImageLayout::eGeneral,
-                .newLayout = vk::ImageLayout::eGeneral,
-                .image = ao_image,
-                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-            };
-            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ao_barrier});
-        });
-
-    // 4a. Denoiser 2: temporal accumulation into the history and the AO image.
-    if (v2) {
-        profile(0x47A07ull, "rtao temporal");
-        scheduler.RecordCrumb(
-            {.name = "rtao temporal"},
-            [=, temporal_pipeline = *temporal_pipeline, temporal_layout = *temporal_layout,
-             ao_image = vk::Image(ao_images[write]), hist_image = vk::Image(hist_images[write])](
-                vk::CommandBuffer cmdbuf) {
-                const auto r = info(raw_rw), hr = info(hist_read), m = info(motion), hw = info(hist_write),
-                           a = info(ao_write);
-                const std::array writes = {
-                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &r},
-                    vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &hr},
-                    vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &m},
-                    vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &hw},
-                    vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
-                                           .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &a}};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, temporal_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, temporal_layout, 0, writes);
-                cmdbuf.pushConstants(temporal_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(temporal),
-                                     &temporal);
-                cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
-                std::array<vk::ImageMemoryBarrier2, 2> barriers;
-                for (int i = 0; i < 2; ++i) {
-                    barriers[i] = vk::ImageMemoryBarrier2{
-                        .srcStageMask = Compute,
-                        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                        .dstStageMask = Compute | vk::PipelineStageFlagBits2::eTransfer,
-                        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead,
-                        .oldLayout = vk::ImageLayout::eGeneral,
-                        .newLayout = vk::ImageLayout::eGeneral,
-                        .image = i == 0 ? ao_image : hist_image,
-                        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-                    };
-                }
-                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 2, .pImageMemoryBarriers = barriers.data()});
-            });
-    }
-
-    ao_index = write;
-    history_valid = true;
-
-    // 4b. Separable depth-aware blur of the AO image (in place through blur_image).
-    if (settings.sigma > 0.0f && settings.debug < 2) { // the debug views stay unblurred
-        profile(0x47A06ull, "rtao blur");
-        scheduler.RecordCrumb(
-            {.name = "rtao blur"},
-            [=, blur_pipeline = *blur_pipeline, blur_layout = *blur_layout, ao_image = vk::Image(ao_images[write]),
-             blur_img = vk::Image(blur_image)](vk::CommandBuffer cmdbuf) {
-                const auto barrier = [&](vk::Image image) {
-                    const vk::ImageMemoryBarrier2 b{
-                        .srcStageMask = Compute,
-                        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
-                        .dstStageMask = Compute | vk::PipelineStageFlagBits2::eTransfer, // + dump copy
-                        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead,
-                        .oldLayout = vk::ImageLayout::eGeneral,
-                        .newLayout = vk::ImageLayout::eGeneral,
-                        .image = image,
-                        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-                    };
-                    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
-                };
-                const auto pass = [&](vk::ImageView src, vk::ImageView dst, const BlurConstants& constants) {
-                    // Denoiser 2: the history's frame count steers the width (else any image).
-                    const auto si = info(src), di = info(dst), ni = info(v2 ? hist_write : ao_read);
-                    const std::array writes = {
-                        vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                               .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &si},
-                        vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                               .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &di},
-                        vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
-                                               .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &ni}};
-                    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, blur_pipeline);
-                    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, blur_layout, 0, writes);
-                    cmdbuf.pushConstants(blur_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants),
-                                         &constants);
-                    cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
-                };
-                pass(ao_write, blur_rw, blur_h);
-                barrier(blur_img);
-                pass(blur_rw, ao_write, blur_v);
-                barrier(ao_image);
-            });
-    }
-
-    // The AO the apply gets, for dump= (DumpFrames consecutive frames).
-    if (do_dump) {
-        scheduler.Record([=, ao_image = vk::Image(ao_images[write])](vk::CommandBuffer cmdbuf) {
-            const vk::BufferImageCopy region{
-                .bufferOffset = dump_offset,
-                .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                .imageExtent = {(w + 1) / 2, (h + 1) / 2, 1},
-            };
-            cmdbuf.copyImageToBuffer(ao_image, vk::ImageLayout::eGeneral, dump_handle, region);
-        });
-        if (++dump_index == DumpFrames) {
-            dump_tick = scheduler.CurrentTick();
-        }
-    }
-
-    // 5. Into the game's mask.
-    if (last_stage < 5) {
-        return;
-    }
-    profile(0x47A05ull, "rtao apply");
-    scheduler.RecordCrumb(
-        {.name = "rtao apply"},
-        [=, apply_pipeline = *apply_pipeline, apply_layout = *apply_layout](vk::CommandBuffer cmdbuf) {
-            const auto a = info(ao_write), d = info(depth_view), mk = info(mask_view);
-            const std::array writes = {
-                vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &a},
-                vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
-                vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &mk}};
-            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, apply_pipeline);
-            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, apply_layout, 0, writes);
-            cmdbuf.pushConstants(apply_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(apply), &apply);
-            cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
-        });
+    PassInputs in;
+    in.ao_read = ao_read;
+    in.ao_write = ao_write;
+    in.blur_rw = blur_rw;
+    in.depth_view = depth_view;
+    in.hist_read = hist_read;
+    in.hist_write = hist_write;
+    in.normal_view = normal_view;
+    in.mask_view = mask_view;
+    in.motion = motion;
+    in.raw_rw = raw_rw;
+    in.w = w;
+    in.h = h;
+    in.write = write;
+    in.dispatch_triangles = dispatch_triangles;
+    in.num_chunks = num_chunks;
+    in.num_geometries = num_geometries;
+    in.num_instances = num_instances;
+    in.total_triangles = total_triangles;
+    in.do_dump = do_dump;
+    in.do_readback = do_readback;
+    in.split_fetch_now = split_fetch_now;
+    in.v2 = v2;
+    in.chunks_handle = chunks_handle;
+    in.ranges_handle = ranges_handle;
+    in.partials_handle = partials_handle;
+    in.constants_handle = constants_handle;
+    in.dump_handle = dump_handle;
+    in.probe_handle = probe_handle;
+    in.readback_handle = readback_handle;
+    in.split_fetch_handle = split_fetch_handle;
+    in.split_staging_handle = split_staging_handle;
+    in.pool_handle = pool_handle;
+    in.table_handle = table_handle;
+    in.triangles_handle = triangles_handle;
+    in.chunks_offset = chunks_offset;
+    in.ranges_offset = ranges_offset;
+    in.constants_offset = constants_offset;
+    in.dump_offset = dump_offset;
+    in.probe_bytes = probe_bytes;
+    in.probe_offset = probe_offset;
+    in.split_fetch_bytes = split_fetch_bytes;
+    in.split_fetch_src = split_fetch_src;
+    in.table_bytes = table_bytes;
+    in.table_offset = table_offset;
+    in.triangles_bytes = triangles_bytes;
+    in.blas_scratch_address = blas_scratch_address;
+    in.tlas_scratch_address = tlas_scratch_address;
+    in.instances_address = instances_address;
+    in.pool_address = pool_address;
+    in.triangles_address = triangles_address;
+    in.apply = apply;
+    in.blur_h = blur_h;
+    in.blur_v = blur_v;
+    in.expand = expand;
+    in.probe = probe;
+    in.probe_combine = probe_combine;
+    in.temporal = temporal;
+    in.trace = trace;
+    in.pool_copies = std::move(pool_copies);
+    in.static_parts = std::move(static_parts);
+    RecordPasses(in);
 }
 
 } // namespace Vulkan

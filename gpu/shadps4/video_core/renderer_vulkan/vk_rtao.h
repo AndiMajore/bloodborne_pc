@@ -30,6 +30,8 @@ namespace Vulkan {
 
 namespace RtaoInternal {
 class Worker;
+struct PassInputs;
+struct FrameDraws;
 }
 class Instance;
 class Scheduler;
@@ -168,6 +170,8 @@ private:
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect);
     void Record(VideoCore::ImageId mask);
+    void RecordPasses(const RtaoInternal::PassInputs& in); // vk_rtao_passes.cpp: the GPU work
+    void ClassifyDraws(RtaoInternal::FrameDraws& out, bool use_cache, u32 probe_id); // vk_rtao_cache.cpp
     void ReadProbes(u32 ring);
     void WriteDump();      // vk_rtao_diagnostics.cpp
     void ReportReadback(); // vk_rtao_diagnostics.cpp

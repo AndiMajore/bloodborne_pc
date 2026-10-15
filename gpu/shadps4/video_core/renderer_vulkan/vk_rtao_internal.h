@@ -14,7 +14,9 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include "common/types.h"
+#include "video_core/renderer_vulkan/rtao_geometry.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan::RtaoInternal {
@@ -127,6 +129,38 @@ private:
     std::deque<std::function<void()>> jobs;
     bool stop = false;
     std::thread thread;
+};
+/// A copy into the static pool: world-space triangles from the triangle list (promotions) or the
+/// split staging buffer (pieces of big meshes).
+struct PoolCopy {
+    bool from_staging;
+    vk::DeviceSize src, dst, bytes;
+};
+/// A frame's draws after the static cache's classification (RayTracedAO::ClassifyDraws).
+struct FrameDraws {
+    std::vector<Rtao::GpuGeometry> dynamic_list, verify_list, promo_list; // per frame, probed only, new pool entries
+    std::vector<u64> dynamic_keys, verify_keys;
+    std::vector<PoolCopy> pool_copies;
+    u32 promo_used = 0;           // triangles expanded for new pool entries
+    bool split_fetch_now = false; // a batch of big meshes goes to the host this pass
+};
+/// Everything Record() prepared that the pass's commands read (RayTracedAO::RecordPasses): views,
+/// buffers and offsets of this frame's ring slots, counts, and the stages' constants.
+struct PassInputs {
+    vk::ImageView ao_read, ao_write, blur_rw, depth_view, hist_read, hist_write, normal_view, mask_view, motion, raw_rw;
+    u32 w, h, write, dispatch_triangles, num_chunks, num_geometries, num_instances, total_triangles;
+    bool do_dump, do_readback, split_fetch_now, v2;
+    vk::Buffer chunks_handle, ranges_handle, partials_handle, constants_handle, dump_handle, probe_handle, readback_handle, split_fetch_handle, split_staging_handle, pool_handle, table_handle, triangles_handle;
+    vk::DeviceSize chunks_offset, ranges_offset, constants_offset, dump_offset, probe_bytes, probe_offset, split_fetch_bytes, split_fetch_src, table_bytes, table_offset, triangles_bytes;
+    vk::DeviceAddress blas_scratch_address, tlas_scratch_address, instances_address, pool_address, triangles_address;
+    ApplyConstants apply;
+    BlurConstants blur_h, blur_v;
+    ExpandConstants expand;
+    ProbeConstants probe, probe_combine;
+    TemporalConstants temporal;
+    TraceConstants trace;
+    std::vector<PoolCopy> pool_copies;
+    std::vector<std::array<u32, 2>> static_parts;
 };
 inline float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
