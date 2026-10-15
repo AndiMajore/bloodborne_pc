@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "bbport_settings.h"
 #include "video_core/renderer_vulkan/rtao_geometry.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -308,8 +309,10 @@ bool Instance::CreateDevice() {
     }
     depth_range_unrestricted = add_extension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     // bbport: ray queries and ray-tracing pipelines for the ray-traced AO (vk_rtao.cpp), only
-    // when it is asked for (BB_RTAO=1): otherwise the device is created as without it.
-    if (Rtao::Requested()) {
+    // when it is asked for (BB_RTAO=1) and can run (it needs object motion, which needs an
+    // upscaler: vk_object_motion.cpp): otherwise the device is created as without it.
+    if (Rtao::Requested() && BbSettings::Get().object_motion &&
+        BbSettings::Get().upscaler != BbSettings::UpscalerOff) {
         ray_query = add_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
                     add_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
                     add_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME);

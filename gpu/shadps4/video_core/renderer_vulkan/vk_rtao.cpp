@@ -47,12 +47,12 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     if (!Rtao::Requested()) {
         return;
     }
-    if (!instance.IsRayQuerySupported()) {
-        std::puts("RTAO: ray queries unsupported by the driver, off");
+    if (!object_motion.Enabled() || !camera_motion.Enabled()) {
+        std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
         return;
     }
-    if (!object_motion.Enabled() || !ObjectMotion::RtaoCapture() || !camera_motion.Enabled()) {
-        std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
+    if (!instance.IsRayQuerySupported() || !ObjectMotion::RtaoCapture()) {
+        std::puts("RTAO: ray queries unsupported by the driver, off");
         return;
     }
     settings.debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 4u);
