@@ -318,6 +318,10 @@ private:
     std::array<vk::UniqueImageView, 2> ao_views;
     VideoCore::UniqueImage motion_image;
     vk::UniqueImageView motion_view;
+    VideoCore::UniqueImage noise_image; // 64x64 RGBA8 blue noise (rtao_bluenoise.h), the ray samples
+    vk::UniqueImageView noise_view;
+    Buffer noise_staging;               // host: its texels, copied once
+    bool noise_uploaded = false;
     VideoCore::UniqueImage blur_image; // half res, the horizontal blur pass
     vk::UniqueImageView blur_view;
     VideoCore::UniqueImage raw_image;  // half res, denoiser 2: this frame's trace (ao, z)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_rtao.h"
+#include "video_core/renderer_vulkan/rtao_bluenoise.h"
 #include "video_core/renderer_vulkan/vk_rtao_internal.h"
 
 #include <algorithm>
@@ -126,7 +127,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
                                        trace_binding(2, DT::eSampledImage), trace_binding(3, DT::eSampledImage),
                                        trace_binding(4, DT::eStorageImage),
                                        trace_binding(5, DT::eAccelerationStructureKHR),
-                                       trace_binding(6, DT::eUniformBuffer)};
+                                       trace_binding(6, DT::eUniformBuffer), trace_binding(7, DT::eSampledImage)};
     const std::array apply_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eStorageImage)};
     make_layouts(expand_bindings, sizeof(ExpandConstants), expand_desc_layout, expand_layout);
@@ -231,7 +232,7 @@ RayTracedAO::~RayTracedAO() {
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
                          &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer,
-                         &static_pool, &static_blas_buffer, &constants_buffer, &sbt_buffer, &index_ring, &probe_chunks,
+                         &static_pool, &static_blas_buffer, &noise_staging, &constants_buffer, &sbt_buffer, &index_ring, &probe_chunks,
                          &probe_ranges, &probe_partials, &split_fetch, &split_staging}) {
         DestroyBuffer(*buffer);
     }
@@ -586,6 +587,26 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     image_barrier(vk::Image(ao_images[read]),
                   history_valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined, rw,
                   vk::AccessFlagBits2::eShaderRead);
+    if (!noise_uploaded) { // the blue-noise texture, once (rtao_bluenoise.h)
+        noise_uploaded = true;
+        scheduler.Record([image = vk::Image(noise_image), staging = noise_staging.buffer](vk::CommandBuffer cmdbuf) {
+            const auto to = [&](vk::ImageLayout from_layout, vk::ImageLayout layout, vk::PipelineStageFlags2 src,
+                                vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
+                const vk::ImageMemoryBarrier2 b{.srcStageMask = src, .srcAccessMask = src_access, .dstStageMask = dst,
+                                                .dstAccessMask = dst_access, .oldLayout = from_layout, .newLayout = layout,
+                                                .image = image,
+                                                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+            };
+            to(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eNone,
+               vk::AccessFlagBits2::eNone, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+            const vk::BufferImageCopy region{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                             .imageExtent = {Rtao::BlueNoiseSize, Rtao::BlueNoiseSize, 1}};
+            cmdbuf.copyBufferToImage(staging, image, vk::ImageLayout::eTransferDstOptimal, region);
+            to(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+               vk::AccessFlagBits2::eTransferWrite, TraceStages, vk::AccessFlagBits2::eShaderRead);
+        });
+    }
     camera_motion.RecordMotion(depth_view, *motion_view, w, h);
     image_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
                   vk::AccessFlagBits2::eShaderRead);
@@ -1055,6 +1076,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         .subpixel = v2 && settings.subpixel ? 1u : 0u,
         .falloff = settings.falloff,
         .period = settings.noise_period,
+        .noise = settings.blue_noise ? 1u : 0u,
     };
     const TemporalConstants temporal{
         .half_size = {float((w + 1) / 2), float((h + 1) / 2)},
@@ -1339,13 +1361,14 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         {.name = "rtao trace"},
         [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
          rt = settings.use_rt_pipeline && rt_trace_pipeline ? *rt_trace_pipeline : vk::Pipeline{},
-         sbt_rgen = sbt_rgen, sbt_miss = sbt_miss, sbt_hit = sbt_hit,
+         sbt_rgen = sbt_rgen, sbt_miss = sbt_miss, sbt_hit = sbt_hit, noise = *noise_view,
          ao_image = vk::Image(v2 ? raw_image : ao_images[write])](vk::CommandBuffer cmdbuf) {
             const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
                        o = info(v2 ? raw_rw : ao_write);
             const vk::WriteDescriptorSetAccelerationStructureKHR as_write{
                 .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
             const vk::DescriptorBufferInfo constants_info{constants_handle, constants_offset, sizeof(trace)};
+            const auto bn = info(noise);
             const std::array writes = {
                 vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
@@ -1361,7 +1384,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                                        .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
                 vk::WriteDescriptorSet{.dstBinding = 6, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eUniformBuffer,
-                                       .pBufferInfo = &constants_info}};
+                                       .pBufferInfo = &constants_info},
+                vk::WriteDescriptorSet{.dstBinding = 7, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &bn}};
             if (rt) {
                 cmdbuf.bindPipeline(vk::PipelineBindPoint::eRayTracingKHR, rt);
                 cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eRayTracingKHR, trace_layout, 0, writes);

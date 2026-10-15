@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: ray-traced AO, buffers, pipelines, acceleration structures and the static cache's bookkeeping (see vk_rtao.cpp).
 #include "video_core/renderer_vulkan/vk_rtao.h"
+#include "video_core/renderer_vulkan/rtao_bluenoise.h"
 #include "video_core/renderer_vulkan/vk_rtao_internal.h"
 #include "bbport_threads.h"
 #include "common/thread.h"
@@ -301,6 +302,31 @@ bool RayTracedAO::CreateAccelerationStructures() {
     }));
     static_blas_address = device.getAccelerationStructureAddressKHR({.accelerationStructure = static_blas});
     pool.Reset(pool_triangles);
+    // The rays' blue-noise samples (tools/rtao_bluenoise.py): copied in the first pass.
+    if (!CreateBuffer(noise_staging, Rtao::BlueNoise.size(), BU::eTransferSrc, true)) {
+        return false;
+    }
+    std::memcpy(noise_staging.mapped, Rtao::BlueNoise.data(), Rtao::BlueNoise.size());
+    noise_image = VideoCore::UniqueImage(device, instance.GetAllocator());
+    noise_image.Create(vk::ImageCreateInfo{
+        .imageType = vk::ImageType::e2D,
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .extent = {Rtao::BlueNoiseSize, Rtao::BlueNoiseSize, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    });
+    noise_view = Check(device.createImageViewUnique({
+        .image = vk::Image(noise_image),
+        .viewType = vk::ImageViewType::e2D,
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    }));
+    SetObjectName(device, vk::Image(noise_image), "rtao blue noise");
+    noise_uploaded = false;
     blas = Check(device.createAccelerationStructureKHR({
         .buffer = blas_buffer.buffer,
         .size = blas_sizes.accelerationStructureSize,

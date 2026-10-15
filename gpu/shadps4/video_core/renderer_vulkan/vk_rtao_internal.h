@@ -57,6 +57,7 @@ struct TraceConstants {
     u32 subpixel;
     u32 falloff;
     u32 period;
+    u32 noise; // 1: blue-noise texture, 0: interleaved gradient noise
 };
 struct TemporalConstants {
     std::array<float, 2> half_size;
@@ -79,7 +80,7 @@ struct ApplyConstants {
     u32 pad1;
 };
 static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
-static_assert(sizeof(TraceConstants) == 140 && offsetof(TraceConstants, falloff) == 132);
+static_assert(sizeof(TraceConstants) == 144 && offsetof(TraceConstants, falloff) == 132);
 struct BlurConstants {
     std::array<float, 2> half_size;
     std::array<s32, 2> dir;

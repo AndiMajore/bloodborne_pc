@@ -261,6 +261,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "clipk") s.clip_k = std::clamp(value, 0.1f, 10.0f);
     else if (key == "clipfloor") s.clip_floor = std::clamp(value, 0.0f, 1.0f);
     else if (key == "subpixel") flag(s.subpixel);
+    else if (key == "noise") flag(s.blue_noise);
     else if (key == "falloff") s.falloff = value != 0.0f ? 1u : 0u;
     else if (key == "period") s.noise_period = std::clamp(u32(std::max(value, 0.0f)), 1u, 1024u);
     else if (key == "cache") flag(s.cache_enabled);

@@ -33,8 +33,10 @@ layout(binding = 6, std140) uniform Constants {
     uint subpixel;    // 1: the sampled full-res pixel cycles through the 2x2 block per frame
     uint falloff;     // 0: a hit counts 1 - 0.5 t/r; 1: binary hits within a random length in
                       // [0, r] (linear falloff to 0 at the radius, expected value)
-    uint period;      // frames before the per-pixel noise repeats
+    uint period;      // frames before the per-pixel noise repeats (IGN)
+    uint noise;       // 1: the blue-noise texture, shifted per frame by the golden ratio
 };
+layout(binding = 7) uniform texture2D blue_noise; // 64x64, four independent channels
 
 const float PI = 3.14159265;
 
@@ -177,9 +179,18 @@ void TracePixel(ivec2 hp) {
     const float t_min = mode == 4u ? 0.1 : 0.0;
     // Noise per pixel, shifted per frame (64 frames for denoiser 2, whose history is longer).
     // (period: from the settings; the shift 5.588 is Jimenez' interleaved gradient noise step.)
-    const float n0 = IGN(vec2(fp) + float(frame % period) * 5.588238);
-    const float n1 = IGN(vec2(fp.yx) + float(frame % period) * 1.618034);
-    const float n2 = IGN(vec2(fp) * 1.37 + float(frame % period) * 3.141593);
+    float n0 = IGN(vec2(fp) + float(frame % period) * 5.588238);
+    float n1 = IGN(vec2(fp.yx) + float(frame % period) * 1.618034);
+    float n2 = IGN(vec2(fp) * 1.37 + float(frame % period) * 3.141593);
+    if (noise == 1u) {
+        // Blue noise per half-res pixel, each frame shifted by the golden ratio (a low-discrepancy
+        // sequence per pixel over time; spatially still blue).
+        const vec4 bn = texelFetch(blue_noise, hp & 63, 0);
+        const float shift = float(frame & 4095u) * 0.6180339887;
+        n0 = fract(bn.r + shift);
+        n1 = fract(bn.g + shift);
+        n2 = fract(bn.b + shift);
+    }
 
     float occlusion = 0.0;
     for (uint r = 0u; r < rays; ++r) {

@@ -135,6 +135,7 @@ struct Settings {
     float snap_far = 0.0f, ao_far = 40.0f, origin_offset = 0.0f;
     float max_n = 32.0f, clip_k = 2.0f, clip_floor = 0.1f;
     bool subpixel = false;
+    bool blue_noise = true;    // the rays' samples from a blue-noise texture (0: IGN)
     u32 falloff = 0, noise_period = 8;
     bool cache_enabled = true;
     u32 promote_after = 8;

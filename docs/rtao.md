@@ -122,7 +122,8 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `clipk`, `clipfloor` | | 2, 0.1 | denoiser 2: history clip to mean +- max(clipk sigma, clipfloor) |
 | `subpixel` | | 0 | denoiser 2: 1 cycles the sampled pixel through the 2x2 block (thin features; less steady) |
 | `falloff` | | 0 | 1: binary hits within a random length, linear to 0 at the radius (lighter) |
-| `period` | | 8 | frames before a pixel's ray pattern repeats |
+| `noise` | | 1 | 1: the rays' samples from a 64x64 blue-noise texture (`tools/rtao_bluenoise.py`), shifted per frame by the golden ratio; 0: interleaved gradient noise |
+| `period` | | 8 | IGN only: frames before a pixel's ray pattern repeats |
 | `history` | `BB_RTAO_HISTORY` | 0.5 | denoiser 1: temporal weight (0.85 lagged visibly in motion) |
 | `sigma` | `BB_RTAO_SIGMA` | 1.5 | half-res blur width in texels, 0 off |
 | `blur` | | 1 | 4x4 depth-aware upsample, 0: 2x2 |
@@ -183,6 +184,7 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | The same at the workshop door (denser) | `chunk=0`: GPU busy 15.15 ms (BLAS 1.51, trace 0.81) | `chunk=10`: 15.05-15.06 (BLAS 0.71, trace 1.46) |
 | One static BLAS instead of an instance per cached draw (lanterns lit, one session; RT off 13.59 ms) | Doll: `chunk=0` 14.67 ms (BLAS 1.44, trace 0.45) | static BLAS 13.70-13.75 (BLAS 0.55, trace 0.47-0.49) |
 | The same at the workshop door (RT off 13.59 ms) | `chunk=0` 15.09 ms (BLAS 1.59, trace 0.71) | 14.24 (BLAS 0.82, trace 0.70) |
+| Blue noise vs IGN, 2 rays, against a 32-ray reference (still camera, 8 frames each, two A/B pairs) | IGN: per-frame mean error 0.035-0.036, RMS 0.082-0.084, 8-frame mean 0.031-0.033 | blue: 0.023-0.031, RMS 0.054-0.070, 8-frame 0.019-0.027; stability (pixels changing > 0.05) equal, 3.44 vs 3.45%; same cost |
 | Refits of the per-frame BLAS (characters; ALLOW_UPDATE, rebuilt every 30 frames; dropped) | still: BLAS 0.40, trace 0.62 ms; walking: trace 0.65-0.69 | still: 0.26 / 0.62; walking: trace 1.18-1.74 (bloated bounds); collapsed triangles at the camera hung the camera-ray test |
 | Static BLAS rebuild (`rebuild=0`: every pass; 956k triangles) | fast trace: 2.75 ms, fast build 2.06 | fast build + data access 1.39 ms, trace +0.03 ms: default |
 
