@@ -183,6 +183,7 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | The same at the workshop door (denser) | `chunk=0`: GPU busy 15.15 ms (BLAS 1.51, trace 0.81) | `chunk=10`: 15.05-15.06 (BLAS 0.71, trace 1.46) |
 | One static BLAS instead of an instance per cached draw (lanterns lit, one session; RT off 13.59 ms) | Doll: `chunk=0` 14.67 ms (BLAS 1.44, trace 0.45) | static BLAS 13.70-13.75 (BLAS 0.55, trace 0.47-0.49) |
 | The same at the workshop door (RT off 13.59 ms) | `chunk=0` 15.09 ms (BLAS 1.59, trace 0.71) | 14.24 (BLAS 0.82, trace 0.70) |
+| Refits of the per-frame BLAS (characters; ALLOW_UPDATE, rebuilt every 30 frames; dropped) | still: BLAS 0.40, trace 0.62 ms; walking: trace 0.65-0.69 | still: 0.26 / 0.62; walking: trace 1.18-1.74 (bloated bounds); collapsed triangles at the camera hung the camera-ray test |
 | Static BLAS rebuild (`rebuild=0`: every pass; 956k triangles) | fast trace: 2.75 ms, fast build 2.06 | fast build + data access 1.39 ms, trace +0.03 ms: default |
 
 Known cost drivers: the per-frame BLAS (the characters: 0.8M triangles at the Doll) is rebuilt from
