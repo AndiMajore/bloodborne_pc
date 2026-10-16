@@ -74,6 +74,17 @@ public:
     [[nodiscard]] std::array<float, 12> InvView() const noexcept {
         return current.inv_view;
     }
+    /// bbport (RT reflections, experimental): the previous frame's camera, to reproject a point
+    /// into last frame's image. Valid when HistoryValid() says so.
+    [[nodiscard]] std::array<float, 12> PrevView() const noexcept {
+        return previous.view;
+    }
+    [[nodiscard]] std::array<float, 4> PrevProjection() const noexcept {
+        return previous.proj;
+    }
+    [[nodiscard]] bool HistoryValid() const noexcept {
+        return current.valid && previous.valid;
+    }
     [[nodiscard]] float VerticalFov() const noexcept;
     [[nodiscard]] float Near() const noexcept;
     /// The camera in the world: its position and its right, up and forward axes (the view to

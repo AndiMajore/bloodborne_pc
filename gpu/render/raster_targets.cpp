@@ -193,12 +193,18 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         if (rtao->Enabled() && cb_descs[0].first) {
             rtao->OnGBufferPass(db_desc.first, cb_descs[0].first);
         }
+        if (reflect->Enabled() && cb_descs[0].first) {
+            reflect->OnGBufferPass(db_desc.first, cb_descs[0].first);
+        }
     }
     if (rtao->Enabled()) {
         const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
                                 ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
                                 : 0;
         rtao->OnColorTarget(cb_descs[0].first, ps_hash);
+        if (reflect->Enabled()) {
+            reflect->OnColorTarget(cb_descs[0].first, ps_hash);
+        }
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -219,6 +225,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 !regs.depth_control.depth_write_enable &&
                 (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
                 ssgi->OnOpaqueScene(cb_descs[0].first);
+                reflect->OnOpaqueScene(cb_descs[0].first); // after SSGI: its bounce included
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
                 // A full-screen pass over the scene (the fog composite): the transparents are in.
