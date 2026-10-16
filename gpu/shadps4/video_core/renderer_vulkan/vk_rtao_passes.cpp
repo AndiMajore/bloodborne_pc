@@ -50,6 +50,7 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
     const auto& num_geometries = in.num_geometries;
     const auto& num_instances = in.num_instances;
     const auto& total_triangles = in.total_triangles;
+    const auto& opaque_triangles = in.opaque_triangles;
     const auto& do_dump = in.do_dump;
     const auto& do_readback = in.do_readback;
     const auto& split_fetch_now = in.split_fetch_now;
@@ -270,17 +271,27 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
                            vk::AccessFlagBits2::eAccelerationStructureReadKHR);
             return;
         }
-        vk::AccelerationStructureGeometryKHR blas_geometry{
-            .geometryType = vk::GeometryTypeKHR::eTriangles,
-            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                             .vertexData = {.deviceAddress = triangles_address},
-                             .vertexStride = 3 * sizeof(float),
-                             .maxVertex = std::max<u32>(total_triangles * 3, 1) - 1,
-                             .indexType = vk::IndexType::eNoneKHR,
-                         }},
-            .flags = vk::GeometryFlagBitsKHR::eOpaque,
+        // Two geometries over the triangle list: the opaque draws, then the foliage (alpha-tested,
+        // foliage=), non-opaque: the trace decides per hit (rtao_trace_constants.glsl).
+        const u32 foliage = total_triangles - opaque_triangles;
+        const auto geometry = [&](u32 first, u32 count, vk::GeometryFlagsKHR flags) {
+            return vk::AccelerationStructureGeometryKHR{
+                .geometryType = vk::GeometryTypeKHR::eTriangles,
+                .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                                 .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                                 .vertexData = {.deviceAddress = triangles_address + vk::DeviceSize(first) * 36},
+                                 .vertexStride = 3 * sizeof(float),
+                                 .maxVertex = std::max<u32>(count * 3, 1) - 1,
+                                 .indexType = vk::IndexType::eNoneKHR,
+                             }},
+                .flags = flags,
+            };
         };
+        const std::array blas_geometries = {
+            geometry(0, opaque_triangles, vk::GeometryFlagBitsKHR::eOpaque),
+            geometry(opaque_triangles, foliage, vk::GeometryFlagBitsKHR::eNoDuplicateAnyHitInvocation)};
+        const std::array blas_ranges = {vk::AccelerationStructureBuildRangeInfoKHR{.primitiveCount = opaque_triangles},
+                                        vk::AccelerationStructureBuildRangeInfoKHR{.primitiveCount = foliage}};
         const vk::AccelerationStructureBuildGeometryInfoKHR blas_info{
             .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
             .flags = (fast_trace ? vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace
@@ -288,12 +299,12 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
                      extra_flags,
             .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
             .dstAccelerationStructure = blas,
-            .geometryCount = 1,
-            .pGeometries = &blas_geometry,
+            .geometryCount = foliage ? 2u : 1u,
+            .pGeometries = blas_geometries.data(),
             .scratchData = {.deviceAddress = blas_scratch_address},
         };
-        const vk::AccelerationStructureBuildRangeInfoKHR blas_range{.primitiveCount = total_triangles};
-        cmdbuf.buildAccelerationStructuresKHR(blas_info, &blas_range);
+        const vk::AccelerationStructureBuildRangeInfoKHR* range_ptr = blas_ranges.data();
+        cmdbuf.buildAccelerationStructuresKHR(1, &blas_info, &range_ptr);
         memory_barrier(cmdbuf, AsBuild, vk::AccessFlagBits2::eAccelerationStructureWriteKHR, AsBuild,
                        vk::AccessFlagBits2::eAccelerationStructureReadKHR);
     });
@@ -630,6 +641,7 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
         .falloff = settings.falloff,
         .period = settings.noise_period,
         .noise = settings.blue_noise ? 1u : 0u,
+        .foliage = in.opaque_triangles < in.total_triangles ? settings.foliage : 0.0f,
     };
     const auto& trace = in.trace;
     in.temporal = TemporalConstants{

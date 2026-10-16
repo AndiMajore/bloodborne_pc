@@ -60,6 +60,7 @@ struct TraceConstants {
     u32 falloff;
     u32 period;
     u32 noise; // 1: blue-noise texture, 0: interleaved gradient noise
+    float foliage;
 };
 struct TemporalConstants {
     std::array<float, 2> half_size;
@@ -82,7 +83,7 @@ struct ApplyConstants {
     u32 pad1;
 };
 static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
-static_assert(sizeof(TraceConstants) == 144 && offsetof(TraceConstants, falloff) == 132);
+static_assert(sizeof(TraceConstants) == 148 && offsetof(TraceConstants, foliage) == 144);
 struct BlurConstants {
     std::array<float, 2> half_size;
     std::array<s32, 2> dir;
@@ -142,6 +143,7 @@ struct FrameDraws {
     std::vector<u64> dynamic_keys, verify_keys;
     std::vector<PoolCopy> pool_copies;
     u32 promo_used = 0;           // triangles expanded for new pool entries
+    u32 opaque_triangles = 0;     // the per-frame triangles before the foliage
     bool split_fetch_now = false; // a batch of big meshes goes to the host this pass
 };
 /// Everything Record() prepared that the pass's commands read (RayTracedAO::RecordPasses): views,
@@ -149,6 +151,7 @@ struct FrameDraws {
 struct PassInputs {
     vk::ImageView ao_read, ao_write, blur_rw, depth_view, hist_read, hist_write, normal_view, mask_view, motion, raw_rw;
     u32 w, h, write, dispatch_triangles, num_chunks, num_geometries, num_instances, total_triangles;
+    u32 opaque_triangles; // the rest of total_triangles: the foliage, non-opaque
     bool do_dump, do_readback, split_fetch_now, v2;
     vk::Buffer chunks_handle, ranges_handle, partials_handle, constants_handle, dump_handle, probe_handle, readback_handle, split_fetch_handle, split_staging_handle, pool_handle, table_handle, triangles_handle;
     vk::DeviceSize chunks_offset, ranges_offset, constants_offset, dump_offset, probe_bytes, probe_offset, split_fetch_bytes, split_fetch_src, table_bytes, table_offset, triangles_bytes;

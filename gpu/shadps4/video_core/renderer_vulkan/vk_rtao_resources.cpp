@@ -14,6 +14,7 @@
 #include <vector>
 #include <vk_mem_alloc.h>
 
+#include "video_core/host_shaders/rtao_trace_rahit.h"
 #include "video_core/host_shaders/rtao_trace_rchit.h"
 #include "video_core/host_shaders/rtao_trace_rgen.h"
 #include "video_core/host_shaders/rtao_trace_rmiss.h"
@@ -31,11 +32,12 @@ using namespace RtaoInternal;
 void RayTracedAO::CreateTracePipeline() {
     const auto device = instance.GetDevice();
     const std::array modules = {CompileSPV(RTAO_TRACE_RGEN, device), CompileSPV(RTAO_TRACE_RMISS, device),
-                                CompileSPV(RTAO_TRACE_RCHIT, device)};
+                                CompileSPV(RTAO_TRACE_RCHIT, device), CompileSPV(RTAO_TRACE_RAHIT, device)};
     const std::array stages = {
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eRaygenKHR, .module = modules[0], .pName = "main"},
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eMissKHR, .module = modules[1], .pName = "main"},
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eClosestHitKHR, .module = modules[2], .pName = "main"},
+        vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eAnyHitKHR, .module = modules[3], .pName = "main"},
     };
     const std::array groups = {
         vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eGeneral, .generalShader = 0,
@@ -48,7 +50,7 @@ void RayTracedAO::CreateTracePipeline() {
                                                .intersectionShader = VK_SHADER_UNUSED_KHR},
         vk::RayTracingShaderGroupCreateInfoKHR{.type = vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup,
                                                .generalShader = VK_SHADER_UNUSED_KHR, .closestHitShader = 2,
-                                               .anyHitShader = VK_SHADER_UNUSED_KHR,
+                                               .anyHitShader = 3, // the foliage (non-opaque geometry)
                                                .intersectionShader = VK_SHADER_UNUSED_KHR},
     };
     const auto result = device.createRayTracingPipelinesKHR(
@@ -180,37 +182,48 @@ bool RayTracedAO::CreateAccelerationStructures() {
     scratch_alignment = std::max<vk::DeviceSize>(as_props.minAccelerationStructureScratchOffsetAlignment, 1);
 
     using BU = vk::BufferUsageFlagBits;
-    // Sizes of a BLAS over one triangle list.
-    const auto query = [&](vk::BuildAccelerationStructureFlagsKHR flags, u32 triangles) {
-        const vk::AccelerationStructureGeometryKHR geometry{
-            .geometryType = vk::GeometryTypeKHR::eTriangles,
-            .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
-                             .vertexFormat = vk::Format::eR32G32B32Sfloat,
-                             .vertexStride = 3 * sizeof(float),
-                             .maxVertex = triangles * 3 - 1,
-                             .indexType = vk::IndexType::eNoneKHR,
-                         }},
-            .flags = vk::GeometryFlagBitsKHR::eOpaque,
+    // Sizes of a BLAS over one triangle list, or (foliage > 0: the per-frame BLAS) a second
+    // non-opaque one of up to `foliage` triangles.
+    const auto query = [&](vk::BuildAccelerationStructureFlagsKHR flags, u32 triangles, u32 foliage = 0) {
+        const auto geometry = [&](u32 count, vk::GeometryFlagsKHR geometry_flags) {
+            return vk::AccelerationStructureGeometryKHR{
+                .geometryType = vk::GeometryTypeKHR::eTriangles,
+                .geometry = {.triangles = vk::AccelerationStructureGeometryTrianglesDataKHR{
+                                 .vertexFormat = vk::Format::eR32G32B32Sfloat,
+                                 .vertexStride = 3 * sizeof(float),
+                                 .maxVertex = count * 3 - 1,
+                                 .indexType = vk::IndexType::eNoneKHR,
+                             }},
+                .flags = geometry_flags,
+            };
         };
+        const std::array geometries = {
+            geometry(triangles, vk::GeometryFlagBitsKHR::eOpaque),
+            geometry(std::max(foliage, 1u), vk::GeometryFlagBitsKHR::eNoDuplicateAnyHitInvocation)};
         const vk::AccelerationStructureBuildGeometryInfoKHR info{
             .type = vk::AccelerationStructureTypeKHR::eBottomLevel,
             .flags = flags,
             .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
-            .geometryCount = 1,
-            .pGeometries = &geometry,
+            .geometryCount = foliage ? 2u : 1u,
+            .pGeometries = geometries.data(),
         };
+        const std::array counts = {triangles, foliage};
         return device.getAccelerationStructureBuildSizesKHR(vk::AccelerationStructureBuildTypeKHR::eDevice,
-                                                            info, triangles);
+                                                            info, vk::ArrayProxy<const u32>(info.geometryCount,
+                                                                                            counts.data()));
     };
     // The per-frame BLAS: fast build (a fast-trace build measured no different and is larger);
     // BB_RTAO_FAST_TRACE=1 sizes for both and allows build=1.
     fast_trace_allowed = EnvU32("BB_RTAO_FAST_TRACE", 0) != 0;
     const vk::BuildAccelerationStructureFlagsKHR access =
         data_access ? vk::BuildAccelerationStructureFlagBitsKHR::eAllowDataAccess : vk::BuildAccelerationStructureFlagsKHR{};
+    // The opaque geometry may take all of the budget, the foliage a quarter (FoliageMax()).
     const auto per_frame_sizes = [&](u32 triangles) {
-        auto sizes = query(vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | access, triangles);
+        auto sizes = query(vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild | access, triangles,
+                           triangles / 4);
         if (fast_trace_allowed) {
-            const auto trace = query(vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace | access, triangles);
+            const auto trace = query(vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace | access, triangles,
+                                     triangles / 4);
             sizes.accelerationStructureSize = std::max(sizes.accelerationStructureSize, trace.accelerationStructureSize);
             sizes.buildScratchSize = std::max(sizes.buildScratchSize, trace.buildScratchSize);
         }

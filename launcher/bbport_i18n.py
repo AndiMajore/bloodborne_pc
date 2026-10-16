@@ -62,7 +62,10 @@ EN = {
     "Своё": "Custom",
     "1 луч, радиус 1 м, до 25 м; около 0,6 мс": "1 ray, 1 m radius, up to 25 m; about 0.6 ms",
     "2 луча, радиус 1,5 м, до 40 м; около 1 мс": "2 rays, 1.5 m radius, up to 40 m; about 1 ms",
-    "4 луча, радиус 2 м, до 60 м; около 1,6 мс": "4 rays, 2 m radius, up to 60 m; about 1.6 ms",
+    "4 луча, радиус 2 м, до 60 м, листва; около 2,3 мс": "4 rays, 2 m radius, up to 60 m, foliage; about 2.3 ms",
+    "Листва": "Foliage",
+    "Трава и листья затеняют с этой долей; 0 — не затеняют. Около +0,7 мс":
+        "Grass and leaves occlude at this share; 0: they do not. About +0.7 ms",
     "Значения ниже": "The values below",
     "Лучей на пиксель": "Rays per pixel",
     "Больше — меньше шума, дороже": "More: less noise, more cost",

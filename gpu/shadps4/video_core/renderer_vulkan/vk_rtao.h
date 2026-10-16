@@ -144,6 +144,7 @@ private:
                   // distance, so an occurrence is not one copy for good)
         u32 occurrence;
         bool skinned;
+        bool foliage; // alpha-tested (foliage=): per frame only, in the BLAS's non-opaque geometry
     };
 
     struct Buffer {
@@ -197,6 +198,10 @@ private:
     // Doll); without it (cache=0, chunk=0) 1.5M dropped ~10 draws per frame in the Hunter's Dream
     // (BB_RTAO_MAX_TRIANGLES=3000000 then).
     u32 max_triangles = 1500000;
+    // Of which the foliage (the per-frame BLAS's second geometry, sized for this much) at most.
+    [[nodiscard]] u32 FoliageMax() const noexcept {
+        return max_triangles / 4;
+    }
     u32 max_geometries = 8192;
 
     std::vector<GpuGeometry> geometries; // the frame's table (built in Record)
@@ -248,6 +253,7 @@ private:
     u32 frame_triangles = 0, dropped_triangles = 0, dropped_draws = 0;
     u32 recorded = 0;         // passes recorded since the last report
     u32 skipped_topology = 0, skipped_no_address = 0, skipped_alpha = 0, skipped_nowrite = 0;
+    u32 foliage_triangles = 0, foliage_dropped = 0; // the last pass's foliage; draws over its budget (per report)
     bool readback_pending = false;
     u32 readback_frame = 0;
     u32 readback_triangles = 0;

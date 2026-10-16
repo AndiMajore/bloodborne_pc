@@ -107,15 +107,16 @@ FPS_MODES = [("Без ограничения (патч)", "uncap"), ("60", "60")
 PRESENT_MODES = [("Mailbox", "Mailbox"), ("FIFO (VSync)", "Fifo"),
                  ("FIFO Relaxed", "FifoRelaxed"), ("Immediate", "Immediate")]
 # Ray-traced AO (vk_rtao.cpp) quality presets: rays per half-res pixel, radius (m), strength,
-# distance (m: AO and its geometry end there; the surface snap reaches as far).
+# distance (m: AO and its geometry end there; the surface snap reaches as far), foliage (the
+# chance an alpha-tested hit blocks a ray; 0: grass and leaves cast no AO; about +0.7 ms).
 RTAO_PRESETS = {
-    "low": {"rays": 1, "radius": 1.0, "strength": 1.0, "distance": 25.0},
-    "medium": {"rays": 2, "radius": 1.5, "strength": 1.0, "distance": 40.0},
-    "high": {"rays": 4, "radius": 2.0, "strength": 1.0, "distance": 60.0},
+    "low": {"rays": 1, "radius": 1.0, "strength": 1.0, "distance": 25.0, "foliage": 0.0},
+    "medium": {"rays": 2, "radius": 1.5, "strength": 1.0, "distance": 40.0, "foliage": 0.0},
+    "high": {"rays": 4, "radius": 2.0, "strength": 1.0, "distance": 60.0, "foliage": 0.35},
 }
 RTAO_PRESET_CHOICES = [("Низкое", "low", "1 луч, радиус 1 м, до 25 м; около 0,6 мс"),
                        ("Среднее", "medium", "2 луча, радиус 1,5 м, до 40 м; около 1 мс"),
-                       ("Высокое", "high", "4 луча, радиус 2 м, до 60 м; около 1,6 мс"),
+                       ("Высокое", "high", "4 луча, радиус 2 м, до 60 м, листва; около 2,3 мс"),
                        ("Своё", "custom", "Значения ниже")]
 # A third element is a note shown under the row's title while that choice is selected: the
 # choice labels stay short, so the selected one is shown in full.
@@ -145,6 +146,7 @@ DEFAULTS = {
     "rtao_radius": 1.5,
     "rtao_strength": 1.0,
     "rtao_distance": 40.0,
+    "rtao_foliage": 0.0,
     "patches_dir": "",
     "language": "1",
     "fullscreen": False,
@@ -372,7 +374,7 @@ def game_environment(s):
         write_ssgi_settings(settings_user_dir(s) / "rtao.txt",
                             {"rays": int(s.get("rtao_rays", 2)), "radius": float(s.get("rtao_radius", 1.5)),
                              "strength": float(s.get("rtao_strength", 1.0)), "far": distance,
-                             "snap": distance, "enabled": 1})
+                             "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)), "enabled": 1})
     env["BB_PATCHES_DIR"] = str(patches_dir(s))
     env["BB_PATCHES_CONFIG"] = str(DATA_DIR / "patches.json")
     env["BB_LANGUAGE"] = s["language"]
@@ -773,10 +775,18 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.rtao_distance_row = Adw.SpinRow.new_with_range(10.0, 80.0, 5.0)
         self.rtao_distance_row.set_title(tr("Дальность, м"))
         self.rtao_distance_row.set_subtitle(tr("Дальше затенения нет; больше — дороже"))
+        self.rtao_foliage_row = Adw.SpinRow.new_with_range(0.0, 1.0, 0.05)
+        self.rtao_foliage_row.set_title(tr("Листва"))
+        self.rtao_foliage_row.set_subtitle(tr("Трава и листья затеняют с этой долей; 0 — не затеняют. "
+                                              "Около +0,7 мс"))
+        self.rtao_foliage_row.set_digits(2)
         self.rtao_value_rows = {"rays": self.rtao_rays_row, "radius": self.rtao_radius_row,
-                                "strength": self.rtao_strength_row, "distance": self.rtao_distance_row}
+                                "strength": self.rtao_strength_row, "distance": self.rtao_distance_row,
+                                "foliage": self.rtao_foliage_row}
         for key, row in self.rtao_value_rows.items():
-            row.set_value(float(self.settings.get("rtao_" + key, RTAO_PRESETS["medium"][key])))
+            # A value saved before the key existed: the saved preset's (foliage, for "high").
+            preset = RTAO_PRESETS.get(self.settings.get("rtao_preset"), RTAO_PRESETS["medium"])
+            row.set_value(float(self.settings.get("rtao_" + key, preset[key])))
             rtao.add(row)
         self.rtao_applying = False
 
@@ -1271,6 +1281,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["rtao_radius"] = float(self.rtao_radius_row.get_value())
         s["rtao_strength"] = float(self.rtao_strength_row.get_value())
         s["rtao_distance"] = float(self.rtao_distance_row.get_value())
+        s["rtao_foliage"] = float(self.rtao_foliage_row.get_value())
         s["online"] = self.online_row.get_active()
         s["online_community"] = self.community_row.get_text().strip()
         s["online_server"] = self.server_row.get_text().strip()

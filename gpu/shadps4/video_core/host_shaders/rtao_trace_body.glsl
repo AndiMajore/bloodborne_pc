@@ -12,30 +12,7 @@ layout(binding = 3) uniform texture2D prev_tex;    // half res, previous output
 layout(binding = 4, rg16f) uniform writeonly image2D out_img; // half res: ao, view z
 layout(binding = 5) uniform accelerationStructureEXT scene;
 
-// Per-frame constants: a uniform buffer (the push-constant minimum is 128 bytes).
-layout(binding = 6, std140) uniform Constants {
-    vec4 view[3];     // world -> view rows
-    vec4 proj;
-    vec2 full_size;
-    vec2 half_size;
-    vec2 jitter;      // viewport shift in render pixels (unjitter the depth position)
-    float radius;
-    float history;
-    uint rays;
-    uint frame;
-    uint mode;        // 2: primary-ray test t/|P| (0 = miss); 3: facing ratio of the normal;
-                      // 4: AO with the rays starting 0.1 further out (self-hit test)
-    float snap_far;   // the surface snap runs up to this distance (0 = never)
-    float ao_far;     // no AO beyond this distance (the BVH ends a radius later)
-    uint normals;     // 0: the G-buffer's shading normal, 1: geometric, from the depth buffer
-    float offset;     // extra origin offset along the normal, metres (on top of the ulp offset)
-    uint denoise;     // 1: temporal blend here; 2: raw output for rtao_temporal.comp
-    uint subpixel;    // 1: the sampled full-res pixel cycles through the 2x2 block per frame
-    uint falloff;     // 0: a hit counts 1 - 0.5 t/r; 1: binary hits within a random length in
-                      // [0, r] (linear falloff to 0 at the radius, expected value)
-    uint period;      // frames before the per-pixel noise repeats (IGN)
-    uint noise;       // 1: the blue-noise texture, shifted per frame by the golden ratio
-};
+#include "rtao_trace_constants.glsl"
 layout(binding = 7) uniform texture2D blue_noise; // 64x64, four independent channels
 
 const float PI = 3.14159265;
@@ -144,7 +121,7 @@ void TracePixel(ivec2 hp) {
     if (mode == 2u) {
         const float len = length(P);
         rayQueryEXT probe;
-        rayQueryInitializeEXT(probe, scene, gl_RayFlagsOpaqueEXT,
+        rayQueryInitializeEXT(probe, scene, gl_RayFlagsCullNoOpaqueEXT,
                               0xFF, vec3(0.0), 0.0, P / len, len * 1.5);
         while (rayQueryProceedEXT(probe)) {
         }
@@ -155,6 +132,7 @@ void TracePixel(ivec2 hp) {
         imageStore(out_img, hp, vec4(hit, P.z, 0.0, 0.0));
         return;
     }
+    // (Both helper rays skip the foliage: gl_RayFlagsCullNoOpaqueEXT.)
     // Snap the origin onto the BVH where the depth surface and the triangles disagree (depth-biased
     // draws: floor tiles a few centimetres off): a short ray along the view direction around the
     // depth finds the real surface. Optional (snap=0), up to snap_far metres.
@@ -163,7 +141,7 @@ void TracePixel(ivec2 hp) {
         const vec3 dir = P / dist;
         const float window = 0.1 + 0.01 * dist;
         rayQueryEXT snap;
-        rayQueryInitializeEXT(snap, scene, gl_RayFlagsOpaqueEXT, 0xFF, P - dir * window, 0.0, dir,
+        rayQueryInitializeEXT(snap, scene, gl_RayFlagsCullNoOpaqueEXT, 0xFF, P - dir * window, 0.0, dir,
                               2.0 * window);
         while (rayQueryProceedEXT(snap)) {
         }

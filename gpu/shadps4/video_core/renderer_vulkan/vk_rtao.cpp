@@ -57,6 +57,10 @@ void RayTracedAO::OnFrameStart() {
                     frame, geometries.size(), frame_triangles, dropped_draws, dropped_triangles,
                     max_triangles, skipped_topology, skipped_alpha, skipped_nowrite, skipped_no_address,
                     recorded, skipped_busy);
+        if (settings.foliage > 0.0f) {
+            std::printf("RTAO: foliage %.2f: %u triangles (%u draws over its budget of %u)\n", settings.foliage,
+                        foliage_triangles, foliage_dropped, FoliageMax());
+        }
         if (skipped_copy) {
             std::printf("RTAO: %u draws left out (index ring slot busy or full) in 600 frames\n", skipped_copy);
             skipped_copy = 0;
@@ -118,6 +122,7 @@ void RayTracedAO::OnFrameStart() {
     skipped_topology = 0;
     skipped_no_address = 0;
     skipped_alpha = 0;
+    foliage_dropped = 0;
     skipped_nowrite = 0;
     done_this_frame = false;
     last_color = {};
@@ -321,6 +326,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                        std::max<vk::DeviceSize>(geometries.size(), 1) * sizeof(GpuGeometry));
     in.num_geometries = u32(geometries.size());
     in.total_triangles = frame_triangles; // the per-frame BLAS
+    in.opaque_triangles = std::min(classified.opaque_triangles, frame_triangles);
     in.dispatch_triangles = dispatch_triangles;
     in.num_chunks = num_chunks;
     // Instances: the per-frame BLAS (view space, when it has triangles) and the static BLAS

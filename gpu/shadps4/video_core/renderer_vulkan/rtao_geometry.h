@@ -145,6 +145,7 @@ struct Settings {
     u32 static_build = 2;        // the static BLAS: 0 fast trace, 1 fast build, 2 fast build + data access
     u32 static_interval = 30;    // frames between rebuilds for a changed set (not for a move); 0: every pass // > 0: meshes bigger than cache_max_size are cached in pieces of this size
     bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
+    float foliage = 0.0f; // > 0: alpha-tested draws occlude with this probability per hit (0: left out)
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };

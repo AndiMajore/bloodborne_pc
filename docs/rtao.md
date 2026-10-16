@@ -7,8 +7,8 @@ lighting applies it exactly where it applied its SSAO. Everything is behind `BB_
 it the port is unchanged.
 
 In the launcher: Settings, "Ray tracing (experimental)" (below the SSGI group): the switch sets `BB_RTAO=1`, the quality
-preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far` and `snap` into
-`user/rtao.txt` at launch (costs in the measurements table; medium is the default below).
+preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far`, `snap` and
+`foliage` (0.35 for high, 0 otherwise) into `user/rtao.txt` at launch (costs in the measurements table; medium is the default below).
 
 ## Requirements
 
@@ -36,8 +36,13 @@ preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far` 
    positions in the object-motion capture (the motion path's draws in its history, the rest in
    the RTAO's own region; only while the pass is on, `enabled=1`). `Rasterizer` hands each to `RayTracedAO::AddGeometry`
    with its index buffer address, counts, topology, alpha-test and depth-write state, an identity
-   hash and whether it is skinned. Strips, alpha-tested draws (foliage) and draws without depth
-   write (decals) are left out.
+   hash and whether it is skinned. Strips and draws without depth write (decals) are left out;
+   alpha-tested draws (foliage) too unless `foliage` > 0: then they go last into the per-frame
+   BLAS as a second, non-opaque geometry (never cached, at most a quarter of the per-frame budget),
+   and an AO ray hitting one stops with probability `foliage`, drawn per pixel, frame, ray and
+   triangle (`rtao_trace_constants.glsl`; the any-hit shader in the pipeline variant, a candidate
+   loop with ray queries). Over the temporal accumulation a grass card occludes at about that
+   coverage instead of as a solid quad. The surface snap and the primary-ray test skip it.
 2. The game's AO upsample pass (pixel shader `0xc45c51cb` into an R8 scene-size target) ends;
    `Record()` (`vk_rtao.cpp`) runs; the draws' intake and classification are `AddGeometry()`,
    `ClassifyDraws()` and `BuildTable()` (`vk_rtao_cache.cpp`), the GPU work `RecordImageSetup()`,
@@ -153,7 +158,8 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `rebuild` | | 30 | frames between rebuilds for a changed set of cached draws (0: every pass, to measure a rebuild) |
 | `staticbuild` | | 2 | static BLAS build: 0 fast trace, 1 fast build, 2 fast build + ALLOW_DATA_ACCESS |
 | `build` | | 0 | 1: per-frame BLAS built for trace speed (no difference on RADV) |
-| `alpha`, `decals` | | 0 | 1: keep alpha-tested draws / draws without depth write |
+| `alpha`, `decals` | | 0 | 1: keep alpha-tested draws (as solid quads) / draws without depth write |
+| `foliage` | 0-1 | 0 | alpha-tested draws occlude with this probability per hit (0: left out); about +0.7 ms |
 | | `BB_RTAO_MAX_TRIANGLES` | 1500000 | per-frame triangle budget (buffers are sized for it; 3000000 for `cache=0` or `chunk=0`) |
 | `stage` | `BB_RTAO_STAGE` | 5 | stop after: 1 expand, 2 BLAS, 3 TLAS, 4 trace, 5 apply |
 | `debug` | `BB_RTAO_DEBUG` | 0 | 1 raw AO, 2 camera-ray test, 3 normal facing, 4 AO with t_min 0.1 |
@@ -198,6 +204,7 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Blue noise vs IGN, 2 rays, against a 32-ray reference (still camera, 8 frames each, two A/B pairs) | IGN: per-frame mean error 0.035-0.036, RMS 0.082-0.084, 8-frame mean 0.031-0.033 | blue: 0.023-0.031, RMS 0.054-0.070, 8-frame 0.019-0.027; stability (pixels changing > 0.05) equal, 3.44 vs 3.45%; same cost |
 | Refits of the per-frame BLAS (characters; ALLOW_UPDATE, rebuilt every 30 frames; dropped) | still: BLAS 0.40, trace 0.62 ms; walking: trace 0.65-0.69 | still: 0.26 / 0.62; walking: trace 1.18-1.74 (bloated bounds); collapsed triangles at the camera hung the camera-ray test |
 | Reusing a character's BLAS while its bone palette is unchanged (Doll, 600-frame windows; not built) | 104 skinned draws, 924k triangles per frame | palette unchanged for 5-9 % of draws, 1.5-1.9 % of triangles: every character animates every frame, idle included |
+| Foliage (Hunter's Dream garden, ~370k alpha-tested triangles) | medium, foliage 0: RTAO 1.48 ms (BLAS 0.83, trace 0.66), GPU busy 13.35 | foliage 0.35: 2.16 ms (1.27, expand 0.11, 0.78), 13.85; high: 2.20 -> 2.91 ms. The per-frame BLAS sized for it: +74 MiB (1236 -> 1310 MiB fixed) |
 | Launcher presets at the Doll (GPU busy; RTAO off 13.47 ms) | low (1 ray, 1 m, 25 m): 14.09 ms (BLAS 0.53, trace 0.43) | medium (2 rays, 1.5 m, 40 m): 14.47 (0.64, 0.67); high (4 rays, 2 m, 60 m): 15.02 (0.77, 1.12) |
 | Static BLAS rebuild (`rebuild=0`: every pass; 956k triangles) | fast trace: 2.75 ms, fast build 2.06 | fast build + data access 1.39 ms, trace +0.03 ms: default |
 
@@ -286,7 +293,9 @@ motion is known to be off).
 
 ## Known limitations
 
-- Foliage and other alpha-tested draws cast no AO (they would be solid quads); decals are left out.
+- Foliage casts AO only stochastically (`foliage`, at an average coverage; no alpha texture is
+  tested) and only from the high preset on; over its budget (375k triangles) draws drop out (4 in
+  the Dream garden, 22 at the Yharnam start). Decals are left out.
 - RTAO darkens everywhere, also where the game scales its own AO to zero (the Workshop): a
   chosen look (compared in game against honouring the per-area scale), not an oversight.
 - Strips and other non-list topologies are skipped (counted in the log).

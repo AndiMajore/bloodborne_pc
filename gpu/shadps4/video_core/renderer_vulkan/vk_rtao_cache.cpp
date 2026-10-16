@@ -44,7 +44,11 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
     const float cull = settings.ao_far > 0.0f ? settings.ao_far + settings.radius : 0.0f;
     const auto device = instance.GetDevice();
     frame_triangles = 0;
+    foliage_triangles = 0;
     per_frame_reasons = {};
+    // The foliage last: its triangles end the per-frame range, the BLAS's non-opaque geometry.
+    std::stable_partition(draws.begin(), draws.end(), [](const Draw& d) { return !d.foliage; });
+    out.opaque_triangles = ~0u;
     // Huge draws (terrain, building blocks): whole, their far triangles came back into the BVH
     // (the far cut works per frame) and rays slowed down. They stay per frame, or (chunk > 0) are
     // split into pieces, each in the static BLAS only within reach.
@@ -100,7 +104,7 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
     // Probing costs a pass over the draw's indices: cached draws are rechecked every 8th pass,
     // draws waiting for a build slot every 4th; characters and draws that kept changing never.
     const auto probe_now = [&](const Draw& d, const CacheEntry& e) {
-        if (d.skinned || e.evictions >= 3) {
+        if (d.skinned || d.foliage || e.evictions >= 3) {
             return false;
         }
         const u32 phase = u32(d.key >> 7) + probe_id;
@@ -154,6 +158,10 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
             }
             continue;
         }
+        if (d.foliage && foliage_triangles + gpu.triangles > FoliageMax()) {
+            ++foliage_dropped;
+            continue;
+        }
         if (frame_triangles + gpu.triangles > max_triangles) {
             ++dropped_draws;
             dropped_triangles += gpu.triangles;
@@ -170,12 +178,19 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
                                : e.parts.empty() ? 3 : 4;
             per_frame_reasons[reason] += gpu.triangles;
         }
+        if (d.foliage && out.opaque_triangles == ~0u) {
+            out.opaque_triangles = frame_triangles;
+        }
         gpu.triangle_offset = frame_triangles;
         gpu.out_base = frame_triangles;
         gpu.flags = probe_flag;
         frame_triangles += gpu.triangles;
+        foliage_triangles += d.foliage ? gpu.triangles : 0;
         dynamic_list.push_back(gpu);
         dynamic_keys.push_back(d.key);
+        if (d.foliage) {
+            continue; // never cached: its coverage trick needs the non-opaque geometry
+        }
         const bool big = too_big(e);
         if (!use_cache || e.split_pending || !e.parts.empty() ||
             !Rtao::Promotable(e, d.skinned, big && !chunking, settings.promote_after) ||
@@ -228,6 +243,7 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
         promo_list.push_back(world);
         promo_used += gpu.triangles;
     }
+    out.opaque_triangles = std::min(out.opaque_triangles, frame_triangles);
     const bool split_fetch_now = collect_split && !split_meshes.empty();
     out.split_fetch_now = split_fetch_now;
     if (split_fetch_now) {
@@ -285,7 +301,7 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
         ++skipped_topology;
         return;
     }
-    if (g.alpha_test && !settings.include_alpha) {
+    if (g.alpha_test && !settings.include_alpha && settings.foliage <= 0.0f) {
         ++skipped_alpha;
         return;
     }
@@ -363,6 +379,7 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     draw.base = g.key;
     draw.occurrence = occurrence;
     draw.skinned = g.skinned;
+    draw.foliage = g.alpha_test && !settings.include_alpha;
     draw.gpu = GpuGeometry{.store = g.store,
                           .vertices = g.vertices,
                           .instances = g.instances,

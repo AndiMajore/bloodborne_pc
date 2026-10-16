@@ -272,6 +272,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "margin") s.static_margin = std::clamp(value, 0.5f, 100.0f);
     else if (key == "rebuild") s.static_interval = std::clamp(u32(std::max(value, 0.0f)), 0u, 6000u);
     else if (key == "alpha") flag(s.include_alpha);
+    else if (key == "foliage") s.foliage = std::clamp(value, 0.0f, 1.0f);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);

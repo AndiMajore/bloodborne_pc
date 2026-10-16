@@ -121,7 +121,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     const auto trace_binding = [&](u32 index, vk::DescriptorType type) {
         auto b = binding(index, type);
         if (rt_pipeline_supported) {
-            b.stageFlags |= vk::ShaderStageFlagBits::eRaygenKHR;
+            b.stageFlags |= vk::ShaderStageFlagBits::eRaygenKHR | vk::ShaderStageFlagBits::eAnyHitKHR;
         }
         return b;
     };

@@ -226,6 +226,14 @@ static void SettingsParsing() {
     ApplyText(s, "rays=-3 stage=-1", reset);
     assert(s.rays == 1 && s.stage == 0);
     assert(!Apply(s, "nonsense", 1.0f));
+    // The foliage's per-hit probability: off by default, within [0, 1].
+    assert(s.foliage == 0.0f);
+    ApplyText(s, "foliage=0.35", reset);
+    assert(s.foliage == 0.35f);
+    ApplyText(s, "foliage=2", reset);
+    assert(s.foliage == 1.0f);
+    ApplyText(s, "foliage=-1", reset);
+    assert(s.foliage == 0.0f);
 }
 
 int main() {
