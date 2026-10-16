@@ -57,7 +57,9 @@ public:
     bool IsDumpShaders() { static const auto value = Flag("BB_DUMP_SHADERS", false); return value; }
     bool IsHdrAllowed() { static const auto value = Flag("BB_HDR", false); return value; }
     bool IsNullGPU() { static const auto value = Flag("BB_NULL_GPU", false); return value; }
-    bool IsPatchShaders() { return false; }
+    // bbport: BB_PATCH_SHADERS=1 loads user/shader/patch/<stage>_<hash>_<perm>.spv in place of the
+    // translated shader of that hash (PipelineCache::GetShaderPatch); for shader experiments.
+    bool IsPatchShaders() { static const auto value = Flag("BB_PATCH_SHADERS", false); return value; }
     bool IsPipelineCacheArchived() { return false; }
     bool IsPipelineCacheEnabled() { static const auto value = Flag("BB_PIPELINE_CACHE", true); return value; }
     bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("BB_READBACK_LINEAR", false); return value; }

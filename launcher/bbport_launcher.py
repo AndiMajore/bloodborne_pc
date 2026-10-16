@@ -35,6 +35,7 @@ from mods import discover as discover_mods  # noqa: E402
 import game_check  # noqa: E402
 import online  # noqa: E402  (the online module: addresses and the connection test)
 from patches import external_patches  # noqa: E402
+import shader_patches  # noqa: E402
 # Packaged (AppImage): generated files, saves and bbport.ini live in BB_DATA_DIR.
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
 DATA_DIR = Path(os.environ.get("BB_DATA_DIR", PORT_DIR))
@@ -182,6 +183,7 @@ DEFAULTS = {
     "user_dir": "",
     "mods_dir": "",
     "mods_enabled": True,
+    "shaders_dir": "",
     "ssgi": False,
     "ssgi_strength": 8.0,
     "ssgi_adaptive": 4.0,
@@ -308,6 +310,10 @@ def save_ini(values, lines):
     ini_path().write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def shaders_dir(settings):
+    return Path(settings.get("shaders_dir") or DATA_DIR / "shaders").expanduser()
+
+
 def patches_dir(settings):
     return Path(settings.get("patches_dir") or DATA_DIR / "patches").expanduser()
 
@@ -389,6 +395,14 @@ def game_environment(s):
                             {"rays": int(s.get("rtao_rays", 2)), "radius": float(s.get("rtao_radius", 1.5)),
                              "strength": float(s.get("rtao_strength", 1.0)), "far": distance,
                              "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)), "enabled": 1})
+    # Experimental shaders (shader packs): the enabled packs' .spv files go to <user>/shader/patch,
+    # and BB_PATCH_SHADERS=1 makes the port load them in place of its own translations.
+    if shader_patches.apply(shaders_dir(s), DATA_DIR / "shaders.json",
+                            settings_user_dir(s) / "shader" / "patch",
+                            DATA_DIR / "shaders_installed.json"):
+        env["BB_PATCH_SHADERS"] = "1"
+        # run.sh prints the names at startup (the log says which packs this session runs with).
+        env["BB_SHADER_PACKS"] = ", ".join(shader_patches.selected(shaders_dir(s), DATA_DIR / "shaders.json"))
     env["BB_PATCHES_DIR"] = str(patches_dir(s))
     env["BB_PATCHES_CONFIG"] = str(DATA_DIR / "patches.json")
     env["BB_LANGUAGE"] = s["language"]
@@ -752,6 +766,25 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.patch_list = FolderList(self.patches_group)
         self.refresh_patches()
         page.add(self.patches_group)
+
+        self.shaders_group = Adw.PreferencesGroup(
+            title=tr("Экспериментальные шейдеры"),
+            description=tr("Замены шейдеров игры, по папке на набор: в ней файлы .spv с именем "
+                           "<стадия>_0x<хэш>_<вариант>.spv (см. docs/DEBUGGING.md). Включённые наборы "
+                           "копируются в user/shader/patch при запуске; при совпадении файлов побеждает "
+                           "набор ниже в списке. Экспериментально: может испортить картинку."))
+        self.shaders_folder_row = Adw.ActionRow(title=tr("Папка шейдеров"))
+        self.shaders_folder_row.add_suffix(flat_button("folder-open-symbolic", tr("Выбрать папку шейдеров"),
+                                                       self.on_choose_shaders))
+        self.shaders_folder_row.add_suffix(flat_button("system-file-manager-symbolic",
+                                                       tr("Открыть папку шейдеров"),
+                                                       lambda _b: open_folder(self, shaders_dir(self.settings))))
+        self.shaders_folder_row.add_suffix(flat_button("view-refresh-symbolic", tr("Обновить список"),
+                                                       self.on_refresh_shaders))
+        self.shaders_group.add(self.shaders_folder_row)
+        self.shader_list = FolderList(self.shaders_group)
+        self.refresh_shaders()
+        page.add(self.shaders_group)
 
         ssgi = Adw.PreferencesGroup(
             title=tr("Экспериментальное освещение"),
@@ -1339,6 +1372,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["vk_validation"] = self.validation_row.get_active()
         s["extra_env"] = self.extra_row.get_text().strip()
         s["mods_enabled"] = self.mods_enabled_row.get_active()
+        self.save_shader_profile()
         s["ssgi"] = self.ssgi_row.get_active()
         s["ssgi_strength"] = float(self.ssgi_strength_row.get_value())
         s["ssgi_adaptive"] = float(self.ssgi_adaptive_row.get_value())
@@ -1434,6 +1468,44 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.refresh_mods()
             self.store()
         self.choose_folder(tr("Папка модов"), self.mods_dir(), chosen)
+
+    # --- experimental shaders (shader packs) ---------------------------------------------
+
+    def save_shader_profile(self):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        profile = {"disabled": [name for name, row in self.shader_list.rows if not row.get_active()]}
+        (DATA_DIR / "shaders.json").write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n",
+                                               encoding="utf-8")
+
+    def refresh_shaders(self):
+        self.shader_list.clear()
+        directory = shaders_dir(self.settings)
+        self.shaders_folder_row.set_subtitle(str(directory))
+        try:
+            profile = json.loads((DATA_DIR / "shaders.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            profile = {}
+        available = shader_patches.discover(directory)
+        for name in available:
+            files = shader_patches.pack_files(directory / name)
+            row = Adw.SwitchRow(title=name, subtitle=", ".join(f.name for f in files),
+                                active=name not in profile.get("disabled", []))
+            self.shader_list.add(name, row)
+        if not available:
+            self.shaders_folder_row.set_subtitle(f"{directory} — {tr('Наборов шейдеров нет')}")
+
+    def on_refresh_shaders(self, _button):
+        self.save_shader_profile()
+        self.refresh_shaders()
+
+    def on_choose_shaders(self, _button):
+        self.save_shader_profile()
+
+        def chosen(path):
+            self.settings["shaders_dir"] = path
+            self.refresh_shaders()
+            self.store()
+        self.choose_folder(tr("Папка шейдеров"), shaders_dir(self.settings), chosen)
 
     # --- third-party patches -------------------------------------------------------------
 

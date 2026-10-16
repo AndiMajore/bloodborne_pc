@@ -2,6 +2,7 @@
 // bbport render: saving to and preloading from the pipeline cache on disk (pipeline_store.h).
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <unordered_set>
 
@@ -178,6 +179,17 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             throw Serialization::CorruptData{"damaged SPIR-V in the shader cache"};
         }
         return false;
+    }
+    // bbport: BB_PATCH_SHADERS=1: a patch file replaces a cached translation as it replaces a
+    // fresh one (CompileModule).
+    if (EmulatorSettings.IsPatchShaders()) {
+        if (auto patch = GetShaderPatch(program->info.pgm_hash, program->info.hw_stage, perm_idx,
+                                        "spv")) {
+            std::printf("GPU: shader patch loaded for %s 0x%llx, cached pipeline (BB_PATCH_SHADERS)\n",
+                        fmt::format("{}", program->info.hw_stage).c_str(),
+                        (unsigned long long)program->info.pgm_hash);
+            spv = std::move(*patch);
+        }
     }
     // A module the driver rejects is a damaged entry (the cache is rebuilt), not a fatal error.
     const auto compile = [&] {

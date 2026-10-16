@@ -265,6 +265,12 @@ public:
         }
         cv.notify_one();
     }
+    /// bbport: every submitted job done (a shader module is about to be replaced: no job may
+    /// still create a pipeline from the old one).
+    void WaitIdle() {
+        std::unique_lock lk{mutex};
+        idle_cv.wait(lk, [&] { return jobs.empty() && running == 0; });
+    }
 
 private:
     void Run() {
@@ -278,14 +284,22 @@ private:
                 }
                 job = std::move(jobs.front());
                 jobs.pop_front();
+                ++running;
             }
             job();
+            {
+                std::scoped_lock lk{mutex};
+                --running;
+            }
+            idle_cv.notify_all();
         }
     }
     std::mutex mutex;
     std::condition_variable cv;
+    std::condition_variable idle_cv;
     std::deque<std::function<void()>> jobs;
     std::vector<std::thread> workers;
+    u32 running = 0;
     bool stop = false;
 };
 
@@ -711,6 +725,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                                               sel.runtime_infos, sel.fetch_shader, sel.modules,
                                               sdata, false);
     PipelineStore::SaveGraphics(sel.graphics_key, pipeline_hash, sdata);
+    for (const vk::ShaderModule module : sel.modules) {
+        NoteModulePipeline(module, sel.graphics_key);
+    }
     sel.fetch_shader.reset();
     return slot.get();
 }
@@ -729,6 +746,9 @@ const GraphicsPipeline* PipelineCache::CompileInBackground(const PipelineSelecti
     }
     auto job = std::make_shared<PendingPipeline>();
     pending_graphics.emplace(selection.graphics_key, job);
+    for (const vk::ShaderModule module : selection.modules) {
+        NoteModulePipeline(module, selection.graphics_key);
+    }
     ++async_started;
     ++g_bb_compiles;
     compiler->Submit([this, job, key = selection.graphics_key, infos = selection.infos,
@@ -819,6 +839,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
                                                        *pipeline_cache, compute_key, *sel.infos[0],
                                                        sel.modules[0], sdata, false);
         PipelineStore::SaveCompute(compute_key, sdata);
+        NoteModulePipeline(sel.modules[0], compute_key);
     }
     return it->second.get();
 }
@@ -1176,7 +1197,17 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
-    const vk::ShaderModule module = CompileSPV(spv, instance.GetDevice());
+    // bbport: BB_PATCH_SHADERS=1: a patch file replaces the translation (the translation is still
+    // what the shader cache keeps).
+    const auto patch = EmulatorSettings.IsPatchShaders()
+                           ? GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv")
+                           : std::nullopt;
+    if (patch) {
+        std::printf("GPU: shader patch loaded for %s 0x%llx (BB_PATCH_SHADERS)\n",
+                    fmt::format("{}", info.hw_stage).c_str(), (unsigned long long)info.pgm_hash);
+    }
+    const vk::ShaderModule module = CompileSPV(patch ? std::span<const u32>(*patch) : std::span<const u32>(spv),
+                                               instance.GetDevice());
     PipelineStore::SaveShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     SetObjectName(instance.GetDevice(), module, GetShaderName(info.hw_stage, info.pgm_hash, perm_idx));
     return module;
@@ -1307,6 +1338,142 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     }
     return {&info, modules[perm_idx].module, modules[perm_idx].spec.fetch_shader_data,
             HashCombine(params.hash, perm_idx)};
+}
+
+void PipelineCache::NoteModulePipeline(vk::ShaderModule module,
+                                       std::variant<GraphicsPipelineKey, ComputePipelineKey> key) {
+    if (module && EmulatorSettings.IsPatchShaders()) {
+        module_related_pipelines[VkShaderModule(module)].push_back(key);
+    }
+}
+
+// bbport: BB_PATCH_SHADERS=1: a patch file (user/shader/patch/<stage>_<hash>_<perm>.spv) written
+// while the game runs replaces that shader at once: its module is swapped and the pipelines using
+// it are dropped and rebuilt (ReplaceShader). Edit, compile, look; no restart. GPU thread, the
+// owner of the pipeline maps; once a second. Files present at the first scan were loaded at
+// startup. The GPU is drained first, as the pipelines being dropped may be in flight.
+void PipelineCache::PollShaderPatches() {
+    if (!EmulatorSettings.IsPatchShaders()) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last_poll{};
+    static std::unordered_map<std::string, std::filesystem::file_time_type> seen;
+    static bool first_scan = true;
+    const auto now = Clock::now();
+    if (now - last_poll < std::chrono::seconds(1)) {
+        return;
+    }
+    last_poll = now;
+    using namespace Common::FS;
+    const auto patch_dir = GetUserPath(PathType::ShaderDir) / "patch";
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(patch_dir, ec)) {
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".spv") {
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+        const auto mtime = entry.last_write_time(ec);
+        const auto it = seen.find(name);
+        if (it == seen.end()) {
+            seen.emplace(name, mtime);
+            if (first_scan) {
+                continue;
+            }
+        } else if (it->second == mtime) {
+            continue;
+        } else {
+            it->second = mtime;
+        }
+        // <stage>_0x<hash>_<perm>.spv
+        const auto us1 = name.find('_');
+        const auto us2 = name.rfind('_');
+        if (us1 == std::string::npos || us2 == std::string::npos || us2 <= us1) {
+            continue;
+        }
+        const std::string stage_name = name.substr(0, us1);
+        const u64 hash = std::strtoull(name.substr(us1 + 1, us2 - us1 - 1).c_str(), nullptr, 16);
+        const size_t perm = std::strtoull(name.substr(us2 + 1).c_str(), nullptr, 10);
+        const auto found = program_cache.find(hash);
+        if (found == program_cache.end() || perm >= found->second->modules.size() ||
+            fmt::format("{}", found->second->info.hw_stage) != stage_name) {
+            std::printf("GPU: shader patch %s: no such shader is loaded\n", name.c_str());
+            continue;
+        }
+        const auto patch = GetShaderPatch(hash, found->second->info.hw_stage, perm, "spv");
+        if (!patch || patch->size() < 5 || (*patch)[0] != 0x07230203u) {
+            std::printf("GPU: shader patch %s: not a SPIR-V file (still being written?)\n",
+                        name.c_str());
+            continue;
+        }
+        scheduler.Finish();
+        if (ReplaceShader(found->second->modules[perm].module, *patch)) {
+            std::printf("GPU: shader patch reloaded: %s\n", name.c_str());
+        }
+    }
+    first_scan = false;
+}
+
+std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
+                                                             std::span<const u32> spv_code) {
+    std::optional<vk::ShaderModule> new_module{};
+    // bbport: no background job may still build a pipeline from the old module; the old module
+    // and pipelines are retired, not destroyed (recorded commands, prepared draws and the render
+    // state memo may still name them: destroying them at once or a submission later crashed the
+    // driver in a descriptor push with a dead pipeline layout).
+    if (compiler) {
+        compiler->WaitIdle();
+    }
+    const auto device = instance.GetDevice();
+    {
+        std::unique_lock lk{programs_mutex};
+        for (const auto& [_, program] : program_cache) {
+            for (auto& m : program->modules) {
+                if (m.module == module) {
+                    retired_modules.push_back(m.module);
+                    m.module = CompileSPV(spv_code, device);
+                    new_module = m.module;
+                }
+            }
+        }
+    }
+    if (const auto related = module_related_pipelines.find(VkShaderModule(module));
+        related != module_related_pipelines.end()) {
+        for (auto& key : related->second) {
+            if (std::holds_alternative<GraphicsPipelineKey>(key)) {
+                auto& graphics_key = std::get<GraphicsPipelineKey>(key);
+                if (auto it = graphics_pipelines.find(graphics_key); it != graphics_pipelines.end()) {
+                    retired_graphics_pipelines.push_back(std::move(it.value()));
+                    graphics_pipelines.erase(it);
+                }
+                pending_graphics.erase(graphics_key); // built from the old module, never used
+            } else {
+                auto& key_compute = std::get<ComputePipelineKey>(key);
+                if (auto it = compute_pipelines.find(key_compute); it != compute_pipelines.end()) {
+                    retired_compute_pipelines.push_back(std::move(it.value()));
+                    compute_pipelines.erase(it);
+                }
+            }
+        }
+        module_related_pipelines.erase(related);
+    }
+    return new_module;
+}
+
+std::optional<std::vector<u32>> PipelineCache::GetShaderPatch(u64 hash, Shader::HwStage stage,
+                                                              size_t perm_idx,
+                                                              std::string_view ext) {
+    using namespace Common::FS;
+    const auto patch_dir = GetUserPath(PathType::ShaderDir) / "patch";
+    const auto filepath = patch_dir / fmt::format("{}.{}", GetShaderName(stage, hash, perm_idx), ext);
+    std::error_code ec;
+    if (!std::filesystem::exists(filepath, ec)) {
+        return {};
+    }
+    const auto file = IOFile{filepath, FileAccessMode::Read};
+    std::vector<u32> code(file.GetSize() / sizeof(u32));
+    file.Read(code);
+    return code;
 }
 
 std::string PipelineCache::GetShaderName(HwStage stage, u64 hash, std::optional<size_t> perm) {
