@@ -203,5 +203,18 @@ class IntelTonemapTests(unittest.TestCase):
         self.assertIn(patches.INTEL_TONEMAP, names)
 
 
+
+class GxCommandHeapTests(unittest.TestCase):
+    def test_on_unless_the_environment_turns_it_off(self):
+        self.assertTrue(patches.gx_command_heap({}))
+        self.assertFalse(patches.gx_command_heap({'BB_GX_COMMAND_HEAP': '0'}))
+
+    def test_both_heaps_get_1_mib(self):
+        writes = dict(compile_patches(XML, [patches.GX_COMMAND_HEAP], '01.09', SEGMENTS))
+        # The imm32 of `mov edx, 0x40000` before each heap init (eboot vaddr 0x2195c09/0x2195c46).
+        for address in (0x2595c0a - EBOOT_BASE, 0x2595c47 - EBOOT_BASE):
+            self.assertEqual(struct.unpack('<I', writes[address])[0], 0x100000)
+
+
 if __name__ == '__main__':
     unittest.main()
