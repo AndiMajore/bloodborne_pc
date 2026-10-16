@@ -36,6 +36,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
     camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
     camera_motion->SetObjectMotion(object_motion.get());
+    rtao = std::make_unique<RayTracedAO>(instance, scheduler, texture_cache, buffer_cache, runtime,
+                                         *camera_motion, *object_motion);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets);
     prompts = std::make_unique<ButtonPrompts>(instance, scheduler, buffer_cache);
@@ -150,9 +152,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_started = false;
         upscaler->OnDisplayPassStart(regs.color_buffers[0].Address());
         camera_motion->OnDisplayPass(cb_descs[0].first);
+        rtao->OnFrameStart();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
+            rtao->InvalidateHistory();
         }
         camera_motion->SetJitter(upscaler->Jitter());
         object_motion->OnFrameStart();
@@ -228,11 +232,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // Without a character-size skeleton the draw is gated on its bone palette changing
         // since last frame (model constants follow the camera, the palette does not). The
         // check comes first: most gated draws are static world pieces with long index lists.
-        static const bool all_motion = [] {
+        static const bool all_motion_env = [] {
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        bool gated = !all_motion;
+        bool gated = !all_motion_env;
+        // bbport: a pipeline with the RTAO's vertex stores only (no motion output, key 2): no
+        // motion history, the draw's positions are captured for the RTAO alone.
+        const bool capture_pipeline = pipeline->GetGraphicsKey().motion_vectors == 2;
+        // A character-size skeleton: the RT cache never keeps such draws. Small palettes are on
+        // static world pieces too (the motion gate above); the cache's own check sorts them out.
+        bool skinned = false;
         u64 palette = 0;
         for (const auto& resource : vs.buffers) {
             if (resource.IsSpecial()) continue;
@@ -242,6 +252,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const auto role = Motion::ClassifyBuffer(size);
             if (role == Motion::BufferRole::Skeleton) {
                 gated = false;
+                skinned = true;
                 break;
             }
             const VAddr address = buffer.base_address;
@@ -253,13 +264,18 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
         }
         push_data.motion_param = 0;
-        if (!gated || object_motion->Moving({.shader = vs.pgm_hash,
-                                             .geometry = motion_geometry,
-                                             .indices = index_address,
-                                             .index_count = regs.num_indices,
-                                             .instances = regs.num_instances.NumInstances(),
-                                             .first_instance = first_instance},
-                                            palette)) {
+        const bool motion =
+            !capture_pipeline && (!gated || object_motion->Moving({.shader = vs.pgm_hash,
+                                                                   .geometry = motion_geometry,
+                                                                   .indices = index_address,
+                                                                   .index_count = regs.num_indices,
+                                                                   .instances = regs.num_instances.NumInstances(),
+                                                                   .first_instance = first_instance},
+                                                                  palette));
+        // Draws the motion path leaves out: a store without history, for the RTAO only (the
+        // fragment output is that of a draw without motion, as without the RTAO).
+        const bool capture = !motion && gbuffer_draw && ObjectMotion::RtaoCapture() && rtao->Active();
+        if (motion || capture) {
             Motion::VertexRange range{base_vertex, regs.num_indices};
             u64 topology = 0;
             if (is_indexed) {
@@ -287,7 +303,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     topology = scanned.topology;
                 }
             }
-            push_data.motion_param = object_motion->PrepareDraw({
+            const ObjectMotion::DrawInfo motion_info{
                 .shader = vs.pgm_hash,
                 .geometry = motion_geometry,
                 .indices = index_address,
@@ -296,7 +312,41 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .instances = regs.num_instances.NumInstances(),
                 .first_instance = first_instance,
                 .vertices = range,
-            });
+            };
+            Motion::History::Allocation alloc{};
+            push_data.motion_param = motion ? object_motion->PrepareDraw(motion_info, &alloc)
+                                            : object_motion->PrepareCapture(motion_info, alloc);
+            // Only the G-buffer draws: other passes (shadow maps) store positions in another
+            // projection, which would collapse into a sheet in front of the camera.
+            if (rtao->Active() && gbuffer_draw && push_data.motion_param && alloc.store) {
+                const u64 index_bytes = u64(regs.num_indices) * index_size;
+                rtao->AddGeometry({
+                    .store = alloc.store,
+                    .vertices = alloc.vertices,
+                    .instances = alloc.instances,
+                    .first_vertex = alloc.first_vertex,
+                    .index_address = is_indexed ? index_bind.address : 0,
+                    .index_count = regs.num_indices,
+                    .index16 = is_indexed && index_size == 2,
+                    .base_vertex = s32(base_vertex),
+                    .restart = is_indexed && regs.enable_primitive_restart != 0,
+                    .triangle_list = regs.primitive_type == Gcn::PrimitiveType::TriangleList,
+                    .non_indexed = !is_indexed,
+                    .alpha_test = (pipeline->HasStage(Shader::SwStage::Fragment) &&
+                                   pipeline->GetStage(Shader::SwStage::Fragment).has_discard) ||
+                                  regs.depth_shader_control.kill_enable != 0,
+                    .depth_write = regs.depth_control.depth_enable && regs.depth_control.depth_write_enable,
+                    // The draw's identity across frames (the occurrence is added by the RTAO).
+                    .key = XXH3_64bits_withSeed(&index_address, sizeof(index_address),
+                                                vs.pgm_hash ^ (motion_geometry * 0x9E3779B97F4A7C15ull) ^
+                                                    (u64(regs.num_indices) << 32) ^
+                                                    (u64(regs.num_instances.NumInstances()) << 8) ^
+                                                    u64(u32(base_vertex)) ^ (u64(first_instance) << 48)),
+                    .skinned = skinned,
+                    .index_guest = is_indexed ? index_address : 0,
+                    .index_bytes = is_indexed ? u32(index_bytes) : 0u,
+                });
+            }
         }
     }
     // Geometry drawn with the scene depth is jittered, full-screen passes are not (a shifted

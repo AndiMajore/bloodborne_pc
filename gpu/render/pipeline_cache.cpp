@@ -20,6 +20,7 @@
 #include "bbport_sections.h"
 #include "bbport_toggles.h"
 #include "buffers/buffer_cache.h"
+#include "upscale/vk_object_motion.h"
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -371,7 +372,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
             !instance.IsDepthClipControlSupported() &&
             regs.clipper_control.clip_space == Gcn::ClipSpace::MinusWToW;
         vs.clip_disable = regs.IsClipDisabled();
-        vs.motion_vectors = sel.motion;
+        vs.motion_vectors = sel.motion || sel.capture;
         break;
     }
     case HwStage::Fragment: {
@@ -882,6 +883,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         db.NumSamples() == 1 && !regs.IsClipDisabled() &&
         regs.stage_enable.raw == Gcn::ShaderStageEnable::VgtStages::Vs;
     sel.motion = false;
+    sel.capture = false;
 
     if (!RefreshGraphicsStages(sel)) {
         return false;
@@ -936,7 +938,11 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         if (all_motion) {
             sel.motion = true;
         }
-        if (sel.motion && !RefreshGraphicsStages(sel)) {
+        // bbport: the ray-traced AO needs every G-buffer draw's positions. Pipelines the motion
+        // path leaves out get the vertex stores only: their fragment shader, attachments and
+        // the motion image stay as without the RTAO (key value 2).
+        sel.capture = !sel.motion && ObjectMotion::RtaoCapture();
+        if ((sel.motion || sel.capture) && !RefreshGraphicsStages(sel)) {
             return false;
         }
     }
@@ -965,6 +971,9 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         key.num_samples = std::max(key.num_samples, color_samples);
     }
 
+    if (sel.capture) {
+        key.motion_vectors = 2; // vertex stores only: no attachment (see above)
+    }
     if (sel.motion) {
         constexpr u32 mv = Shader::MotionVectors::Output;
         key.motion_vectors = 1;

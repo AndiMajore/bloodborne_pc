@@ -216,6 +216,18 @@ public:
     bool IsDepthRangeUnrestrictedSupported() const {
         return ext.depth_range_unrestricted;
     }
+    /// bbport: ray queries and acceleration structures (ray-traced AO, render/vk_rtao.h).
+    bool IsRayQuerySupported() const noexcept {
+        return ext.ray_query;
+    }
+    /// bbport: VK_KHR_ray_tracing_position_fetch (it defines the BLAS flag ALLOW_DATA_ACCESS).
+    bool IsRayTracingPositionFetchSupported() const noexcept {
+        return ext.position_fetch;
+    }
+    /// bbport: VK_KHR_ray_tracing_pipeline (the RTAO trace's pipeline variant).
+    bool IsRayTracingPipelineSupported() const noexcept {
+        return ext.ray_tracing_pipeline;
+    }
     bool IsExtendedDynamicState3Supported() const {
         return ext.dynamic_state_3;
     }
@@ -348,6 +360,7 @@ private:
             workgroup_layout, view_2d_of_3d, image_view_min_lod, memory_budget, memory_fd,
             dma_buf, memory_host, compute_derivatives, mixed_float_dot, cooperative_matrix,
             float8, shader_clock;
+        bool ray_query, ray_tracing_pipeline, position_fetch; // bbport: the ray-traced AO
     };
 
     vk::UniqueInstance instance;
