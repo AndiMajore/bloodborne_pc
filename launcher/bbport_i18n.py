@@ -44,6 +44,17 @@ EN = {
         "tracing, an upscaler with object motion vectors and SSAO turned on. 0.6-1.6 ms per "
         "frame on an RX 9070 XT; the values also change live through user/rtao.txt.",
     "Затенение трассировкой лучей (RTAO)": "Ray-traced ambient occlusion (RTAO)",
+    "Недоступно: нужна трассировка лучей Vulkan (AMD RX 6000+, NVIDIA RTX, Intel Arc).":
+        "Not available: needs Vulkan ray tracing (AMD RX 6000+, NVIDIA RTX, Intel Arc).",
+    "Недоступно: эта видеокарта только эмулирует трассировку лучей, это отняло бы большую "
+    "часть FPS.":
+        "Not available: this GPU only emulates ray tracing, which would cost most of the frame rate.",
+    "Недоступно: нужно не меньше 4 ГБ видеопамяти.": "Not available: needs at least 4 GB of video memory.",
+    "Не проверено на этой видеокарте.": "Untested on this GPU.",
+    "Медленнее на этой видеокарте (2–4 мс на кадр).": "Slower on this GPU (2-4 ms per frame).",
+    "Нужен апскейлер (FSR, DLSS или TAA).": "Needs an upscaler (FSR, DLSS or TAA).",
+    "Нужны векторы движения объектов (раздел апскейлера).": "Needs object motion vectors (upscaler section).",
+    "Нужно включённое затенение SSAO (эффекты игры).": "Needs the game's SSAO on (game effects).",
     "Качество": "Quality",
     "Низкое": "Low",
     "Среднее": "Medium",

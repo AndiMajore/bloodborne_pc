@@ -531,6 +531,28 @@ def connected_displays():
             for number, (name, size, primary) in enumerate(rows, 1)]
 
 
+def rt_capability():
+    """The RTAO class of the game's GPU (bb-gpu-capabilities --rt: none, emulated, nomem,
+    untested, slow, ok), "" if unknown."""
+    tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+    try:
+        run = subprocess.run([str(tool), "--rt"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return run.stdout.split("\t", 1)[0].strip() if run.returncode == 0 else ""
+
+
+# The RTAO switch's subtitle by GPU class (ticket 43): True where the switch is disabled.
+RTAO_GPU_NOTES = {
+    "none": (True, "Недоступно: нужна трассировка лучей Vulkan (AMD RX 6000+, NVIDIA RTX, Intel Arc)."),
+    "emulated": (True, "Недоступно: эта видеокарта только эмулирует трассировку лучей, это отняло "
+                       "бы большую часть FPS."),
+    "nomem": (True, "Недоступно: нужно не меньше 4 ГБ видеопамяти."),
+    "untested": (False, "Не проверено на этой видеокарте."),
+    "slow": (False, "Медленнее на этой видеокарте (2–4 мс на кадр)."),
+}
+
+
 class FolderList:
     """A preferences group with a folder row and one switch row per item below it."""
 
@@ -786,6 +808,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.rtao_row.connect("notify::active", rtao_rows_sensitive)
         rtao_value_changed()
         rtao_rows_sensitive()
+        self.rt_class = rt_capability()
         page.add(rtao)
 
         screen = Adw.PreferencesGroup(title=tr("Экран"))
@@ -921,6 +944,10 @@ class LauncherWindow(Adw.ApplicationWindow):
                                     "dvdroot_ps4 игры или модом; без неё патч не применяется"))
             self.effect_rows[key] = row
             effects.add(row)
+        for row, signal in ((self.upscaler_row, "notify::selected"), (self.motion_row, "notify::active"),
+                            (self.effect_rows["effect_ssao"], "notify::active")):
+            row.connect(signal, lambda *_: self.update_rtao_gate())
+        self.update_rtao_gate()
         # The title's "play online / play offline": the port has no PSN.
         self.skip_network_row = Adw.SwitchRow(
             title=tr("Пропускать выбор «по сети / вне сети»"),
@@ -1052,6 +1079,22 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.settings["user_dir"] = ""
         self.update_user_status()
         self.store()
+
+    def update_rtao_gate(self):
+        """The RTAO switch: off and disabled when the GPU cannot run it or a requirement (an
+        upscaler with object motion, the game's SSAO) is off; the subtitle says why."""
+        disabled, note = RTAO_GPU_NOTES.get(self.rt_class, (False, None))
+        if not disabled:
+            if combo_value(self.upscaler_row) == "off":
+                disabled, note = True, "Нужен апскейлер (FSR, DLSS или TAA)."
+            elif not self.motion_row.get_active():
+                disabled, note = True, "Нужны векторы движения объектов (раздел апскейлера)."
+            elif not self.effect_rows["effect_ssao"].get_active():
+                disabled, note = True, "Нужно включённое затенение SSAO (эффекты игры)."
+        if disabled:
+            self.rtao_row.set_active(False)
+        self.rtao_row.set_sensitive(not disabled)
+        self.rtao_row.set_subtitle(tr(note) if note else "BB_RTAO")
 
     def update_upscaler_status(self):
         value = combo_value(self.upscaler_row)
