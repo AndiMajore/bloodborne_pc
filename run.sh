@@ -59,6 +59,9 @@ fi
 if [[ -n ${BB_SHADER_PACKS:-} ]]; then
     echo "Shader packs: $BB_SHADER_PACKS (BB_PATCH_SHADERS=1; files in the user folder's shader/patch)"
 fi
+if [[ -n ${BB_SHADER_PACK_NOTES:-} ]]; then
+    echo "Shader packs fitted to this version: $BB_SHADER_PACK_NOTES"
+fi
 if [[ -z ${PYTHON:-} ]]; then
     PYTHON=$(command -v python3 || true)
     if [[ -z $PYTHON ]]; then
