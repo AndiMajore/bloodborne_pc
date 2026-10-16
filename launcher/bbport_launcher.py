@@ -397,10 +397,15 @@ def game_environment(s):
                              "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)), "enabled": 1})
     # Experimental shaders (shader packs): the enabled packs' .spv files go to <user>/shader/patch,
     # and BB_PATCH_SHADERS=1 makes the port load them in place of its own translations.
+    # Each file is fitted to this version's own translation of its shader (shader cache): 0.6 has
+    # images and samplers one binding higher than 0.51; what does not fit is left out.
+    pack_notes = []
     if shader_patches.apply(shaders_dir(s), DATA_DIR / "shaders.json",
                             settings_user_dir(s) / "shader" / "patch",
-                            DATA_DIR / "shaders_installed.json"):
+                            DATA_DIR / "shaders_installed.json", pack_notes):
         env["BB_PATCH_SHADERS"] = "1"
+    if pack_notes:
+        env["BB_SHADER_PACK_NOTES"] = "; ".join(pack_notes)
         # run.sh prints the names at startup (the log says which packs this session runs with).
         env["BB_SHADER_PACKS"] = ", ".join(shader_patches.selected(shaders_dir(s), DATA_DIR / "shaders.json"))
     env["BB_PATCHES_DIR"] = str(patches_dir(s))
