@@ -153,6 +153,14 @@ double HeapScale(std::uint64_t heap_budget, std::uint64_t footprint) {
     return scale < MinScale ? 0.0 : scale;
 }
 
+double FrameGrowth(std::uint64_t heap_budget, std::uint64_t footprint, std::uint64_t per_frame) {
+    const double room = GrowShare * double(heap_budget) - double(footprint);
+    if (per_frame == 0 || room <= 0.0) {
+        return 1.0;
+    }
+    return std::min(MaxFrameGrowth, 1.0 + room / double(per_frame));
+}
+
 void RangeAllocator::Reset(u32 new_size) {
     free_ranges.clear();
     size = new_size;
@@ -208,7 +216,7 @@ u32 RangeAllocator::LargestFree() const {
     return largest;
 }
 
-Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match,
+Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match, bool multi_copy,
                     const std::array<float, 3>& camera) {
     if (!state.have_stats) {
         state.stats = stats;
@@ -218,6 +226,9 @@ Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_mat
     }
     if (StatsMatch(state.stats, stats, camera)) {
         ++state.stable; // the reference stays the first observation: slow drift is not static
+        if (state.evictions >= 3 && state.stable >= ForgiveAfter) {
+            state.evictions = 2; // still for a while: one more chance
+        }
         return Observation::Same;
     }
     if (sibling_match) {
@@ -227,7 +238,7 @@ Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_mat
     const bool was_cached = state.cached;
     if (was_cached) { // cached, then it moved (a door, a lift): back to per frame
         state.cached = false;
-        ++state.evictions;
+        state.evictions += multi_copy ? 0 : 1;
     }
     state.stats = stats;
     state.stable = 1;

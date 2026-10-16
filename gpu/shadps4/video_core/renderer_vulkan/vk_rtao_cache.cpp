@@ -104,10 +104,13 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
     // Probing costs a pass over the draw's indices: cached draws are rechecked every 8th pass,
     // draws waiting for a build slot every 4th; characters and draws that kept changing never.
     const auto probe_now = [&](const Draw& d, const CacheEntry& e) {
-        if (d.skinned || d.foliage || e.evictions >= 3) {
+        if (d.skinned || d.foliage) {
             return false;
         }
         const u32 phase = u32(d.key >> 7) + probe_id;
+        if (e.evictions >= 3) {
+            return phase % 64 == 0; // kept changing: an occasional look (Rtao::ForgiveAfter)
+        }
         if (!e.parts.empty()) {
             return phase % 8 == 0;
         }

@@ -239,13 +239,14 @@ bool RayTracedAO::CreateAccelerationStructures() {
         sizes.buildScratchSize += sizes.buildScratchSize / 10;
         return sizes;
     };
-    // Device memory at a scale of the default budgets (all of it scales with them).
-    const auto footprint = [&](double scale) {
-        const auto frame_sizes = per_frame_sizes(u32(max_triangles * scale));
+    // Device memory at a scale of the default budgets (all of it scales with them); the per-frame
+    // budget by another factor (`growth`, Rtao::FrameGrowth).
+    const auto footprint = [&](double scale, double growth = 1.0) {
+        const auto frame_sizes = per_frame_sizes(u32(max_triangles * scale * growth));
         const auto static_sizes = static_sizes_for(u32(static_max * scale));
         return frame_sizes.accelerationStructureSize + static_sizes.accelerationStructureSize +
                std::max(frame_sizes.buildScratchSize, static_sizes.buildScratchSize) +
-               u64(pool_triangles * scale) * 36 + u64(max_triangles * scale + PromoTriangles) * 36 +
+               u64(pool_triangles * scale) * 36 + u64(max_triangles * scale * growth + PromoTriangles) * 36 +
                u64(object_motion.CapturePerFrame()) * 2 * 16;
     };
     // At most Rtao::HeapShare of the device heap's budget (BB_RTAO_HEAP_MB: pretend a budget, to
@@ -276,10 +277,14 @@ bool RayTracedAO::CreateAccelerationStructures() {
             max_triangles = u32(max_triangles * scale);
             static_max = u32(static_max * scale);
             pool_triangles = u32(pool_triangles * scale);
+        } else if (EnvU32("BB_RTAO_MAX_TRIANGLES", 0) == 0) {
+            // Room left (16 GB cards): a larger per-frame budget for crowded scenes.
+            const double growth = Rtao::FrameGrowth(heap, full, footprint(1.0, 2.0) - full);
+            max_triangles = u32(max_triangles * growth);
         }
         std::printf("RTAO: device heap budget %llu MiB: buffers %llu MiB (scale %.2f: per-frame %u, static %u, "
                     "pool %u triangles)\n", (unsigned long long)(heap >> 20),
-                    (unsigned long long)(footprint(1.0) >> 20), scale, max_triangles, static_max,
+                    (unsigned long long)(footprint(1.0) >> 20), std::min(scale, 1.0), max_triangles, static_max,
                     pool_triangles);
     }
     if (!CreateBuffer(table_buffer, vk::DeviceSize(TableSlots) * max_geometries * sizeof(GpuGeometry),
@@ -293,6 +298,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
                       BU::eAccelerationStructureBuildInputReadOnlyKHR, true) ||
         !CreateBuffer(probe_buffer, vk::DeviceSize(ProbeSlots) * max_geometries * sizeof(ProbeStats),
                       BU::eStorageBuffer, true) ||
+        !CreateBuffer(extent_buffer, vk::DeviceSize(max_geometries) * 12, BU::eStorageBuffer, true, 0, false, true) ||
         !CreateBuffer(constants_buffer, vk::DeviceSize(TableSlots) * ConstantsStride, BU::eUniformBuffer, true) ||
         !CreateBuffer(index_ring, vk::DeviceSize(TableSlots) * IndexRingSlot, BU::eStorageBuffer, true) ||
         !CreateBuffer(probe_chunks, vk::DeviceSize(TableSlots) * MaxProbeChunks * 8, BU::eStorageBuffer, true) ||
@@ -603,7 +609,9 @@ void RayTracedAO::ReadProbes(u32 ring) {
                           Rtao::StatsMatch(other->second.stats, s, camera_world);
             }
         }
-        switch (Rtao::Observe(e, s, sibling, camera_world)) {
+        const auto copies = max_copies.find(e.base);
+        const bool multi_copy = copies != max_copies.end() && copies->second > 1;
+        switch (Rtao::Observe(e, s, sibling, multi_copy, camera_world)) {
         case Rtao::Observation::First:
             break;
         case Rtao::Observation::Same:

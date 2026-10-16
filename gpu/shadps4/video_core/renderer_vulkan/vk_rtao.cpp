@@ -50,6 +50,7 @@ void RayTracedAO::OnFrameStart() {
     static u32 reports = 0;
     WriteDump();
     ReportReadback();
+    ReportExtents();
     if (frame % 600 == 0 && frame) {
         std::printf("RTAO: frame %u: %zu draws, %u triangles (%u draws, %u triangles dropped: budget %u; "
                     "%u strips/other, %u alpha-tested, %u without depth write, %u without index address "
@@ -386,6 +387,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     in.blas_scratch_address = blas_scratch.address;
     in.tlas_scratch_address = tlas_scratch.address;
     in.pool_copies = std::move(pool_copies);
+    SampleExtents(in, classified);
     FillConstants(in, slot, read, probe_id);
     RecordPasses(in);
 }

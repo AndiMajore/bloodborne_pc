@@ -90,6 +90,13 @@ inline constexpr double HeapShare = 0.12, MinScale = 1.0 / 3.0;
 /// 0 when the scale would fall below MinScale (too little memory: the RTAO stays off).
 double HeapScale(std::uint64_t heap_budget, std::uint64_t footprint);
 
+/// Where everything fits (scale 1), the per-frame budget may grow up to MaxFrameGrowth times
+/// (crowded scenes overflow 1.5M triangles: draws drop out and their AO pops) while the buffers
+/// stay within GrowShare of the heap: `footprint` at the defaults, `per_frame` the part of it
+/// that grows with the per-frame budget. Returns the growth, 1 when there is no room.
+inline constexpr double GrowShare = 0.16, MaxFrameGrowth = 2.0;
+double FrameGrowth(std::uint64_t heap_budget, std::uint64_t footprint, std::uint64_t per_frame);
+
 /// First-fit ranges in a fixed pool (the cached world-space triangles); freed neighbours merge.
 class RangeAllocator {
 public:
@@ -109,18 +116,24 @@ private:
 struct CacheState {
     u64 base = 0;
     u32 stable = 0;     // consecutive direct matching observations
-    u32 evictions = 0;  // cached, then changed: three times and never again
+    u32 evictions = 0;  // cached, then changed: three times and it stays per frame until it has
+                        // been still for ForgiveAfter observations
     bool have_stats = false;
     ProbeStats stats{}; // the reference: the first observation of the current run
     bool cached = false;
 };
 
 enum class Observation { First, Same, Reordered, Changed, ChangedEvict };
+/// Matching observations after which a draw that kept changing gets another chance (probed every
+/// 64th pass then: about 20 s).
+inline constexpr u32 ForgiveAfter = 16;
 
 /// One probe result for a draw: `sibling_match` says it matches another copy of the same mesh (the
 /// game reordered its draws). Updates the state; ChangedEvict means the caller must drop the
-/// draw's BLAS (and the state is no longer cached).
-Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match,
+/// draw's BLAS (and the state is no longer cached). `multi_copy`: the mesh is drawn more than once
+/// a frame, so a change is most likely a copy culled or uncovered (the slots after it shift), not
+/// a move: it is evicted all the same but not counted against the draw.
+Observation Observe(CacheState& state, const ProbeStats& stats, bool sibling_match, bool multi_copy,
                     const std::array<float, 3>& camera);
 
 /// May the draw get its own BLAS now?

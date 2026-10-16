@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <vk_mem_alloc.h>
 
@@ -106,6 +107,71 @@ void RayTracedAO::ReportReadback() {
                     "(%.2f %.2f %.2f)\n",
                     readback_frame, count, valid, finite, valid - finite, zmin, zmax, xymax, v[0], v[1], v[2],
                     v[3], v[4], v[5], v[6], v[7], v[8]);
+}
+
+void RayTracedAO::SampleExtents(PassInputs& in, const FrameDraws& classified) {
+    in.extent_address = 0;
+    if (extent_pending || frame % 120 != 0 || geometries.empty()) {
+        return;
+    }
+    auto* words = static_cast<u32*>(extent_buffer.mapped);
+    for (size_t i = 0; i < geometries.size(); ++i) {
+        words[i * 3] = 0;
+        words[i * 3 + 1] = 0;
+        words[i * 3 + 2] = ~0u;
+    }
+    vmaFlushAllocation(instance.GetAllocator(), extent_buffer.allocation, 0, geometries.size() * 12);
+    std::unordered_map<u64, const Draw*> by_key;
+    for (const Draw& d : draws) {
+        by_key.emplace(d.key, &d);
+    }
+    extent_entries.clear();
+    for (size_t i = 0; i < geometries.size(); ++i) {
+        const bool dynamic = i < classified.dynamic_keys.size();
+        const auto it = dynamic ? by_key.find(classified.dynamic_keys[i]) : by_key.end();
+        const Draw* d = it != by_key.end() ? it->second : nullptr;
+        extent_entries.push_back({.key = d ? d->key : 0, .triangles = geometries[i].triangles,
+                                  .skinned = d && d->skinned, .foliage = d && d->foliage,
+                                  .world = (geometries[i].flags & GeoWorld) != 0});
+    }
+    in.extent_address = extent_buffer.address;
+    extent_pending = true;
+    extent_tick = scheduler.CurrentTick();
+    extent_frame = frame;
+}
+
+void RayTracedAO::ReportExtents() {
+    if (!extent_pending || !scheduler.IsFree(extent_tick)) {
+        return;
+    }
+    extent_pending = false;
+    vmaInvalidateAllocation(instance.GetAllocator(), extent_buffer.allocation, 0, extent_entries.size() * 12);
+    const auto* words = static_cast<const u32*>(extent_buffer.mapped);
+    std::vector<u32> order;
+    u32 oversized = 0;
+    for (u32 i = 0; i < extent_entries.size(); ++i) {
+        // World copies are the static cache's (far buildings, in the static BLAS only within reach);
+        // per frame a few long skinned parts (chains, cloth) are normal.
+        if (words[i * 3 + 1] && !extent_entries[i].world) {
+            order.push_back(i);
+            oversized += words[i * 3 + 1];
+        }
+    }
+    if (oversized < OversizedReport) {
+        return;
+    }
+    std::sort(order.begin(), order.end(), [&](u32 a, u32 b) { return words[a * 3 + 1] > words[b * 3 + 1]; });
+    std::printf("RTAO: frame %u: %u triangles over 4 m (centre to vertex) in %zu draws; largest:", extent_frame,
+                oversized, order.size());
+    for (size_t k = 0; k < std::min<size_t>(order.size(), 4); ++k) {
+        const u32 i = order[k];
+        const ExtentEntry& e = extent_entries[i];
+        std::printf(" [key %016llx%s%s%s, %u triangles, %u over 4 m, max %.1f m, nearest %.1f m]",
+                    (unsigned long long)e.key, e.skinned ? " skinned" : "", e.foliage ? " foliage" : "",
+                    e.world ? " world copy" : "", e.triangles, words[i * 3 + 1], words[i * 3] / 1000.0,
+                    words[i * 3 + 2] / 100.0);
+    }
+    std::printf("\n");
 }
 
 /// The first passes after start: the camera, the table size and the first geometries.

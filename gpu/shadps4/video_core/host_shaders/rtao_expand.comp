@@ -15,9 +15,13 @@ layout(binding = 0, std430) readonly buffer Geometries { Geometry geometries[]; 
 layout(binding = 1, std430) writeonly buffer Triangles { float vertices[]; }; // 9 floats per triangle
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Positions { vec4 p[]; };
+// Diagnostic (every 120th pass, RayTracedAO::SampleExtents): per table entry the largest
+// triangle (mm, centre to farthest vertex), its triangles over 4 m and the nearest of those (cm).
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Extents { uint v[]; };
 
 layout(push_constant) uniform Constants {
     uint64_t positions_address;
+    uint64_t extent_address; // 0: no diagnostic this pass
     vec4 proj;             // x scale, y scale, z scale, z offset (signed)
     uint num_geometries;
     uint total_triangles;
@@ -90,6 +94,14 @@ void main() {
     const float extent = max(max(distance(out_pos[0], centre), distance(out_pos[1], centre)), distance(out_pos[2], centre));
     if (valid && !world && far_cut > 0.0 && near_d - extent > far_cut) {
         valid = false;
+    }
+    if (valid && extent_address != 0ul) {
+        Extents e = Extents(extent_address);
+        atomicMax(e.v[lo * 3u], uint(min(extent, 4.0e6) * 1000.0));
+        if (extent > 4.0) {
+            atomicAdd(e.v[lo * 3u + 1u], 1u);
+            atomicMin(e.v[lo * 3u + 2u], uint(min(max(near_d, 0.0), 4.0e7) * 100.0));
+        }
     }
     const uint base = (g.out_base + local) * 9u;
     for (uint k = 0u; k < 3u; ++k) {

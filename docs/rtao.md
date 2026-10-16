@@ -79,7 +79,10 @@ A draw's identity is its shader, buffers, index range, counts and occurrence in 
 whose world-space summary stays the same for `promote` observations is cached: its world-space
 triangles are copied into a pool (3M triangles, 102 MiB), and it leaves the per-frame BLAS once
 the static BLAS holds it. Cached draws are rechecked every 8th pass and evicted when they change;
-three evictions and a draw is never cached again. Copies of a mesh drawn several times a frame are
+three evictions and a draw stays per frame (it is still looked at every 64th pass, and after 16
+unchanged looks, about 20 s, it gets another chance). A mesh drawn several times a frame is not
+counted against: its slots shift whenever a copy is culled or uncovered (in Central Yharnam this had
+blacklisted 475k triangles of crates and coffins for good). Copies of a mesh drawn several times a frame are
 matched by content (the game sorts draws by distance) and leave the per-frame BLAS only as a
 group. Draws with a character-size skeleton are never cached.
 
@@ -160,7 +163,7 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `build` | | 0 | 1: per-frame BLAS built for trace speed (no difference on RADV) |
 | `alpha`, `decals` | | 0 | 1: keep alpha-tested draws (as solid quads) / draws without depth write |
 | `foliage` | 0-1 | 0 | alpha-tested draws occlude with this probability per hit (0: left out); about +0.7 ms |
-| | `BB_RTAO_MAX_TRIANGLES` | 1500000 | per-frame triangle budget (buffers are sized for it; 3000000 for `cache=0` or `chunk=0`) |
+| | `BB_RTAO_MAX_TRIANGLES` | 1500000 | per-frame triangle budget (buffers are sized for it; 3000000 for `cache=0` or `chunk=0`); set, it also switches off the growth below |
 | `stage` | `BB_RTAO_STAGE` | 5 | stop after: 1 expand, 2 BLAS, 3 TLAS, 4 trace, 5 apply |
 | `debug` | `BB_RTAO_DEBUG` | 0 | 1 raw AO, 2 camera-ray test, 3 normal facing, 4 AO with t_min 0.1 |
 | `dump` | | | change the value: 8 consecutive frames of the AO the apply gets go to `out/rtao_dump_<frame>_<k>.pgm`; the log line gives mean, mean frame-to-frame change and the share of pixels changing > 0.05 |
@@ -231,7 +234,12 @@ The budgets scale with the device: at creation the pass reads the device-local h
 and keeps its buffers plus its capture region within 12 percent of it, shrinking the per-frame,
 static and pool budgets alike; below a third of the defaults it stays off with a message
 (`RTAO: device heap budget ...` in the log; `BB_RTAO_HEAP_MB=N` pretends a budget). An 8 GB card
-(budget 7600 MiB): scale 0.69, 878 MiB, and the Hunter's Dream still fits the static BLAS. The
+(budget 7600 MiB): scale 0.69, 878 MiB, and the Hunter's Dream still fits the static BLAS. Where
+everything fits, the per-frame budget grows (up to 2x) into what is left of 16 percent of the
+budget (`Rtao::FrameGrowth`): crowded scenes overflowed 1.5M (the Central Yharnam crowd: 2.3M per
+frame, 155 draws dropped, AO popping as the dropped set changed). The RX 9070 XT (13043 MiB): 3M
+per frame, buffers 2012 MiB instead of 1387. A full budget costs time where it is used: 1.8 ms of
+BLAS build in that crowd (57 fps; ticket 45: leave out distant characters first). The
 texture collector sees these buffers in the device usage it compares (no separate report needed).
 
 Nothing is allocated per cached draw any more. The buffers are made at the first frame with a
@@ -278,6 +286,11 @@ motion is known to be off).
   sits where the depth buffer says); `dump=` writes the image, `1.0 = 128`. The 600-frame log line
   reports draws, triangles, budget drops, skipped draw kinds, passes recorded and skipped; the
   first pass after start reads back expanded triangles (valid share, depth range).
+- **Oversized triangles**: every 120th pass the expand records each draw's largest triangle and its
+  triangles over 4 m (centre to vertex); `RTAO: frame N: ... triangles over 4 m` names the worst
+  per-frame draws when they hold 1000 or more; chains and cloth give ~200. Written after a trace
+  blow-up in Central Yharnam (2.6 -> 15 ms, 30 fps, gone with far=15 and after the area reloaded;
+  most likely a ragdoll gone wrong, not yet caught by this line).
 - **Static cache**: the `RTAO: cache:` line (known draws, pool use, cached and evicted draws,
   static BLAS triangles, parts and rebuilds, probe matches/changes); `RTAO: big meshes in pieces:`
   (split time on the worker). The static build has its own profiler segment, `rtao static`.

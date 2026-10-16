@@ -22,7 +22,7 @@
 namespace Vulkan::RtaoInternal {
 struct ExpandConstants {
     u64 positions_address;
-    u64 pad; // std430: the vec4 below is 16-byte aligned in the shader's push block
+    u64 extent_address; // the size diagnostic's buffer this pass (0: off; RayTracedAO::SampleExtents)
     std::array<float, 4> proj;
     u32 num_geometries;
     u32 total_triangles;
@@ -156,6 +156,7 @@ struct PassInputs {
     vk::Buffer chunks_handle, ranges_handle, partials_handle, constants_handle, dump_handle, probe_handle, readback_handle, split_fetch_handle, split_staging_handle, pool_handle, table_handle, triangles_handle;
     vk::DeviceSize chunks_offset, ranges_offset, constants_offset, dump_offset, probe_bytes, probe_offset, split_fetch_bytes, split_fetch_src, table_bytes, table_offset, triangles_bytes;
     vk::DeviceAddress blas_scratch_address, tlas_scratch_address, instances_address, pool_address, triangles_address;
+    vk::DeviceAddress extent_address = 0;
     ApplyConstants apply;
     BlurConstants blur_h, blur_v;
     ExpandConstants expand;

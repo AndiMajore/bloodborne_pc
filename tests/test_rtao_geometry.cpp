@@ -74,10 +74,10 @@ static void StateMachine() {
     const std::array<float, 3> camera{0.0f, 0.0f, 0.0f};
     CacheState s;
     const auto here = Stats(5.0f, 1.0f, 2.0f);
-    assert(Observe(s, here, false, camera) == Observation::First);
+    assert(Observe(s, here, false, false, camera) == Observation::First);
     for (u32 i = 0; i < 7; ++i) {
         assert(!Promotable(s, false, false, 8));
-        assert(Observe(s, here, false, camera) == Observation::Same);
+        assert(Observe(s, here, false, false, camera) == Observation::Same);
     }
     assert(s.stable == 8);
     assert(Promotable(s, false, false, 8));
@@ -86,27 +86,36 @@ static void StateMachine() {
     s.cached = true;
     assert(!Promotable(s, false, false, 8)); // already cached
     // A reorder (another copy of the mesh in this slot) keeps the BLAS but stops promotion.
-    assert(Observe(s, Stats(9, 9, 9), true, camera) == Observation::Reordered);
+    assert(Observe(s, Stats(9, 9, 9), true, false, camera) == Observation::Reordered);
     assert(s.cached && s.stable == 0 && s.evictions == 0);
     // A real change of a cached draw: evict.
-    assert(Observe(s, Stats(9, 9, 9), false, camera) == Observation::ChangedEvict);
+    assert(Observe(s, Stats(9, 9, 9), false, false, camera) == Observation::ChangedEvict);
     assert(!s.cached && s.evictions == 1 && s.stable == 1);
     // Not cached: a change is only a change.
-    assert(Observe(s, Stats(1, 1, 1), false, camera) == Observation::Changed);
+    assert(Observe(s, Stats(1, 1, 1), false, false, camera) == Observation::Changed);
     assert(s.evictions == 1);
     // Three evictions: never again.
     for (int round = 0; round < 2; ++round) {
         for (u32 i = 0; i < 8; ++i) {
-            Observe(s, Stats(2, 2, 2), false, camera);
+            Observe(s, Stats(2, 2, 2), false, false, camera);
         }
         s.cached = true;
-        assert(Observe(s, Stats(3, 3, float(round)), false, camera) == Observation::ChangedEvict);
+        assert(Observe(s, Stats(3, 3, float(round)), false, false, camera) == Observation::ChangedEvict);
     }
     assert(s.evictions == 3);
-    for (u32 i = 0; i < 20; ++i) {
-        Observe(s, Stats(3, 3, 1), false, camera);
+    for (u32 i = 0; i < 10; ++i) { // still, but not yet ForgiveAfter times
+        Observe(s, Stats(3, 3, 1), false, false, camera);
     }
     assert(!Promotable(s, false, false, 8));
+    // Still long enough: one more chance (evictions back to 2).
+    for (u32 i = 0; i < ForgiveAfter; ++i) {
+        Observe(s, Stats(3, 3, 1), false, false, camera);
+    }
+    assert(s.evictions == 2 && Promotable(s, false, false, 8));
+    // A mesh drawn several times: a change (a copy culled, the slots shift) evicts, uncounted.
+    s.cached = true;
+    assert(Observe(s, Stats(4, 4, 4), false, true, camera) == Observation::ChangedEvict);
+    assert(!s.cached && s.evictions == 2);
 }
 
 static void Split() {
@@ -204,6 +213,11 @@ static void Heap() {
     assert(eight > 0.6 && eight < 0.65);                         // 912 MiB of 1450
     assert(HeapScale(3000 * mib, 1450 * mib) == 0.0);            // under a third: off
     assert(HeapScale(1000 * mib, 0) == 1.0);
+    // The per-frame budget grows into what is left of GrowShare: 16% of 13000 MiB is 2080.
+    const double grow = FrameGrowth(13000 * mib, 1400 * mib, 1000 * mib);
+    assert(grow > 1.67 && grow < 1.69);                          // 680 MiB of room, 1000 per 1x
+    assert(FrameGrowth(32000 * mib, 1400 * mib, 400 * mib) == MaxFrameGrowth);
+    assert(FrameGrowth(7600 * mib, 1400 * mib, 400 * mib) == 1.0); // no room on 8 GB
 }
 
 static void SettingsParsing() {

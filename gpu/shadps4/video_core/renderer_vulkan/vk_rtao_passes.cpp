@@ -602,6 +602,7 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
     const auto inv_view = camera_motion.InvView();
     in.expand = ExpandConstants{
         .positions_address = instance.GetDevice().getBufferAddress({.buffer = object_motion.PositionsBuffer()}),
+        .extent_address = in.extent_address,
         .proj = camera_motion.Projection(),
         .num_geometries = in.num_geometries,
         .total_triangles = in.dispatch_triangles,

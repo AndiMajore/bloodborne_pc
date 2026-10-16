@@ -176,6 +176,11 @@ private:
                    u32& dispatch_triangles); // vk_rtao_cache.cpp
     void ReadProbes(u32 ring);
     void WriteDump();      // vk_rtao_diagnostics.cpp
+    /// Every 120th pass: the expand records each draw's triangle sizes (oversized geometry slows
+    /// every ray); reported once the GPU is done when the per-frame draws have OversizedReport
+    /// such triangles or more (ReportExtents). vk_rtao_diagnostics.cpp
+    void SampleExtents(RtaoInternal::PassInputs& in, const RtaoInternal::FrameDraws& classified);
+    void ReportExtents();
     void ReportReadback(); // vk_rtao_diagnostics.cpp
     void LogFirstPasses(u32 num_geometries, u32 total_triangles, u32 w, u32 h); // vk_rtao_diagnostics.cpp
     void Evict(CacheEntry& entry);
@@ -258,6 +263,19 @@ private:
     u32 readback_frame = 0;
     u32 readback_triangles = 0;
     Buffer dump_buffer;       // host: DumpFrames consecutive half-res AO images (rg16f), "dump="
+    Buffer extent_buffer;     // host (read back): 3 u32 per table entry, SampleExtents
+    struct ExtentEntry {
+        u64 key;
+        u32 triangles;
+        bool skinned, foliage, world;
+    };
+    std::vector<ExtentEntry> extent_entries; // the sampled pass's table
+    // Per-frame triangles over 4 m that get reported, against ~200 from chains and cloth (a trace
+    // blow-up in Central Yharnam, 2.6 -> 15 ms, most likely a ragdoll gone wrong).
+    static constexpr u32 OversizedReport = 1000;
+    bool extent_pending = false;
+    u64 extent_tick = 0;
+    u32 extent_frame = 0;
     static constexpr u32 DumpFrames = 8;
     u32 dump_index = 0;       // frames copied so far
     bool dump_pending = false;
