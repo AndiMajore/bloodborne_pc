@@ -32,6 +32,34 @@ EN = {
         "runs through user/ssgi.txt.",
     "Отражённый свет (SSGI)": "Bounce light (SSGI)",
     "Сила отражённого света": "Bounce strength",
+    # Ray-traced AO
+    "Трассировка лучей (экспериментально)": "Ray tracing (experimental)",
+    "Затенение окружения трассировкой лучей (RTAO) вместо экранного SSAO игры: "
+    "тени в углах и под предметами, в том числе от того, что вне кадра. Нужны "
+    "видеокарта с трассировкой лучей, апскейлер с векторами движения объектов и "
+    "включённое затенение SSAO. Около 1–1,5 мс на кадр; значения меняются и на "
+    "лету через user/rtao.txt.":
+        "Ray-traced ambient occlusion (RTAO) in place of the game's screen-space SSAO: shadows in "
+        "corners and under objects, including from what is off screen. Needs a GPU with ray "
+        "tracing, an upscaler with object motion vectors and SSAO turned on. About 1-1.5 ms per "
+        "frame; the values also change live through user/rtao.txt.",
+    "Затенение трассировкой лучей (RTAO)": "Ray-traced ambient occlusion (RTAO)",
+    "Качество": "Quality",
+    "Низкое": "Low",
+    "Среднее": "Medium",
+    "Высокое": "High",
+    "Своё": "Custom",
+    "1 луч, радиус 1 м, до 25 м": "1 ray, 1 m radius, up to 25 m",
+    "2 луча, радиус 1,5 м, до 40 м": "2 rays, 1.5 m radius, up to 40 m",
+    "4 луча, радиус 2 м, до 60 м": "4 rays, 2 m radius, up to 60 m",
+    "Значения ниже": "The values below",
+    "Лучей на пиксель": "Rays per pixel",
+    "Больше — меньше шума, дороже": "More: less noise, more cost",
+    "Радиус, м": "Radius, m",
+    "Как далеко предметы затеняют друг друга": "How far objects shade each other",
+    "Сила": "Strength",
+    "Дальность, м": "Distance, m",
+    "Дальше затенения нет; больше — дороже": "No occlusion beyond it; farther costs more",
     "8 — подобрано для Bloodborne; 12 уже окрашивает": "8 is tuned for Bloodborne; 12 already tints",
     "Ослабление на светлых поверхностях": "Damping on bright surfaces",
     "0 — везде одинаково; 4 — яркие сцены почти без изменений":
