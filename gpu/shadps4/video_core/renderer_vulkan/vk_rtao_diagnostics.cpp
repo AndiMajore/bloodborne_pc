@@ -2,6 +2,7 @@
 // bbport: ray-traced AO, debug output: the dump= frames and the expanded-triangle readback (see vk_rtao.cpp).
 #include "video_core/renderer_vulkan/vk_rtao.h"
 #include "video_core/renderer_vulkan/vk_rtao_internal.h"
+#include "video_core/renderer_vulkan/vk_camera_motion.h"
 
 #include <algorithm>
 #include <cmath>
@@ -105,6 +106,23 @@ void RayTracedAO::ReportReadback() {
                     "(%.2f %.2f %.2f)\n",
                     readback_frame, count, valid, finite, valid - finite, zmin, zmax, xymax, v[0], v[1], v[2],
                     v[3], v[4], v[5], v[6], v[7], v[8]);
+}
+
+/// The first passes after start: the camera, the table size and the first geometries.
+void RayTracedAO::LogFirstPasses(u32 num_geometries, u32 total_triangles, u32 w, u32 h) {
+    const auto cam_proj = camera_motion.Projection();
+    std::printf("RTAO: pass %u: proj %g %g %g %g, %u geometries, %u triangles, %ux%u\n",
+                recorded_total, cam_proj[0], cam_proj[1], cam_proj[2], cam_proj[3], num_geometries,
+                total_triangles, w, h);
+    for (u32 i = 0; i < std::min<u32>(num_geometries, 4); ++i) {
+        const auto& g = geometries[i];
+        std::printf("RTAO:   geometry %u: store %u, %u vertices x %u instances, first %u, indices 0x%llx "
+                    "count %u %s base %d restart %u, triangles %u at %u\n",
+                    i, g.store, g.vertices, g.instances, g.first_vertex,
+                    (unsigned long long)g.index_address, g.index_count,
+                    (g.index16 & 1) ? "16-bit" : "32-bit", g.base_vertex, g.restart, g.triangles,
+                    g.triangle_offset);
+    }
 }
 
 } // namespace Vulkan

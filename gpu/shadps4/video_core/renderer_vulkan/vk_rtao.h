@@ -171,10 +171,16 @@ private:
                              vk::ImageAspectFlags aspect);
     void Record(VideoCore::ImageId mask);
     void RecordPasses(const RtaoInternal::PassInputs& in); // vk_rtao_passes.cpp: the GPU work
+    void FillConstants(RtaoInternal::PassInputs& in, u32 slot, u32 read, u32 probe_id); // vk_rtao_passes.cpp
+    void RecordImageSetup(VideoCore::Image& depth, VideoCore::Image& normal, VideoCore::Image& mask,
+                          vk::ImageView depth_view, u32 read, u32 write, u32 w, u32 h); // vk_rtao_passes.cpp
     void ClassifyDraws(RtaoInternal::FrameDraws& out, bool use_cache, u32 probe_id); // vk_rtao_cache.cpp
+    u32 BuildTable(RtaoInternal::FrameDraws& classified, u32 slot, u32 ring,
+                   u32& dispatch_triangles); // vk_rtao_cache.cpp
     void ReadProbes(u32 ring);
     void WriteDump();      // vk_rtao_diagnostics.cpp
     void ReportReadback(); // vk_rtao_diagnostics.cpp
+    void LogFirstPasses(u32 num_geometries, u32 total_triangles, u32 w, u32 h); // vk_rtao_diagnostics.cpp
     void Evict(CacheEntry& entry);
     void TrimCache(); // forget draws not seen for a minute
 

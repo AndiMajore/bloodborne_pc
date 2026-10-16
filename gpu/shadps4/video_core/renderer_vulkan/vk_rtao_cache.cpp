@@ -277,4 +277,168 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
     }
 }
 
+void RayTracedAO::AddGeometry(const Geometry& g) {
+    if (!enabled || !resources_ready || g.index_count < 3 || !g.vertices || !g.instances) {
+        return;
+    }
+    if (!g.triangle_list) { // strips and the rest: not expanded (yet), counted
+        ++skipped_topology;
+        return;
+    }
+    if (g.alpha_test && !settings.include_alpha) {
+        ++skipped_alpha;
+        return;
+    }
+    if (!g.depth_write && !settings.include_nowrite) {
+        ++skipped_nowrite;
+        return;
+    }
+    if (g.index_address == 0 && !g.non_indexed) {
+        ++skipped_no_address; // an index buffer without a device address
+        return;
+    }
+    const u32 tris = (g.index_count / 3) * g.instances;
+    if (g.non_indexed && g.index_count > g.vertices) {
+        ++dropped_draws; // the capture holds fewer vertices than the draw
+        dropped_triangles += tris;
+        return;
+    }
+    // The positions must lie inside the capture (two halves of the object-motion buffer).
+    const u64 last = u64(g.store) + u64(g.vertices) * g.instances;
+    if (last > object_motion.PositionsEntries()) {
+        ++dropped_draws;
+        dropped_triangles += tris;
+        return;
+    }
+    if (draws.size() >= max_geometries) {
+        ++dropped_draws;
+        dropped_triangles += tris;
+        return;
+    }
+    u64 index_address = g.index_address;
+    bool index_mid_word = (g.index_address & 2) != 0;
+    // Small ranges are copied now (the stream ring may be reused before the pass); the others
+    // are held by the buffer cache until the pass is recorded.
+    const bool copy_indices = g.index_guest && g.index_bytes &&
+                              g.index_bytes <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+                              !buffer_cache.IsRegionGpuModified(g.index_guest, g.index_bytes) &&
+                              Core::Memory::Instance()->IsValidGpuMapping(g.index_guest, g.index_bytes) &&
+                              Core::Memory::Instance()->ClampRangeSize(g.index_guest, g.index_bytes) == g.index_bytes;
+    if (g.index_guest && g.index_bytes && !copy_indices) {
+        buffer_cache.HoldRange(g.index_guest, g.index_bytes);
+    }
+    if (copy_indices) {
+        // The frame's ring slot is the one the pass will use; only once the GPU is done with it.
+        const u32 copy_slot = settings.ring_test ? 0u : frame % TableSlots;
+        if (index_ring_state < 0) {
+            index_ring_state = (!slot_ticks[copy_slot] || scheduler.IsFree(slot_ticks[copy_slot])) ? 1 : 0;
+            index_ring_used = 0;
+        }
+        const vk::DeviceSize at = (index_ring_used + 3) & ~vk::DeviceSize(3);
+        if (index_ring_state == 0 || at + g.index_bytes > IndexRingSlot) {
+            ++skipped_copy;
+            return;
+        }
+        const vk::DeviceSize offset = vk::DeviceSize(copy_slot) * IndexRingSlot + at;
+        // Under the runtime's memory lock, from the backing store: the game may unmap or rewrite
+        // the range meanwhile (an unmapped page reads as zeros, which the expand drops as
+        // degenerate, not as a host fault).
+        Core::Memory::Instance()->ReadBacking(g.index_guest, static_cast<u8*>(index_ring.mapped) + offset,
+                                              g.index_bytes);
+        index_ring_used = at + g.index_bytes;
+        index_address = index_ring.address + offset;
+        index_mid_word = false;
+    }
+    // The same buffers may be drawn more than once a frame: the occurrence keeps them apart.
+    {
+        const u64 bytes = g.non_indexed ? 0 : u64(g.index_count) * (g.index16 ? 2 : 4);
+        index_bytes_frame += bytes;
+        index_bytes_small += bytes <= 16384 ? bytes : 0;
+    }
+    const u32 occurrence = occurrences[g.key]++;
+    u32& copies = max_copies[g.key];
+    copies = std::max(copies, occurrence + 1);
+    Draw& draw = draws.emplace_back();
+    draw.key = Rtao::KeyOf(g.key, occurrence);
+    draw.base = g.key;
+    draw.occurrence = occurrence;
+    draw.skinned = g.skinned;
+    draw.gpu = GpuGeometry{.store = g.store,
+                          .vertices = g.vertices,
+                          .instances = g.instances,
+                          .first_vertex = g.first_vertex,
+                          // 16-bit index buffers may start 2 bytes into a word: read words
+                          // from the aligned address and skip the first half-word.
+                          .index_address = g.index16 ? (index_address & ~u64(3)) : index_address,
+                          .index_count = g.index_count,
+                          .index16 = g.index16 ? (1u | (index_mid_word ? 2u : 0u)) : 0u,
+                          .base_vertex = g.base_vertex,
+                          .restart = g.restart ? 1u : 0u,
+                          .triangle_offset = 0,
+                          .triangles = tris,
+                          .out_base = 0,
+                          .flags = 0};
+}
+
+
+/// Record(): the frame's geometry table (per-frame entries, world-space copies, measured-only
+/// entries) with their probe keys, and the probe chunks of this ring slot. Returns the chunk count.
+u32 RayTracedAO::BuildTable(FrameDraws& classified, u32 slot, u32 ring, u32& dispatch_triangles) {
+    auto& dynamic_list = classified.dynamic_list;
+    auto& verify_list = classified.verify_list;
+    auto& promo_list = classified.promo_list;
+    auto& dynamic_keys = classified.dynamic_keys;
+    auto& verify_keys = classified.verify_keys;
+    // The table: per-frame entries, then the world-space copies (expanded after them), then the
+    // entries that are only measured (no triangles; their offset lies past the expand range).
+    geometries.clear();
+    probe_keys[ring].clear();
+    geometries.insert(geometries.end(), dynamic_list.begin(), dynamic_list.end());
+    for (size_t i = 0; i < dynamic_list.size(); ++i) {
+        probe_keys[ring].push_back((dynamic_list[i].flags & GeoProbe) ? dynamic_keys[i] : 0);
+    }
+    dispatch_triangles = frame_triangles;
+    for (auto& world : promo_list) {
+        world.triangle_offset = dispatch_triangles;
+        dispatch_triangles += world.triangles;
+        geometries.push_back(world);
+        probe_keys[ring].push_back(0);
+    }
+    for (size_t i = 0; i < verify_list.size() && geometries.size() < max_geometries; ++i) {
+        verify_list[i].triangle_offset = dispatch_triangles;
+        geometries.push_back(verify_list[i]);
+        probe_keys[ring].push_back(verify_keys[i]);
+    }
+    // Probe chunks: 4096 indices each (pass 1), then one combine per draw (pass 2).
+    u32 num_chunks = 0;
+    {
+        auto* chunk_map = static_cast<std::array<u32, 2>*>(probe_chunks.mapped) + size_t(slot) * MaxProbeChunks;
+        auto* range_map = static_cast<std::array<u32, 2>*>(probe_ranges.mapped) + size_t(slot) * max_geometries;
+        for (size_t i = 0; i < geometries.size(); ++i) {
+            auto& g = geometries[i];
+            range_map[i] = {0, 0};
+            if (!(g.flags & GeoProbe)) {
+                continue;
+            }
+            const u32 total = g.index_count * g.instances;
+            const u32 n = (total + 4095) / 4096;
+            if (num_chunks + n > MaxProbeChunks) { // too much this frame: next time
+                g.flags &= ~GeoProbe;
+                probe_keys[ring][i] = 0;
+                continue;
+            }
+            range_map[i] = {num_chunks, n};
+            for (u32 k = 0; k < n; ++k) {
+                chunk_map[num_chunks + k] = {u32(i), k * 4096};
+            }
+            num_chunks += n;
+        }
+        vmaFlushAllocation(instance.GetAllocator(), probe_chunks.allocation, vk::DeviceSize(slot) * MaxProbeChunks * 8,
+                           std::max<vk::DeviceSize>(num_chunks, 1) * 8);
+        vmaFlushAllocation(instance.GetAllocator(), probe_ranges.allocation, vk::DeviceSize(slot) * max_geometries * 8,
+                           std::max<vk::DeviceSize>(geometries.size(), 1) * 8);
+    }
+    return num_chunks;
+}
+
 } // namespace Vulkan

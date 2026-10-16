@@ -33,10 +33,12 @@ it the port is unchanged.
    hash and whether it is skinned. Strips, alpha-tested draws (foliage) and draws without depth
    write (decals) are left out.
 2. The game's AO upsample pass (pixel shader `0xc45c51cb` into an R8 scene-size target) ends;
-   `Record()` (`vk_rtao.cpp`) runs; the classification is `ClassifyDraws()` (`vk_rtao_cache.cpp`),
-   the GPU work `RecordPasses()` (`vk_rtao_passes.cpp`); buffers and the static BLAS's choice of
-   parts are in `vk_rtao_resources.cpp`, the dumps in `vk_rtao_diagnostics.cpp`, the logic without
-   Vulkan in `rtao_geometry.{h,cpp}` (with `tests/test_rtao_geometry.cpp`):
+   `Record()` (`vk_rtao.cpp`) runs; the draws' intake and classification are `AddGeometry()`,
+   `ClassifyDraws()` and `BuildTable()` (`vk_rtao_cache.cpp`), the GPU work `RecordImageSetup()`,
+   `FillConstants()` and `RecordPasses()` (`vk_rtao_passes.cpp`); construction, the settings
+   re-read and destruction are in `vk_rtao_setup.cpp`, buffers and the static BLAS's choice of
+   parts in `vk_rtao_resources.cpp`, the dumps and logs in `vk_rtao_diagnostics.cpp`, the logic
+   without Vulkan in `rtao_geometry.{h,cpp}` (with `tests/test_rtao_geometry.cpp`):
    - static cache: the probe results of four passes ago are read (once their scheduler tick is
      done), the static BLAS is rebuilt if due, and the frame's draws are sorted into covered by
      the static BLAS, per-frame geometry and new cache entries (see below);

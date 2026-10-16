@@ -3,6 +3,7 @@
 // static and per-frame BLAS, the TLAS, the trace, denoiser and blur, and the write into the game's
 // mask. Record() prepares everything these commands read and hands it over in PassInputs.
 #include "video_core/renderer_vulkan/vk_rtao.h"
+#include "video_core/renderer_vulkan/rtao_bluenoise.h"
 #include "video_core/renderer_vulkan/vk_rtao_internal.h"
 #include <algorithm>
 #include <cstdio>
@@ -508,6 +509,162 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
             cmdbuf.pushConstants(apply_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(apply), &apply);
             cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
         });
+}
+
+
+/// Record(): the layout transitions of the inputs and the RTAO images, the blue-noise upload
+/// (once) and the camera motion the denoiser reprojects with.
+void RayTracedAO::RecordImageSetup(VideoCore::Image& depth, VideoCore::Image& normal,
+                                   VideoCore::Image& mask, vk::ImageView depth_view, u32 read,
+                                   u32 write, u32 w, u32 h) {
+    scheduler.EndRendering();
+    const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, TraceStages, vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&normal, vk::ImageLayout::eGeneral, TraceStages, vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&mask, vk::ImageLayout::eGeneral, Compute, rw);
+    runtime.FlushBarriers();
+
+    const auto image_barrier = [&](vk::Image image, vk::ImageLayout old_layout,
+                                   vk::AccessFlags2 src_access, vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = src_access,
+            .dstStageMask = TraceStages,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    };
+    image_barrier(vk::Image(motion_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                  vk::AccessFlagBits2::eShaderWrite);
+    image_barrier(vk::Image(ao_images[write]), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                  vk::AccessFlagBits2::eShaderWrite);
+    image_barrier(vk::Image(blur_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                  vk::AccessFlagBits2::eShaderWrite);
+    // Denoiser 2: this frame's raw trace and the history pair (same read/write indices).
+    image_barrier(vk::Image(raw_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                  vk::AccessFlagBits2::eShaderWrite);
+    image_barrier(vk::Image(hist_images[write]), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                  vk::AccessFlagBits2::eShaderWrite);
+    image_barrier(vk::Image(hist_images[read]),
+                  history_valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined, rw,
+                  vk::AccessFlagBits2::eShaderRead);
+    image_barrier(vk::Image(ao_images[read]),
+                  history_valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined, rw,
+                  vk::AccessFlagBits2::eShaderRead);
+    if (!noise_uploaded) { // the blue-noise texture, once (rtao_bluenoise.h)
+        noise_uploaded = true;
+        scheduler.Record([image = vk::Image(noise_image), staging = noise_staging.buffer](vk::CommandBuffer cmdbuf) {
+            const auto to = [&](vk::ImageLayout from_layout, vk::ImageLayout layout, vk::PipelineStageFlags2 src,
+                                vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
+                const vk::ImageMemoryBarrier2 b{.srcStageMask = src, .srcAccessMask = src_access, .dstStageMask = dst,
+                                                .dstAccessMask = dst_access, .oldLayout = from_layout, .newLayout = layout,
+                                                .image = image,
+                                                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+            };
+            to(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eNone,
+               vk::AccessFlagBits2::eNone, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+            const vk::BufferImageCopy region{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                             .imageExtent = {Rtao::BlueNoiseSize, Rtao::BlueNoiseSize, 1}};
+            cmdbuf.copyBufferToImage(staging, image, vk::ImageLayout::eTransferDstOptimal, region);
+            to(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+               vk::AccessFlagBits2::eTransferWrite, TraceStages, vk::AccessFlagBits2::eShaderRead);
+        });
+    }
+    camera_motion.RecordMotion(depth_view, *motion_view, w, h);
+    image_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
+                  vk::AccessFlagBits2::eShaderRead);
+}
+
+
+/// Record(): the shaders' constants and the RTAO images' views for this pass (the trace's
+/// constants also go into this ring slot's uniform buffer). Reads in.w, h, v2, write and the counts.
+void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id) {
+    const u32 w = in.w, h = in.h, write = in.write;
+    const bool v2 = in.v2;
+    const auto inv_view = camera_motion.InvView();
+    in.expand = ExpandConstants{
+        .positions_address = instance.GetDevice().getBufferAddress({.buffer = object_motion.PositionsBuffer()}),
+        .proj = camera_motion.Projection(),
+        .num_geometries = in.num_geometries,
+        .total_triangles = in.dispatch_triangles,
+        .far_cut = settings.ao_far > 0.0f ? settings.ao_far + settings.radius : 0.0f,
+        .inv_view = inv_view,
+    };
+    const auto& expand = in.expand;
+    in.probe = ProbeConstants{
+        .positions_address = expand.positions_address,
+        .num_geometries = in.num_geometries,
+        .id = probe_id,
+        .proj = expand.proj,
+        .inv_view = inv_view,
+        .pass_index = 1,
+        .num_chunks = in.num_chunks,
+    };
+    in.probe_combine = in.probe;
+    in.probe_combine.pass_index = 2;
+    const auto jitter = camera_motion.Jitter();
+    in.trace = TraceConstants{
+        .view = camera_motion.View(),
+        .proj = expand.proj,
+        .full_size = {float(w), float(h)},
+        .half_size = {float((w + 1) / 2), float((h + 1) / 2)},
+        .jitter = jitter,
+        .radius = settings.radius,
+        .history = history_valid ? settings.history : 0.0f,
+        .rays = settings.rays,
+        .frame = frame,
+        .mode = settings.debug,
+        .snap_far = settings.snap_far,
+        .ao_far = settings.ao_far,
+        .normals = settings.depth_normals ? 1u : 0u,
+        .offset = settings.origin_offset,
+        .denoise = v2 ? 2u : 1u,
+        .subpixel = v2 && settings.subpixel ? 1u : 0u,
+        .falloff = settings.falloff,
+        .period = settings.noise_period,
+        .noise = settings.blue_noise ? 1u : 0u,
+    };
+    const auto& trace = in.trace;
+    in.temporal = TemporalConstants{
+        .half_size = {float((w + 1) / 2), float((h + 1) / 2)},
+        .sub = settings.subpixel ? std::array<s32, 2>{s32(frame & 1), s32((frame >> 1) & 1)} : std::array<s32, 2>{1, 1},
+        .max_n = settings.max_n,
+        .clip_k = settings.clip_k,
+        .history_ok = history_valid ? 1u : 0u,
+        .clip_floor = settings.clip_floor,
+    };
+    in.raw_rw = *raw_view;
+    in.hist_read = *hist_views[read];
+    in.hist_write = *hist_views[write];
+    in.constants_offset = vk::DeviceSize(slot) * ConstantsStride;
+    std::memcpy(static_cast<u8*>(constants_buffer.mapped) + in.constants_offset, &trace, sizeof(trace));
+    vmaFlushAllocation(instance.GetAllocator(), constants_buffer.allocation, in.constants_offset, sizeof(trace));
+    in.constants_handle = constants_buffer.buffer;
+    in.apply = ApplyConstants{
+        .proj = expand.proj,
+        .full_size = trace.full_size,
+        .half_size = trace.half_size,
+        .strength = settings.strength,
+        .debug = settings.debug ? 1u : 0u,
+        .power = settings.power,
+        .blur = settings.blur ? 1u : 0u,
+        .replace = settings.replace_mask ? 1u : 0u,
+    };
+    in.ao_read = *ao_views[read];
+    in.ao_write = *ao_views[write];
+    in.blur_rw = *blur_view;
+    in.blur_h = BlurConstants{.half_size = {float((w + 1) / 2), float((h + 1) / 2)}, .dir = {1, 0},
+                              .sigma = settings.sigma, .use_n = settings.denoise == 2 && settings.debug < 2 ? 1u : 0u};
+    in.blur_v = BlurConstants{.half_size = in.blur_h.half_size, .dir = {0, 1}, .sigma = settings.sigma,
+                              .use_n = in.blur_h.use_n};
+    in.motion = *motion_view;
 }
 
 } // namespace Vulkan
