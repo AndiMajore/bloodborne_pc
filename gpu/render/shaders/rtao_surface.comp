@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: the surface cache of the ray-traced AO's static pool (experimental, vk_rtao_surface.cpp).
+// One invocation per static triangle of a budgeted slice (a cursor walks the static BLAS's
+// geometries frame by frame): its centroid is projected into this frame; where the depth there
+// agrees (the triangle is seen), the lit colour at that pixel is blended into the triangle's
+// radiance. Rays that hit a triangle the camera cannot see now read that radiance instead.
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform texture2D lit_tex;   // full res, the lit opaque scene of this frame
+layout(binding = 1) uniform texture2D depth_tex; // full res, D32 0..1
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Pool { float v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Parts { uvec2 p[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer Cache { uvec2 c[]; };
+
+layout(push_constant) uniform Constants {
+    vec4 view[3];      // world -> view (this frame)
+    vec4 proj;
+    vec2 full_size;
+    vec2 jitter;
+    uint64_t pool_address;
+    uint64_t parts_address;  // (pool offset, first triangle of the walk) per static geometry
+    uint64_t cache_address;
+    uint part_count;
+    uint total;              // static triangles in the walk
+    uint cursor;             // this slice's first
+    uint count;              // this slice's size
+};
+
+float ViewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= count || total == 0u) {
+        return;
+    }
+    const uint walk = (cursor + i) % total;
+    Parts parts = Parts(parts_address);
+    // The geometry holding this triangle of the walk: binary search over the first triangles.
+    uint lo = 0u, hi = part_count - 1u;
+    while (lo < hi) {
+        const uint mid = (lo + hi + 1u) >> 1;
+        if (parts.p[mid].y <= walk) {
+            lo = mid;
+        } else {
+            hi = mid - 1u;
+        }
+    }
+    const uint tri = parts.p[lo].x + (walk - parts.p[lo].y);
+    Pool pool = Pool(pool_address);
+    vec3 c = vec3(0.0);
+    for (uint k = 0u; k < 3u; ++k) {
+        const uint b = tri * 9u + k * 3u;
+        c += vec3(pool.v[b], pool.v[b + 1u], pool.v[b + 2u]);
+    }
+    c /= 3.0;
+    const vec4 w = vec4(c, 1.0);
+    const vec3 v = vec3(dot(view[0], w), dot(view[1], w), dot(view[2], w));
+    if (abs(v.z) < 1e-3) {
+        return;
+    }
+    const vec2 ndc = vec2(v.x * proj.x / v.z, v.y * proj.y / v.z);
+    const vec2 pixel = (ndc * 0.5 + 0.5) * full_size + jitter;
+    if (any(lessThan(pixel, vec2(0.0))) || any(greaterThanEqual(pixel, full_size))) {
+        return;
+    }
+    const float depth = texelFetch(depth_tex, ivec2(pixel), 0).r;
+    if (depth >= 1.0) {
+        return;
+    }
+    const float z = ViewZ(depth);
+    if (z * v.z <= 0.0 || abs(z - v.z) > max(0.05, 0.02 * abs(v.z))) {
+        return; // hidden behind something, or the centroid lies off its own surface
+    }
+    const vec3 radiance = texelFetch(lit_tex, ivec2(pixel), 0).rgb;
+    Cache cache = Cache(cache_address);
+    const uvec2 old = cache.c[tri];
+    const vec2 old_ba = unpackHalf2x16(old.y);
+    const vec3 prev = vec3(unpackHalf2x16(old.x), old_ba.x);
+    const vec3 blended = old_ba.y > 0.0 ? mix(prev, radiance, 0.5) : radiance;
+    cache.c[tri] = uvec2(packHalf2x16(blended.rg), packHalf2x16(vec2(blended.b, 1.0)));
+}

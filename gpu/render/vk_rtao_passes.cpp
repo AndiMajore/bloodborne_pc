@@ -93,6 +93,9 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
     const auto& trace = in.trace;
     const auto& pool_copies = in.pool_copies;
     const auto& static_parts = in.static_parts;
+    const auto& surface_table = in.surface_table;
+    const auto surface_parts_handle = in.surface_parts_handle;
+    const auto surface_cache_handle = in.surface_cache_handle;
     // Five crumbs, so a GPU hang names the stage; "stage" in the settings stops after that stage.
     const u32 last_stage = settings.stage;
     const bool fast_trace = settings.build_fast_trace;
@@ -167,6 +170,13 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
                 for (const auto& copy : pool_copies) {
                     const vk::BufferCopy region{copy.src, copy.dst, copy.bytes};
                     cmdbuf.copyBuffer(copy.from_staging ? split_staging_handle : triangles_handle, pool_handle, region);
+                    if (surface_cache_handle) { // new triangles at these pool offsets: never seen
+                        cmdbuf.fillBuffer(surface_cache_handle, copy.dst / 36 * 8, copy.bytes / 36 * 8, 0);
+                    }
+                }
+                if (surface_cache_handle) {
+                    memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                                   Compute, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
                 }
                 memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
                                AsBuild, vk::AccessFlagBits2::eShaderRead);
@@ -224,8 +234,21 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
         profile(0x47A09ull, "rtao static");
         scheduler.RecordCrumb({.name = "rtao static"}, [=, static_blas = static_blas,
                                                         static_flags = StaticFlags(settings.static_build),
-                                                        static_parts = std::move(static_parts)](vk::CommandBuffer cmdbuf) {
+                                                        static_parts = std::move(static_parts),
+                                                        surface_table = surface_table](vk::CommandBuffer cmdbuf) {
         {
+            if (!surface_table.empty() && surface_parts_handle) {
+                // The surface cache's map of this build's geometries (read by the hit lookups
+                // and the refresh after this point).
+                constexpr size_t Chunk = 8192; // 64 KiB per update, the command's limit
+                for (size_t at = 0; at < surface_table.size(); at += Chunk) {
+                    const size_t n = std::min(Chunk, surface_table.size() - at);
+                    cmdbuf.updateBuffer(surface_parts_handle, vk::DeviceSize(at) * 8, n * 8,
+                                        surface_table.data() + at);
+                }
+                memory_barrier(cmdbuf, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                               Compute, vk::AccessFlagBits2::eShaderRead);
+            }
             // The last pass's trace still reads the old tree.
             memory_barrier(cmdbuf, TraceStages, vk::AccessFlagBits2::eNone, AsBuild,
                            vk::AccessFlagBits2::eAccelerationStructureWriteKHR);

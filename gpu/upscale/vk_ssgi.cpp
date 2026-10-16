@@ -45,7 +45,11 @@ struct GatherRtConstants {
     u32 frame;
     u32 rays;
     u32 debug;
+    u32 surface_parts_count;
+    u64 surface_cache;
+    u64 surface_parts;
 };
+static_assert(sizeof(GatherRtConstants) == 128);
 struct ApplyConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
@@ -435,6 +439,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
             rt_passes = rt_fallbacks = 0;
         }
     }
+    const auto surface = tlas ? rtao->FrameSurface() : RayTracedAO::SurfaceCache{};
     const GatherRtConstants gather_rt{
         .view = gather.view,
         .proj = gather.proj,
@@ -446,6 +451,9 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .frame = frame,
         .rays = rays,
         .debug = debug,
+        .surface_parts_count = surface.part_count,
+        .surface_cache = surface.cache,
+        .surface_parts = surface.parts,
     };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];

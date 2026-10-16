@@ -9,6 +9,9 @@
 #version 460
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 4) in;
 
@@ -30,8 +33,13 @@ layout(push_constant) uniform Constants {
     float history;    // 0..1 blend with the previous result
     uint frame;
     uint rays;        // per half-res pixel
-    uint debug;       // 2: the share of rays whose hit was seen on screen (green) / hidden (red)
+    uint debug;       // 2: rays whose hit was seen on screen (green), read from the surface cache (blue), hidden (red)
+    uint surface_parts_count;
+    uint64_t surface_cache; // the RTAO's surface cache (0: none): radiance of hidden static hits
+    uint64_t surface_parts;
 };
+
+#include "../../render/shaders/rt_surface_lookup.glsl"
 
 const float PI = 3.14159265;
 
@@ -80,7 +88,7 @@ void main() {
     const float n1 = IGN(vec2(fp.yx) + float(frame % 16u) * 1.618034);
 
     vec3 gi = vec3(0.0);
-    float seen = 0.0, hidden = 0.0;
+    float seen = 0.0, hidden = 0.0, cached = 0.0;
     for (uint r = 0u; r < rays; ++r) {
         const float u = fract(n0 + float(r) / float(rays));
         const float v = fract(n1 + float(r) * 0.7548776662);
@@ -95,25 +103,32 @@ void main() {
             continue; // open sky within the radius: the game's ambient covers it
         }
         const float t = rayQueryGetIntersectionTEXT(q, true);
+        const float falloff = clamp(1.0 - t / radius, 0.0, 1.0);
         const vec3 H = origin + dir * t;
         const vec2 sp = ScreenPos(H);
-        if (H.z * P.z <= 0.0 || any(lessThan(sp, vec2(0.0))) || any(greaterThanEqual(sp, full_size))) {
+        bool visible = H.z * P.z > 0.0 && all(greaterThanEqual(sp, vec2(0.0))) &&
+                       all(lessThan(sp, full_size));
+        if (visible) {
+            const float sz = ViewZ(texelFetch(depth_tex, ivec2(sp), 0).r);
+            visible = abs(sz - H.z) <= max(0.1, 0.03 * abs(H.z));
+        }
+        if (visible) {
+            seen += 1.0;
+            gi += texelFetch(color_tex, ivec2(sp), 0).rgb * falloff;
+            continue;
+        }
+        // Hidden from the camera or off screen: the surface cache's radiance, if it saw it.
+        vec3 cached_radiance;
+        if (SurfaceRadiance(q, surface_cache, surface_parts, surface_parts_count, cached_radiance)) {
+            cached += 1.0;
+            gi += cached_radiance * falloff;
+        } else {
             hidden += 1.0;
-            continue;
         }
-        const ivec2 si = ivec2(sp);
-        const float sz = ViewZ(texelFetch(depth_tex, si, 0).r);
-        if (abs(sz - H.z) > max(0.1, 0.03 * abs(H.z))) {
-            hidden += 1.0; // something else is in front of the hit on screen
-            continue;
-        }
-        seen += 1.0;
-        const float falloff = clamp(1.0 - t / radius, 0.0, 1.0);
-        gi += texelFetch(color_tex, si, 0).rgb * falloff;
     }
     gi /= float(rays);
     if (debug == 2u) {
-        gi = vec3(hidden, seen, 0.0) / float(rays);
+        gi = vec3(hidden, seen, cached) / float(rays);
     }
 
     vec4 result = vec4(gi, P.z);

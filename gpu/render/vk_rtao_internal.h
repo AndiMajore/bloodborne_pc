@@ -165,6 +165,10 @@ struct PassInputs {
     TraceConstants trace;
     std::vector<PoolCopy> pool_copies;
     std::vector<std::array<u32, 2>> static_parts;
+    // Surface cache: the static BLAS's geometries as (pool offset, first triangle of the walk),
+    // uploaded with its build; and the cache buffer the pool copies clear (0: none).
+    std::vector<std::array<u32, 2>> surface_table;
+    vk::Buffer surface_parts_handle, surface_cache_handle;
 };
 inline float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);

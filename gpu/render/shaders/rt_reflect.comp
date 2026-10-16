@@ -9,6 +9,9 @@
 #version 460
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 4) in;
 
@@ -31,8 +34,13 @@ layout(push_constant) uniform Constants {
     float far;         // ray length, metres
     float strength;    // weight written with our colour (alpha)
     uint mode;         // 1 fill SSR misses, 2 ours wherever valid
-    uint debug;        // 1 ours alone (SSR cleared), 2 classes: green ours, red hidden, blue miss, grey SSR kept
+    uint debug;        // 1 ours alone (SSR cleared), 2 classes: green ours, cyan surface cache, red hidden, blue miss, grey SSR kept
+    uint surface_parts_count;
+    uint64_t surface_cache; // the RTAO's surface cache (0: none)
+    uint64_t surface_parts;
 };
+
+#include "rt_surface_lookup.glsl"
 
 float ViewZ(float depth, vec4 p) {
     return p.w / min(depth - p.z, -1e-8);
@@ -100,9 +108,15 @@ void main() {
             const vec2 pp = Project(Hprev, prev_proj, lit_size, vec2(0.0));
             visible = visible && Hprev.z * P.z > 0.0 && all(greaterThanEqual(pp, vec2(0.0))) &&
                       all(lessThan(pp, lit_size));
+            vec3 L;
             if (visible) {
-                const vec3 L = texelFetch(lit_prev, ivec2(pp), 0).rgb;
+                L = texelFetch(lit_prev, ivec2(pp), 0).rgb;
                 klass = vec3(0.0, 1.0, 0.0);
+            } else if (SurfaceRadiance(q, surface_cache, surface_parts, surface_parts_count, L)) {
+                visible = true; // the surface cache saw it
+                klass = vec3(0.0, 1.0, 1.0);
+            }
+            if (visible) {
                 result = debug == 1u ? vec4(L, 1.0) : vec4(L * strength, strength);
             } else {
                 klass = vec3(1.0, 0.0, 0.0);

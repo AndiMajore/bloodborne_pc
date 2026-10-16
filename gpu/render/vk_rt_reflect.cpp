@@ -35,8 +35,12 @@ struct TraceConstants {
     float strength;
     u32 mode;
     u32 debug;
+    u32 surface_parts_count;
+    u32 pad;
+    u64 surface_cache;
+    u64 surface_parts;
 };
-static_assert(sizeof(TraceConstants) == 224); // push constants: 256 bytes on RADV and NVIDIA
+static_assert(sizeof(TraceConstants) == 248); // push constants: 256 bytes on RADV and NVIDIA
 struct CopyConstants {
     std::array<s32, 2> full_size;
     std::array<s32, 2> half_size;
@@ -54,7 +58,7 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
                   sizeof(TraceConstants);
     if (!enabled) {
         if (env && env[0] == '1') {
-            std::printf("RT reflections: off (needs the RTAO with ray queries and 224 bytes of push "
+            std::printf("RT reflections: off (needs the RTAO with ray queries and 248 bytes of push "
                         "constants)\n");
         }
         return;
@@ -367,6 +371,7 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
     const vk::ImageView ssr_view =
         CachedView(ssr, ssr.info.pixel_format, vk::ImageAspectFlagBits::eColor);
     const u32 sw = ssr.info.size.width, sh = ssr.info.size.height;
+    const auto surface = rtao.FrameSurface();
     const TraceConstants constants{
         .view = camera_motion.View(),
         .inv_view = camera_motion.InvView(),
@@ -381,6 +386,10 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         .strength = strength,
         .mode = mode,
         .debug = debug,
+        .surface_parts_count = surface.part_count,
+        .pad = 0,
+        .surface_cache = surface.cache,
+        .surface_parts = surface.parts,
     };
     scheduler.RecordCrumb(
         {.name = "rt reflect"},

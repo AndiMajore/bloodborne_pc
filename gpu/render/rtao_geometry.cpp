@@ -284,6 +284,8 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "rebuild") s.static_interval = std::clamp(u32(std::max(value, 0.0f)), 0u, 6000u);
     else if (key == "alpha") flag(s.include_alpha);
     else if (key == "foliage") s.foliage = std::clamp(value, 0.0f, 1.0f);
+    else if (key == "surface") flag(s.surface);
+    else if (key == "surface_budget") s.surface_budget = std::clamp(u32(std::max(value, 0.0f)), 1024u, 4000000u);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);

@@ -309,7 +309,8 @@ bool RayTracedAO::CreateAccelerationStructures() {
         !CreateBuffer(split_fetch, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferDst, true, 0, false, true) ||
         !CreateBuffer(split_staging, vk::DeviceSize(PromoTriangles) * 36, BU::eTransferSrc, true) ||
         !CreateBuffer(static_pool, vk::DeviceSize(pool_triangles) * 36,
-                      BU::eAccelerationStructureBuildInputReadOnlyKHR | BU::eTransferDst, false)) {
+                      BU::eAccelerationStructureBuildInputReadOnlyKHR | BU::eTransferDst |
+                          BU::eStorageBuffer, false)) {
         return false;
     }
     const auto blas_sizes = per_frame_sizes(max_triangles);

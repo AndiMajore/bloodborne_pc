@@ -224,6 +224,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass &&
                 !regs.depth_control.depth_write_enable &&
                 (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+                rtao->OnOpaqueScene(cb_descs[0].first); // the surface cache's slice (surface=1)
                 ssgi->OnOpaqueScene(cb_descs[0].first);
                 reflect->OnOpaqueScene(cb_descs[0].first); // after SSGI: its bounce included
                 upscaler->OnBlendedSceneDraw();

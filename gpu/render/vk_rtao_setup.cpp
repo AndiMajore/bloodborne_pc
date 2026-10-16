@@ -233,7 +233,7 @@ RayTracedAO::~RayTracedAO() {
         device.destroyAccelerationStructureKHR(static_blas);
     }
     for (auto* buffer : {&table_buffer, &triangle_buffer, &blas_buffer, &blas_scratch, &tlas_buffer,
-                         &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer, &extent_buffer,
+                         &tlas_scratch, &instance_buffer, &readback_buffer, &dump_buffer, &probe_buffer, &extent_buffer, &surface_cache, &surface_parts,
                          &static_pool, &static_blas_buffer, &noise_staging, &constants_buffer, &sbt_buffer, &index_ring, &probe_chunks,
                          &probe_ranges, &probe_partials, &split_fetch, &split_staging}) {
         DestroyBuffer(*buffer);

@@ -317,6 +317,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     in.pool_address = static_pool.address;
     if (static_frame == frame && static_valid && use_cache) {
         in.static_parts.swap(static_build); // built in this pass
+        SurfaceTable(in);
     }
     in.split_fetch_bytes = vk::DeviceSize(promo_used) * 36;
     in.split_fetch_src = vk::DeviceSize(max_triangles) * 36; // the promotions' region
@@ -337,6 +338,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
         instances.push_back(make_instance(blas_address, false));
     }
     const bool static_now = use_cache && static_valid;
+    static_in_frame = static_now;
     if (static_now) {
         instances.push_back(make_instance(static_blas_address, true));
     }
@@ -388,6 +390,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     in.blas_scratch_address = blas_scratch.address;
     in.tlas_scratch_address = tlas_scratch.address;
     in.pool_copies = std::move(pool_copies);
+    in.surface_cache_handle = settings.surface ? surface_cache.buffer : vk::Buffer{};
     SampleExtents(in, classified);
     FillConstants(in, slot, read, probe_id);
     RecordPasses(in);

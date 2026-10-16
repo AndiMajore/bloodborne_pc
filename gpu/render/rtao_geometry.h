@@ -159,6 +159,8 @@ struct Settings {
     u32 static_interval = 30;    // frames between rebuilds for a changed set (not for a move); 0: every pass // > 0: meshes bigger than cache_max_size are cached in pieces of this size
     bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
     float foliage = 0.0f; // > 0: alpha-tested draws occlude with this probability per hit (0: left out)
+    bool surface = false;        // experimental: the surface cache (radiance per static pool triangle)
+    u32 surface_budget = 131072; // static triangles looked at per frame
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };

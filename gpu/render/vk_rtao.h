@@ -87,6 +87,23 @@ public:
     [[nodiscard]] vk::AccelerationStructureKHR FrameTlas() const noexcept {
         return tlas_frame == frame && Active() ? tlas : vk::AccelerationStructureKHR{};
     }
+    /// bbport (experimental, surface=1): radiance per static pool triangle, filled from the lit
+    /// screen where a triangle was seen. A ray hit on the static instance (custom index 1) reads
+    /// cache[parts[geometry].x + primitive] (two u32: half rg, half b + weight; weight 0 = never
+    /// seen). Zero addresses: not available this frame.
+    struct SurfaceCache {
+        vk::DeviceAddress cache = 0, parts = 0;
+        u32 part_count = 0;
+    };
+    [[nodiscard]] SurfaceCache FrameSurface() const noexcept {
+        if (!FrameTlas() || !settings.surface || !surface_cache.buffer || !static_in_frame ||
+            !surface_part_count) {
+            return {};
+        }
+        return {surface_cache.address, surface_parts.address, surface_part_count};
+    }
+    /// The lit opaque scene of this frame: a slice of the surface cache is refreshed from it.
+    void OnOpaqueScene(VideoCore::ImageId color); // vk_rtao_surface.cpp
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
         history_valid = false;
@@ -341,6 +358,18 @@ private:
     u32 skipped_copy = 0;      // draws left out: the index ring slot was busy or full (per report)
     bool recorded_this_frame = false;
     u32 tlas_frame = ~0u; // frame whose pass built the TLAS (FrameTlas)
+    bool static_in_frame = false; // the TLAS of this frame has the static instance
+    // Surface cache (vk_rtao_surface.cpp): radiance per pool triangle; the static BLAS's
+    // geometries as (pool offset, first triangle of the walk) for the hit lookup and the refresh.
+    Buffer surface_cache, surface_parts;
+    static constexpr u32 MaxSurfaceParts = 32768;
+    u32 surface_part_count = 0, surface_total = 0, surface_cursor = 0;
+    bool surface_cleared = false;
+    vk::UniqueDescriptorSetLayout surface_desc_layout;
+    vk::UniquePipelineLayout surface_layout;
+    vk::UniquePipeline surface_pipeline;
+    bool CreateSurfaceCache(); // vk_rtao_surface.cpp
+    void SurfaceTable(RtaoInternal::PassInputs& in); // vk_rtao_surface.cpp: with a static rebuild
     bool hold_enabled = true;     // BB_RTAO_HOLD=0: no retirement hold (to test what it protects)
     bool test_move = false;       // BB_RTAO_TEST_MOVE=1 (layer memory, BB_DRAW_PIPE=0): mirrors moved
     bool test_move_pending = false; // back in place between the AO upsample and the pass
