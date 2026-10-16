@@ -73,7 +73,8 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     // their traversal saved (Doll, three sessions: build 1.65 vs 2.41 ms, trace 1.79 vs 1.73 ms).
     // The static BLAS: staticbuild= (fast build with the flag by default: a rebuild costs 1.4 ms
     // instead of 2.75 for fast trace, and traces 0.03 ms slower).
-    data_access = EnvU32("BB_RTAO_DATA_ACCESS", 1) != 0;
+    // The flag is VK_KHR_ray_tracing_position_fetch's: without the extension, builds go without it.
+    data_access = EnvU32("BB_RTAO_DATA_ACCESS", 1) != 0 && instance.IsRayTracingPositionFetchSupported();
     hold_enabled = EnvU32("BB_RTAO_HOLD", 1) != 0;
     test_move = EnvU32("BB_RTAO_TEST_MOVE", 0) != 0;
 

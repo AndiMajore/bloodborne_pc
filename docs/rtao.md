@@ -13,6 +13,8 @@ it the port is unchanged.
   are enabled on the device only with `BB_RTAO=1`.
   `VK_KHR_ray_tracing_pipeline`, where present, runs the trace as a ray-tracing pipeline (faster
   on the RX 9070 XT); otherwise it runs as ray queries in a compute shader.
+  `VK_KHR_ray_tracing_position_fetch`, where present, only for the BLAS flag ALLOW_DATA_ACCESS it
+  defines (cheaper builds on RADV, see measurements); without it the builds go without the flag.
 - Object motion vectors (an upscaler with motion vectors): the geometry comes from that capture.
   With `BB_RTAO=1`, ray queries and object motion on, G-buffer pipelines the motion path leaves
   out get a capture-only variant (pipeline key `motion_vectors = 2`: the vertex shader stores

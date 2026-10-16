@@ -317,8 +317,12 @@ bool Instance::CreateDevice() {
                     add_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
                     add_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
         ray_tracing_pipeline = ray_query && add_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
-        std::printf("RTAO: device extensions: ray queries %s, ray-tracing pipeline %s\n",
-                    ray_query ? "on" : "unsupported", ray_tracing_pipeline ? "on" : "unsupported");
+        // Not for fetching positions: it defines ALLOW_DATA_ACCESS, which the RTAO's BLAS builds
+        // set because on RADV it makes them cheaper (vk_rtao_setup.cpp).
+        position_fetch = ray_query && add_extension(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+        std::printf("RTAO: device extensions: ray queries %s, ray-tracing pipeline %s, position fetch %s\n",
+                    ray_query ? "on" : "unsupported", ray_tracing_pipeline ? "on" : "unsupported",
+                    position_fetch ? "on" : "unsupported");
     }
     dynamic_state_3 = add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
     if (dynamic_state_3) {
@@ -659,6 +663,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceRayTracingPipelineFeaturesKHR{
             .rayTracingPipeline = true,
         },
+        vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR{
+            .rayTracingPositionFetch = true,
+        },
     };
     if (!ray_query) {
         device_chain.unlink<vk::PhysicalDeviceAccelerationStructureFeaturesKHR>();
@@ -666,6 +673,9 @@ bool Instance::CreateDevice() {
     }
     if (!ray_tracing_pipeline) {
         device_chain.unlink<vk::PhysicalDeviceRayTracingPipelineFeaturesKHR>();
+    }
+    if (!position_fetch) {
+        device_chain.unlink<vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR>();
     }
 
     if (!custom_border_color) {

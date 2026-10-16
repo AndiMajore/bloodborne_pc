@@ -116,6 +116,14 @@ void RtaoInternal::Worker::Run() {
     }
 }
 
+vk::BuildAccelerationStructureFlagsKHR RayTracedAO::StaticFlags(u32 mode) const {
+    using F = vk::BuildAccelerationStructureFlagBitsKHR;
+    return mode == 0 ? vk::BuildAccelerationStructureFlagsKHR{F::ePreferFastTrace}
+           : mode == 1 || !instance.IsRayTracingPositionFetchSupported()
+               ? vk::BuildAccelerationStructureFlagsKHR{F::ePreferFastBuild}
+               : F::ePreferFastBuild | F::eAllowDataAccess;
+}
+
 bool RayTracedAO::CreateBuffer(Buffer& out, vk::DeviceSize size, vk::BufferUsageFlags usage,
                                bool host, vk::DeviceSize alignment, bool quiet, bool readback) {
     const VkBufferCreateInfo buffer_ci{

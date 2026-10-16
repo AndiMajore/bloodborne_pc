@@ -222,6 +222,10 @@ public:
     bool IsRayQuerySupported() const {
         return ray_query;
     }
+    /// bbport: VK_KHR_ray_tracing_position_fetch (it defines the BLAS flag ALLOW_DATA_ACCESS).
+    bool IsRayTracingPositionFetchSupported() const noexcept {
+        return position_fetch;
+    }
     /// bbport: VK_KHR_ray_tracing_pipeline (the RTAO trace's pipeline variant).
     bool IsRayTracingPipelineSupported() const noexcept {
         return ray_tracing_pipeline;
@@ -612,6 +616,7 @@ private:
     bool maintenance_5{};
     bool ray_query{}; // bbport: VK_KHR_ray_query + acceleration structures (vk_rtao.cpp)
     bool ray_tracing_pipeline{}; // bbport: VK_KHR_ray_tracing_pipeline
+    bool position_fetch{}; // bbport: VK_KHR_ray_tracing_position_fetch
     bool maintenance_8{};
     bool buffer_marker{};
     bool attachment_feedback_loop{};

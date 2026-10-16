@@ -156,13 +156,9 @@ private:
     bool CreateBuffer(Buffer& buffer, vk::DeviceSize size, vk::BufferUsageFlags usage, bool host,
                       vk::DeviceSize alignment = 0, bool quiet = false, bool readback = false);
     void RebuildStatic(float reach); // choose the static BLAS's parts; built in this pass
-    /// The static BLAS's build flags (staticbuild=; the buffers are sized for all of them).
-    static vk::BuildAccelerationStructureFlagsKHR StaticFlags(u32 mode) {
-        using F = vk::BuildAccelerationStructureFlagBitsKHR;
-        return mode == 0 ? vk::BuildAccelerationStructureFlagsKHR{F::ePreferFastTrace}
-               : mode == 1 ? vk::BuildAccelerationStructureFlagsKHR{F::ePreferFastBuild}
-                           : F::ePreferFastBuild | F::eAllowDataAccess;
-    }
+    /// The static BLAS's build flags (staticbuild=; the buffers are sized for all of them). Mode 2
+    /// is mode 1 where ALLOW_DATA_ACCESS's extension is missing.
+    vk::BuildAccelerationStructureFlagsKHR StaticFlags(u32 mode) const; // vk_rtao_resources.cpp
     void DestroyBuffer(Buffer& buffer);
     bool EnsureResources(u32 width, u32 height);
     bool CreateAccelerationStructures();
