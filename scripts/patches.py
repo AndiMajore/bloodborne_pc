@@ -73,6 +73,16 @@ def skip_network_choice(env=os.environ):
     return env.get('BB_SKIP_NETWORK_CHOICE','1')!='0'
 
 
+# The game's per-frame render command heap (#162): 256 KiB per frame, and the game writes through
+# the null it gets once a frame's commands fill it. 1 MiB instead; on by default,
+# BB_GX_COMMAND_HEAP=0 keeps the game's size.
+GX_COMMAND_HEAP='Larger GX Per-Frame Command Heap'
+
+
+def gx_command_heap(env=os.environ):
+    return env.get('BB_GX_COMMAND_HEAP','1')!='0'
+
+
 def intel_tonemap_fix(env=os.environ, cpuinfo='/proc/cpuinfo'):
     forced=env.get('BB_INTEL_TONEMAP_FIX')
     return forced=='1' if forced in ('0','1') else intel_cpu(cpuinfo)
@@ -358,6 +368,8 @@ def main():
         names.append(INTEL_TONEMAP)
     if skip_network_choice() and SKIP_NETWORK_CHOICE not in names:
         names.append(SKIP_NETWORK_CHOICE)
+    if gx_command_heap() and GX_COMMAND_HEAP not in names:
+        names.append(GX_COMMAND_HEAP)
     names=validate_patch_requirements(names,a.game_dir)
     segments=eboot_segments((a.out/'eboot.elf').read_bytes())
     writes=compile_patches(a.xml,names,a.app_version,segments)
