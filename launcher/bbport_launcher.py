@@ -113,9 +113,9 @@ RTAO_PRESETS = {
     "medium": {"rays": 2, "radius": 1.5, "strength": 1.0, "distance": 40.0},
     "high": {"rays": 4, "radius": 2.0, "strength": 1.0, "distance": 60.0},
 }
-RTAO_PRESET_CHOICES = [("Низкое", "low", "1 луч, радиус 1 м, до 25 м"),
-                       ("Среднее", "medium", "2 луча, радиус 1,5 м, до 40 м"),
-                       ("Высокое", "high", "4 луча, радиус 2 м, до 60 м"),
+RTAO_PRESET_CHOICES = [("Низкое", "low", "1 луч, радиус 1 м, до 25 м; около 0,6 мс"),
+                       ("Среднее", "medium", "2 луча, радиус 1,5 м, до 40 м; около 1 мс"),
+                       ("Высокое", "high", "4 луча, радиус 2 м, до 60 м; около 1,6 мс"),
                        ("Своё", "custom", "Значения ниже")]
 # A third element is a note shown under the row's title while that choice is selected: the
 # choice labels stay short, so the selected one is shown in full.
@@ -730,7 +730,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             description=tr("Затенение окружения трассировкой лучей (RTAO) вместо экранного SSAO игры: "
                            "тени в углах и под предметами, в том числе от того, что вне кадра. Нужны "
                            "видеокарта с трассировкой лучей, апскейлер с векторами движения объектов и "
-                           "включённое затенение SSAO. Около 1–1,5 мс на кадр; значения меняются и на "
+                           "включённое затенение SSAO. 0,6–1,6 мс на кадр (RX 9070 XT); значения меняются и на "
                            "лету через user/rtao.txt."))
         self.rtao_row = Adw.SwitchRow(title=tr("Затенение трассировкой лучей (RTAO)"),
                                       subtitle="BB_RTAO", active=self.settings.get("rtao", False))

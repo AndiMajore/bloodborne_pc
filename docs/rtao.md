@@ -6,6 +6,10 @@ ray queries at half resolution. The result is written into the game's own AO mas
 lighting applies it exactly where it applied its SSAO. Everything is behind `BB_RTAO=1`; without
 it the port is unchanged.
 
+In the launcher: Settings, "Ray tracing (experimental)" (below the SSGI group): the switch sets `BB_RTAO=1`, the quality
+preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far` and `snap` into
+`user/rtao.txt` at launch (costs in the measurements table; medium is the default below).
+
 ## Requirements
 
 - `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`, `VK_KHR_deferred_host_operations` (RADV on
@@ -194,6 +198,7 @@ Decisions measured at the Doll (A/B in one session unless noted):
 | Blue noise vs IGN, 2 rays, against a 32-ray reference (still camera, 8 frames each, two A/B pairs) | IGN: per-frame mean error 0.035-0.036, RMS 0.082-0.084, 8-frame mean 0.031-0.033 | blue: 0.023-0.031, RMS 0.054-0.070, 8-frame 0.019-0.027; stability (pixels changing > 0.05) equal, 3.44 vs 3.45%; same cost |
 | Refits of the per-frame BLAS (characters; ALLOW_UPDATE, rebuilt every 30 frames; dropped) | still: BLAS 0.40, trace 0.62 ms; walking: trace 0.65-0.69 | still: 0.26 / 0.62; walking: trace 1.18-1.74 (bloated bounds); collapsed triangles at the camera hung the camera-ray test |
 | Reusing a character's BLAS while its bone palette is unchanged (Doll, 600-frame windows; not built) | 104 skinned draws, 924k triangles per frame | palette unchanged for 5-9 % of draws, 1.5-1.9 % of triangles: every character animates every frame, idle included |
+| Launcher presets at the Doll (GPU busy; RTAO off 13.47 ms) | low (1 ray, 1 m, 25 m): 14.09 ms (BLAS 0.53, trace 0.43) | medium (2 rays, 1.5 m, 40 m): 14.47 (0.64, 0.67); high (4 rays, 2 m, 60 m): 15.02 (0.77, 1.12) |
 | Static BLAS rebuild (`rebuild=0`: every pass; 956k triangles) | fast trace: 2.75 ms, fast build 2.06 | fast build + data access 1.39 ms, trace +0.03 ms: default |
 
 Known cost drivers: the per-frame BLAS (the characters: 0.8M triangles at the Doll) is rebuilt from
