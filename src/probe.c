@@ -26,6 +26,7 @@
 #include <windows.h>
 #else
 #include <malloc.h>
+#include <sys/prctl.h>
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -136,6 +137,28 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
+/* BB_FAULT_WAIT=1: a fatal fault or a GPU-library assertion leaves the process alive, stopped
+ * in its handler, so a debugger can attach to the faulting thread with its registers and stack
+ * still there: bash tools/debug_attach.sh <pid>. Any process of this user may attach
+ * (PR_SET_PTRACER_ANY, set at startup). Exported (-rdynamic): libbbgpu.so calls it too. */
+void bb_fault_wait(const char *what) {
+#ifndef _WIN32
+    const char *wait = getenv("BB_FAULT_WAIT");
+    if (!wait || strcmp(wait, "1")) return;
+    char line[256];
+    snprintf(line, sizeof(line), "bbport: %s; BB_FAULT_WAIT=1: the process stays alive for a debugger:"
+             " bash tools/debug_attach.sh %d\n", what, (int)getpid());
+    { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    if (fork() == 0) {
+        snprintf(line, sizeof(line), "%s. Waiting for a debugger: bash tools/debug_attach.sh %d", what, (int)getppid());
+        execlp("notify-send", "notify-send", "-u", "critical", "bbport stopped", line, (char *)NULL);
+        _exit(0);
+    }
+    for (;;) pause();
+#else
+    (void)what;
+#endif
+}
 #ifdef _WIN32
 /* The game's entry on the main thread's low stack (bb_run_on_stack). */
 static void enter_game(void *p) {
@@ -243,6 +266,8 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
+    snprintf(line, sizeof(line), "fault (signal %d)", sig);
+    bb_fault_wait(line);
     _exit(128 + sig);
 }
 static uintptr_t exe_base;
@@ -450,6 +475,9 @@ int main(int argc, char **argv) {
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
+#ifndef _WIN32
+    { const char *w = getenv("BB_FAULT_WAIT"); if (w && !strcmp(w, "1")) prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0); }
+#endif
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
 #ifndef _WIN32
