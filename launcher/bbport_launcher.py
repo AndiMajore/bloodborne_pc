@@ -182,6 +182,9 @@ DEFAULTS = {
     "user_dir": "",
     "mods_dir": "",
     "mods_enabled": True,
+    "ssgi": False,
+    "ssgi_strength": 8.0,
+    "ssgi_adaptive": 4.0,
     "rtao": False,
     "rtao_preset": "medium",
     "rtao_rays": 2,
@@ -370,6 +373,13 @@ def game_environment(s):
     env["BB_MODS_DIR"] = str(Path(s.get("mods_dir") or DATA_DIR / "mods").expanduser())
     env["BB_MODS_CONFIG"] = str(DATA_DIR / "mods.json")
     env["BB_MODS_ENABLED"] = "1" if s.get("mods_enabled", True) else "0"
+    # Screen-space GI (vk_ssgi.cpp): on by BB_SSGI=1; strength and adaptive damping go through
+    # the live settings file the pass re-reads while the game runs (other keys there are kept).
+    if s.get("ssgi"):
+        env["BB_SSGI"] = "1"
+        write_live_settings(settings_user_dir(s) / "ssgi.txt",
+                            {"strength": float(s.get("ssgi_strength", 8.0)),
+                             "adaptive": float(s.get("ssgi_adaptive", 4.0)), "enabled": 1})
     # Ray-traced AO (vk_rtao.cpp): on by BB_RTAO=1; the quality values go through its live settings
     # file (user/rtao.txt, other keys there are kept), the surface snap as far as the AO reaches.
     if s.get("rtao"):
@@ -742,6 +752,28 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.patch_list = FolderList(self.patches_group)
         self.refresh_patches()
         page.add(self.patches_group)
+
+        ssgi = Adw.PreferencesGroup(
+            title=tr("Экспериментальное освещение"),
+            description=tr("Отражённый свет в экранном пространстве (SSGI): один отскок от освещённых "
+                           "поверхностей, добавляется к сцене перед прозрачными объектами. "
+                           "Экспериментально; значения меняются и на лету через user/ssgi.txt."))
+        self.ssgi_row = Adw.SwitchRow(title=tr("Отражённый свет (SSGI)"),
+                                      subtitle="BB_SSGI", active=self.settings.get("ssgi", False))
+        ssgi.add(self.ssgi_row)
+        self.ssgi_strength_row = Adw.SpinRow.new_with_range(0.0, 16.0, 0.5)
+        self.ssgi_strength_row.set_title(tr("Сила отражённого света"))
+        self.ssgi_strength_row.set_subtitle(tr("8 — подобрано для Bloodborne; 12 уже окрашивает"))
+        self.ssgi_strength_row.set_digits(1)
+        self.ssgi_strength_row.set_value(float(self.settings.get("ssgi_strength", 8.0)))
+        ssgi.add(self.ssgi_strength_row)
+        self.ssgi_adaptive_row = Adw.SpinRow.new_with_range(0.0, 16.0, 0.5)
+        self.ssgi_adaptive_row.set_title(tr("Ослабление на светлых поверхностях"))
+        self.ssgi_adaptive_row.set_subtitle(tr("0 — везде одинаково; 4 — яркие сцены почти без изменений"))
+        self.ssgi_adaptive_row.set_digits(1)
+        self.ssgi_adaptive_row.set_value(float(self.settings.get("ssgi_adaptive", 4.0)))
+        ssgi.add(self.ssgi_adaptive_row)
+        page.add(ssgi)
 
         rtao = Adw.PreferencesGroup(
             title=tr("Трассировка лучей (экспериментально)"),
@@ -1307,6 +1339,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["vk_validation"] = self.validation_row.get_active()
         s["extra_env"] = self.extra_row.get_text().strip()
         s["mods_enabled"] = self.mods_enabled_row.get_active()
+        s["ssgi"] = self.ssgi_row.get_active()
+        s["ssgi_strength"] = float(self.ssgi_strength_row.get_value())
+        s["ssgi_adaptive"] = float(self.ssgi_adaptive_row.get_value())
         s["rtao"] = self.rtao_row.get_active()
         s["rtao_preset"] = combo_value(self.rtao_preset_row)
         s["rtao_rays"] = int(self.rtao_rays_row.get_value())

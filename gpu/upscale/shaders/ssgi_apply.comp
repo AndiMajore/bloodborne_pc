@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: screen-space GI, apply at full resolution (vk_ssgi.cpp): depth-aware upsample of the
+// half-res gather, scene colour += albedo * gi * strength. DEBUG: the gi alone.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D gi_tex;     // half res: rgb gi, a view z
+layout(binding = 1) uniform texture2D depth_tex;  // full res
+layout(binding = 2) uniform texture2D albedo_tex; // full res, sRGB view: linear on fetch
+layout(binding = 3, rgba16f) uniform image2D color_img; // full res scene colour, read + write
+
+layout(push_constant) uniform Constants {
+    vec4 proj;
+    vec2 full_size;
+    vec2 half_size;
+    float strength;
+    uint debug;
+    float adaptive; // damping of the bounce by the surface's own brightness: / (1 + adaptive * luma)
+};
+
+float ViewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+
+void main() {
+    const ivec2 fp = ivec2(gl_GlobalInvocationID.xy);
+    if (fp.x >= int(full_size.x) || fp.y >= int(full_size.y)) {
+        return;
+    }
+    const float depth = texelFetch(depth_tex, fp, 0).r;
+    if (depth >= 1.0) {
+        return;
+    }
+    const float z = ViewZ(depth);
+    // The four half-res texels around this pixel, weighted by closeness in depth.
+    const vec2 hpf = (vec2(fp) + 0.5) / 2.0 - 0.5;
+    const ivec2 h0 = ivec2(floor(hpf));
+    const vec2 f = hpf - vec2(h0);
+    vec3 gi = vec3(0.0);
+    float wsum = 0.0;
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const ivec2 hp = clamp(h0 + ivec2(i, j), ivec2(0), ivec2(half_size) - 1);
+            const vec4 g = texelFetch(gi_tex, hp, 0);
+            const float wb = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            const float wd = exp(-abs(g.a - z) / (0.05 * z));
+            const float w = wb * wd + 1e-5;
+            gi += g.rgb * w;
+            wsum += w;
+        }
+    }
+    gi /= wsum;
+    const vec4 color = imageLoad(color_img, fp);
+    const vec3 albedo = texelFetch(albedo_tex, fp, 0).rgb;
+    // Where the surface is already bright the bounce piles on and reads as a filter (a
+    // sky-lit garden); the eye would adapt, the tonemapper cannot: damp by the existing light.
+    const float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    const vec3 bounce = albedo * gi * strength / (1.0 + adaptive * luma);
+    imageStore(color_img, fp, debug != 0u ? vec4(bounce, color.a) : vec4(color.rgb + bounce, color.a));
+}

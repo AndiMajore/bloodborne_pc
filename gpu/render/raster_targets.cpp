@@ -187,6 +187,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const auto& vp = regs.viewports[0];
         camera_motion->OnGBufferPass(db_desc.first, vp.xscale < 0.0f ? -1.0f : 1.0f,
                                      vp.yscale < 0.0f ? -1.0f : 1.0f);
+        if (ssgi->Enabled() && cb_descs[0].first && cb_descs[2].first) {
+            ssgi->OnGBufferPass(db_desc.first, cb_descs[0].first, cb_descs[2].first);
+        }
         if (rtao->Enabled() && cb_descs[0].first) {
             rtao->OnGBufferPass(db_desc.first, cb_descs[0].first);
         }
@@ -215,9 +218,12 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass &&
                 !regs.depth_control.depth_write_enable &&
                 (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+                ssgi->OnOpaqueScene(cb_descs[0].first);
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
                 // A full-screen pass over the scene (the fog composite): the transparents are in.
+                // (Not an SSGI trigger: the lighting composites into intermediate RGBA16F
+                // targets come first and would be hit before they draw.)
                 upscaler->OnSceneComposite();
             }
         }

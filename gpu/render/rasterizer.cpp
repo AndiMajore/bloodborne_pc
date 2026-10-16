@@ -36,6 +36,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
     camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
     camera_motion->SetObjectMotion(object_motion.get());
+    ssgi = std::make_unique<ScreenSpaceGI>(instance, scheduler, texture_cache, runtime,
+                                           *camera_motion, *scene_targets);
     rtao = std::make_unique<RayTracedAO>(instance, scheduler, texture_cache, buffer_cache, runtime,
                                          *camera_motion, *object_motion);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
@@ -152,6 +154,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_started = false;
         upscaler->OnDisplayPassStart(regs.color_buffers[0].Address());
         camera_motion->OnDisplayPass(cb_descs[0].first);
+        ssgi->OnFrameStart();
         rtao->OnFrameStart();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
