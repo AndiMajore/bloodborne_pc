@@ -80,6 +80,13 @@ public:
         return enabled && resources_ready && settings.active && !pass_missing;
     }
     void OnFrameStart();
+    /// bbport (RT lighting, experimental): the scene's TLAS as built by this frame's pass (view
+    /// space of the frame's camera, the per-frame BLAS and the static one), or null when the pass
+    /// did not run this frame. Other passes later in the frame may trace against it (compute,
+    /// after the build's barrier); it is rebuilt at the next frame's AO pass.
+    [[nodiscard]] vk::AccelerationStructureKHR FrameTlas() const noexcept {
+        return tlas_frame == frame && Active() ? tlas : vk::AccelerationStructureKHR{};
+    }
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
         history_valid = false;
@@ -333,6 +340,7 @@ private:
     int index_ring_state = -1; // this frame: -1 not checked, 0 slot busy, 1 usable
     u32 skipped_copy = 0;      // draws left out: the index ring slot was busy or full (per report)
     bool recorded_this_frame = false;
+    u32 tlas_frame = ~0u; // frame whose pass built the TLAS (FrameTlas)
     bool hold_enabled = true;     // BB_RTAO_HOLD=0: no retirement hold (to test what it protects)
     bool test_move = false;       // BB_RTAO_TEST_MOVE=1 (layer memory, BB_DRAW_PIPE=0): mirrors moved
     bool test_move_pending = false; // back in place between the AO upsample and the pass

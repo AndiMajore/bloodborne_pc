@@ -127,6 +127,7 @@ add_own_shader(upscale/shaders/camera_motion.comp camera_motion_comp)
 # bbport: screen-space GI (upscale/vk_ssgi.cpp, BB_SSGI=1).
 add_own_shader(upscale/shaders/ssgi_gather.comp ssgi_gather_comp)
 add_own_shader(upscale/shaders/ssgi_apply.comp ssgi_apply_comp)
+add_own_shader(upscale/shaders/ssgi_gather_rt.comp ssgi_gather_rt_comp)
 add_own_shader(upscale/shaders/upscale_merge.comp upscale_merge_comp)
 add_own_shader(upscale/shaders/upscale_reactive.comp upscale_reactive_comp)
 add_own_shader(upscale/shaders/taa.comp taa_comp)

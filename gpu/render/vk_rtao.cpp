@@ -296,6 +296,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
                            vk::DeviceSize(slot) * IndexRingSlot, index_ring_used);
     }
     recorded_this_frame = true;
+    tlas_frame = settings.stage >= 3 ? frame : ~0u;
     // This pass's commands go out with the current tick: the slots are busy until it is reached.
     slot_ticks[slot] = scheduler.CurrentTick();
     if (split_fetch_now) {

@@ -24,6 +24,7 @@ class Scheduler;
 class Runtime;
 class CameraMotion;
 class SceneTargets;
+class RayTracedAO;
 
 class ScreenSpaceGI {
 public:
@@ -42,6 +43,10 @@ public:
     void OnOpaqueScene(VideoCore::ImageId color);
     /// Start of a frame.
     void OnFrameStart();
+    /// bbport (experimental): the ray-traced AO whose scene the RT gather traces (rt=1).
+    void SetRayTracedAO(const RayTracedAO* rtao_) {
+        rtao = rtao_;
+    }
     /// <user>/ssgi.txt (BB_SSGI_FILE): "key=value" lines (strength, radius, history, directions,
     /// steps, debug, enabled) re-read within a second of a change: tuning while the game runs.
     void PollSettings();
@@ -60,7 +65,10 @@ private:
     SceneTargets& scene_targets;
 
     bool enabled = false;
-    bool debug = false;
+    u32 debug = 0;      // 1: the bounce alone; 2 (rt): rays seen (green) / hidden (red)
+    bool rt = false;    // rt=1: the gather traces rays against the RTAO's scene (experimental)
+    u32 rays = 2;       // per half-res pixel (rt)
+    const RayTracedAO* rtao = nullptr;
     float strength = 1.0f;
     float radius = 2.0f;
     u32 directions = 4, steps = 6;
@@ -80,6 +88,10 @@ private:
     vk::UniqueDescriptorSetLayout gather_desc_layout, apply_desc_layout;
     vk::UniquePipelineLayout gather_layout, apply_layout;
     vk::UniquePipeline gather_pipeline, apply_pipeline;
+    vk::UniqueDescriptorSetLayout gather_rt_desc_layout; // + binding 6, the TLAS
+    vk::UniquePipelineLayout gather_rt_layout;
+    vk::UniquePipeline gather_rt_pipeline;               // null without ray queries
+    u32 rt_passes = 0, rt_fallbacks = 0;                 // (per report)
     std::array<VideoCore::HostImage, 2> gi_images;
     std::array<vk::UniqueImageView, 2> gi_views;
     VideoCore::HostImage motion_image;

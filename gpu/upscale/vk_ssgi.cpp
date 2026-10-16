@@ -10,6 +10,8 @@
 
 #include "bbgpu/shaders/ssgi_apply_comp.h"
 #include "bbgpu/shaders/ssgi_gather_comp.h"
+#include "bbgpu/shaders/ssgi_gather_rt_comp.h"
+#include "render/vk_rtao.h"
 #include "upscale/vk_camera_motion.h"
 #include "vulkan/instance.h"
 #include "render/runtime.h"
@@ -31,6 +33,18 @@ struct GatherConstants {
     u32 frame;
     u32 directions;
     u32 steps;
+};
+struct GatherRtConstants {
+    std::array<float, 12> view;
+    std::array<float, 4> proj;
+    std::array<float, 2> full_size;
+    std::array<float, 2> half_size;
+    std::array<float, 2> jitter;
+    float radius;
+    float history;
+    u32 frame;
+    u32 rays;
+    u32 debug;
 };
 struct ApplyConstants {
     std::array<float, 4> proj;
@@ -60,7 +74,9 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
     if (!enabled) {
         return;
     }
-    debug = EnvU32("BB_SSGI_DEBUG", 0) != 0;
+    debug = EnvU32("BB_SSGI_DEBUG", 0);
+    rt = EnvU32("BB_SSGI_RT", 0) != 0;
+    rays = std::clamp(EnvU32("BB_SSGI_RAYS", 2), 1u, 8u);
     strength = EnvFloat("BB_SSGI_STRENGTH", 1.0f);
     radius = EnvFloat("BB_SSGI_RADIUS", 2.0f);
     directions = std::clamp(EnvU32("BB_SSGI_DIRECTIONS", 4), 1u, 16u);
@@ -126,6 +142,19 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
     make_layouts(apply_bindings, sizeof(ApplyConstants), apply_desc_layout, apply_layout);
     gather_pipeline = make_pipeline(SSGI_GATHER_COMP, *gather_layout);
     apply_pipeline = make_pipeline(SSGI_APPLY_COMP, *apply_layout);
+    // The ray-traced gather (rt=1): the same bindings and the RTAO's TLAS. Only with ray queries
+    // on the device (BB_RTAO=1 on a GPU that has them).
+    if (instance.IsRayQuerySupported()) {
+        const std::array rt_bindings = {
+            sampled(0), sampled(1), sampled(2), sampled(3), sampled(4), storage(5),
+            vk::DescriptorSetLayoutBinding{.binding = 6,
+                                           .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
+                                           .descriptorCount = 1,
+                                           .stageFlags = vk::ShaderStageFlagBits::eCompute}};
+        make_layouts(rt_bindings, sizeof(GatherRtConstants), gather_rt_desc_layout, gather_rt_layout);
+        gather_rt_pipeline = make_pipeline(SSGI_GATHER_RT_COMP, *gather_rt_layout);
+        std::printf("SSGI: ray-traced gather available (rt=1 in ssgi.txt, experimental)\n");
+    }
 }
 
 ScreenSpaceGI::~ScreenSpaceGI() {
@@ -182,13 +211,16 @@ void ScreenSpaceGI::PollSettings() {
         else if (key == "history") history = std::clamp(value, 0.0f, 0.98f);
         else if (key == "directions") directions = std::clamp(u32(value), 1u, 16u);
         else if (key == "steps") steps = std::clamp(u32(value), 1u, 32u);
-        else if (key == "debug") debug = value != 0.0f;
+        else if (key == "debug") debug = u32(std::max(value, 0.0f));
+        else if (key == "rt") rt = value != 0.0f;
+        else if (key == "rays") rays = std::clamp(u32(std::max(value, 1.0f)), 1u, 8u);
         else if (key == "enabled") enabled = value != 0.0f;
         else if (key == "adaptive") adaptive = std::max(value, 0.0f);
     }
     std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, "
-                "adaptive %.2f, debug %d\n",
-                enabled ? 1 : 0, strength, radius, directions, steps, history, adaptive, debug ? 1 : 0);
+                "adaptive %.2f, debug %u, rt %d (%u rays)\n",
+                enabled ? 1 : 0, strength, radius, directions, steps, history, adaptive, debug,
+                rt ? 1 : 0, rays);
 }
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color) {
@@ -387,18 +419,43 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .full_size = gather.full_size,
         .half_size = gather.half_size,
         .strength = strength,
-        .debug = debug ? 1u : 0u,
+        .debug = debug != 0 ? 1u : 0u,
         .adaptive = adaptive,
     };
     history_valid = true;
+    // The ray-traced gather: when asked for and the RTAO built its scene this frame; otherwise
+    // the screen march (counted: a frame without the RTAO's pass falls back).
+    const vk::AccelerationStructureKHR tlas =
+        rt && gather_rt_pipeline && rtao ? rtao->FrameTlas() : vk::AccelerationStructureKHR{};
+    if (rt) {
+        ++(tlas ? rt_passes : rt_fallbacks);
+        if ((rt_passes + rt_fallbacks) % 600 == 0) {
+            std::printf("SSGI: ray-traced gather in %u of 600 passes (%u fell back to the march)\n",
+                        rt_passes, rt_fallbacks);
+            rt_passes = rt_fallbacks = 0;
+        }
+    }
+    const GatherRtConstants gather_rt{
+        .view = gather.view,
+        .proj = gather.proj,
+        .full_size = gather.full_size,
+        .half_size = gather.half_size,
+        .jitter = camera_motion.Jitter(),
+        .radius = radius,
+        .history = gather.history,
+        .frame = frame,
+        .rays = rays,
+        .debug = debug,
+    };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];
     const vk::ImageView motion = *motion_view;
     scheduler.RecordCrumb(
         {.name = "ssgi"},
-        [gather, apply, depth_view, normal_view, color_view, albedo_view, motion, gi_read,
-         gi_write, gi_image = vk::Image(gi_images[write]), w, h,
+        [gather, gather_rt, tlas, apply, depth_view, normal_view, color_view, albedo_view, motion,
+         gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
          gather_pipeline = *gather_pipeline, gather_layout = *gather_layout,
+         gather_rt_pipeline = *gather_rt_pipeline, gather_rt_layout = *gather_rt_layout,
          apply_pipeline = *apply_pipeline, apply_layout = *apply_layout,
          compute](vk::CommandBuffer cmdbuf) {
             const auto info = [](vk::ImageView view) {
@@ -420,12 +477,32 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
                 const std::array writes = {write_of(0, sampled, &d), write_of(1, sampled, &n),
                                            write_of(2, sampled, &c), write_of(3, sampled, &m),
                                            write_of(4, sampled, &p), write_of(5, storage, &o)};
-                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, gather_pipeline);
-                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, gather_layout, 0,
-                                            writes);
-                cmdbuf.pushConstants(gather_layout, vk::ShaderStageFlagBits::eCompute, 0,
-                                     sizeof(gather), &gather);
-                cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+                if (tlas) {
+                    const vk::WriteDescriptorSetAccelerationStructureKHR as_info{
+                        .accelerationStructureCount = 1,
+                        .pAccelerationStructures = &tlas,
+                    };
+                    std::array<vk::WriteDescriptorSet, 7> rt_writes{};
+                    std::copy(writes.begin(), writes.end(), rt_writes.begin());
+                    rt_writes[6] = vk::WriteDescriptorSet{
+                        .pNext = &as_info,
+                        .dstBinding = 6,
+                        .descriptorCount = 1,
+                        .descriptorType = vk::DescriptorType::eAccelerationStructureKHR};
+                    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, gather_rt_pipeline);
+                    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, gather_rt_layout, 0,
+                                                rt_writes);
+                    cmdbuf.pushConstants(gather_rt_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                         sizeof(gather_rt), &gather_rt);
+                    cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 3) / 4, 1);
+                } else {
+                    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, gather_pipeline);
+                    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, gather_layout, 0,
+                                                writes);
+                    cmdbuf.pushConstants(gather_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                         sizeof(gather), &gather);
+                    cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+                }
             }
             const vk::ImageMemoryBarrier2 b{
                 .srcStageMask = compute,

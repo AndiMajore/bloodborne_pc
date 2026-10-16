@@ -40,6 +40,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
                                            *camera_motion, *scene_targets);
     rtao = std::make_unique<RayTracedAO>(instance, scheduler, texture_cache, buffer_cache, runtime,
                                          *camera_motion, *object_motion);
+    ssgi->SetRayTracedAO(rtao.get()); // its ray-traced gather traces the RTAO's scene (rt=1)
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets);
     prompts = std::make_unique<ButtonPrompts>(instance, scheduler, buffer_cache);
