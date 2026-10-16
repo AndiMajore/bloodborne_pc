@@ -219,6 +219,8 @@ void Swapchain::FindPresentMode() {
         present_mode = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {
         present_mode = vk::PresentModeKHR::eFifo;
+    } else if (requested_mode == "FifoRelaxed") {
+        present_mode = vk::PresentModeKHR::eFifoRelaxed;
     } else if (requested_mode == "Immediate") {
         present_mode = vk::PresentModeKHR::eImmediate;
     } else {
@@ -228,8 +230,12 @@ void Swapchain::FindPresentMode() {
     }
 
     if (std::ranges::find(modes, present_mode) == modes.cend()) {
-        // FIFO is guaranteed to be supported by the Vulkan spec.
-        constexpr auto fallback = vk::PresentModeKHR::eFifo;
+        // FIFO is guaranteed to be supported by the Vulkan spec. bbport: FIFO Relaxed (not on
+        // Mesa's Wayland surfaces) falls back to Mailbox, which also presents a late frame at
+        // once instead of locking to half the refresh rate as FIFO does.
+        const bool mailbox = present_mode == vk::PresentModeKHR::eFifoRelaxed &&
+                             std::ranges::find(modes, vk::PresentModeKHR::eMailbox) != modes.cend();
+        const auto fallback = mailbox ? vk::PresentModeKHR::eMailbox : vk::PresentModeKHR::eFifo;
         LOG_WARNING(Render, "Requested present mode {} is not supported, falling back to {}.",
                     vk::to_string(present_mode), vk::to_string(fallback));
         present_mode = fallback;
