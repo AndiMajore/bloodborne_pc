@@ -602,7 +602,8 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     // Tracked as a graphics read after the draw (ResetBindings): an upload into a mirrored index
     // range must not overtake the draw's fixed-function index fetches.
     bound_buffers.emplace_back(buffer, offset, size, false);
-    index_bind = {buffer->Handle(), offset, index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32};
+    index_bind = {buffer->Handle(), offset, index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32,
+                  buffer->HasBufferDeviceAddress() ? buffer->BufferDeviceAddress() + offset : 0};
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {

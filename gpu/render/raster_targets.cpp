@@ -187,6 +187,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const auto& vp = regs.viewports[0];
         camera_motion->OnGBufferPass(db_desc.first, vp.xscale < 0.0f ? -1.0f : 1.0f,
                                      vp.yscale < 0.0f ? -1.0f : 1.0f);
+        if (rtao->Enabled() && cb_descs[0].first) {
+            rtao->OnGBufferPass(db_desc.first, cb_descs[0].first);
+        }
+    }
+    if (rtao->Enabled()) {
+        const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
+                                ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
+                                : 0;
+        rtao->OnColorTarget(cb_descs[0].first, ps_hash);
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -256,7 +265,7 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
     }
     sig.mrt_mask = key.mrt_mask;
     sig.num_samples = key.num_samples;
-    sig.motion = key.motion_vectors;
+    sig.motion = key.motion_vectors == 1; // 2: the RTAO's vertex stores, no attachment
     sig.scene_started = scene_started;
     sig.raster_scaling = upscaler->RasterScaling();
     sig.upscaler_state = upscaler->RedirectState();
@@ -666,7 +675,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto* depth = db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
     }
-    if (key.motion_vectors) {
+    if (key.motion_vectors == 1) { // not the RTAO capture's (2)
         object_motion->Attach(state, state.width, state.height); // the G-buffer's motion target
     }
     return state;

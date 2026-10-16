@@ -8,8 +8,10 @@
 #include <fmt/ranges.h>
 #include <vk_mem_alloc.h>
 
+#include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "render/gcn_to_vk.h"
+#include "render/rtao_geometry.h"
 #include "sdl_window.h"
 #include "upscale/vk_dlss.h"
 
@@ -268,6 +270,22 @@ void Instance::CreateDevice() {
                      .shaderFloat8CooperativeMatrix &&
                  enable(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
     ext.shader_clock = enable(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
+    // bbport: ray queries and ray-tracing pipelines for the ray-traced AO (render/vk_rtao.cpp),
+    // only when it is asked for (BB_RTAO=1) and can run (it needs object motion, which needs an
+    // upscaler: upscale/vk_object_motion.cpp): otherwise the device is created as without it.
+    if (Rtao::Requested() && BbSettings::Get().object_motion &&
+        BbSettings::Get().upscaler != BbSettings::UpscalerOff) {
+        ext.ray_query = enable(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
+                        enable(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+                        enable(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        ext.ray_tracing_pipeline = ext.ray_query && enable(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        // Not for fetching positions: it defines ALLOW_DATA_ACCESS, which the RTAO's BLAS builds
+        // set because on RADV it makes them cheaper (render/vk_rtao_setup.cpp).
+        ext.position_fetch = ext.ray_query && enable(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+        std::printf("RTAO: device extensions: ray queries %s, ray-tracing pipeline %s, position fetch %s\n",
+                    ext.ray_query ? "on" : "unsupported", ext.ray_tracing_pipeline ? "on" : "unsupported",
+                    ext.position_fetch ? "on" : "unsupported");
+    }
     subgroup_clock = query.get<vk::PhysicalDeviceShaderClockFeaturesKHR>().shaderSubgroupClock;
 
     // Queues: the first graphics family; a compute family without graphics for readbacks.
@@ -409,6 +427,10 @@ void Instance::CreateDevice() {
     vk::PhysicalDeviceCooperativeMatrixFeaturesKHR matrix{.cooperativeMatrix = true};
     vk::PhysicalDeviceShaderFloat8FeaturesEXT float8{.shaderFloat8 = true,
                                                       .shaderFloat8CooperativeMatrix = true};
+    vk::PhysicalDeviceAccelerationStructureFeaturesKHR acceleration{.accelerationStructure = true};
+    vk::PhysicalDeviceRayQueryFeaturesKHR ray_query{.rayQuery = true};
+    vk::PhysicalDeviceRayTracingPipelineFeaturesKHR rt_pipeline{.rayTracingPipeline = true};
+    vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR position_fetch{.rayTracingPositionFetch = true};
 
     vk::DeviceCreateInfo create_info{
         .queueCreateInfoCount = u32(queues.size()),
@@ -447,6 +469,10 @@ void Instance::CreateDevice() {
     link_if(ext.mixed_float_dot, mixed_dot);
     link_if(ext.cooperative_matrix, matrix);
     link_if(ext.float8, float8);
+    link_if(ext.ray_query, acceleration);
+    link_if(ext.ray_query, ray_query);
+    link_if(ext.ray_tracing_pipeline, rt_pipeline);
+    link_if(ext.position_fetch, position_fetch);
 
     // DLSS (optional bridge library) needs its own device extensions on NVIDIA GPUs.
     const size_t own_extensions = enabled.size();
