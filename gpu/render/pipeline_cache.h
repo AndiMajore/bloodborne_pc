@@ -20,6 +20,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -168,6 +169,12 @@ public:
     static std::string GetShaderName(Shader::HwStage stage, u64 hash,
                                      std::optional<size_t> perm = {});
 
+    /// bbport: BB_PATCH_SHADERS=1: a patch file written while the game runs replaces its shader
+    /// at once (GPU thread, once a second; see PollShaderPatches in the .cpp).
+    void PollShaderPatches();
+    std::optional<vk::ShaderModule> ReplaceShader(vk::ShaderModule module,
+                                                  std::span<const u32> spv_code);
+
     auto& GetProfile() const {
         return profile;
     }
@@ -180,6 +187,12 @@ private:
                          const Shader::ShaderParams& params, Shader::Backend::Bindings& binding,
                          Shader::HwStage hw_stage);
 
+    /// bbport: user/shader/patch/<stage>_<hash>_<perm>.<ext>, if present (BB_PATCH_SHADERS).
+    std::optional<std::vector<u32>> GetShaderPatch(u64 hash, Shader::HwStage stage, size_t perm_idx,
+                                                   std::string_view ext);
+    /// bbport: the pipelines built from a module, for ReplaceShader (only with BB_PATCH_SHADERS).
+    void NoteModulePipeline(vk::ShaderModule module,
+                            std::variant<GraphicsPipelineKey, ComputePipelineKey> key);
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
@@ -204,6 +217,15 @@ private:
     Shader::Profile profile{};
     Shader::Pools pools;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
+    /// bbport: shader patches reloaded at runtime (ReplaceShader): which pipelines a module built,
+    /// and the replaced modules and their pipelines, kept for the rest of the session, never
+    /// destroyed (recorded commands and prepared draws may still name them; a few MB per reload,
+    /// a development feature).
+    std::unordered_map<VkShaderModule, std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
+        module_related_pipelines;
+    std::vector<vk::ShaderModule> retired_modules;
+    std::vector<std::unique_ptr<GraphicsPipeline>> retired_graphics_pipelines;
+    std::vector<std::unique_ptr<ComputePipeline>> retired_compute_pipelines;
     std::function<void(VAddr, u64)> program_memory_sync;
     std::function<void(VAddr, u64)> program_write_sync;
     /// Program addresses synchronized without making them whole, and when (GPU command thread).
