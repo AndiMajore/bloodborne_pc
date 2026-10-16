@@ -58,6 +58,17 @@ public:
     [[nodiscard]] std::array<u32, 2> RenderSize() const noexcept {
         return render_size;
     }
+    /// bbport: the committed frame camera for other passes (SSGI): world -> view rows and the
+    /// projection scales/offsets as in camera_motion.comp.
+    [[nodiscard]] std::array<float, 2> Jitter() const noexcept {
+        return jitter;
+    }
+    [[nodiscard]] std::array<float, 12> View() const noexcept {
+        return current.view;
+    }
+    [[nodiscard]] std::array<float, 4> Projection() const noexcept {
+        return current.proj;
+    }
     /// Vertical field of view and near/far planes of the current camera.
     [[nodiscard]] float VerticalFov() const noexcept;
     [[nodiscard]] float Near() const noexcept;
