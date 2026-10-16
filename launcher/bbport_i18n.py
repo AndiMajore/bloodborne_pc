@@ -68,6 +68,15 @@ EN = {
     "2 луча, радиус 1,5 м, до 40 м; около 1 мс": "2 rays, 1.5 m radius, up to 40 m; about 1 ms",
     "4 луча, радиус 2 м, до 60 м, листва; около 2,3 мс": "4 rays, 2 m radius, up to 60 m, foliage; about 2.3 ms",
     "Листва": "Foliage",
+    "Отражённый свет лучами (эксперимент)": "Ray-traced bounce light (experimental)",
+    "SSGI ищет свет лучами вместо поиска по экрану; нужен SSGI":
+        "SSGI finds its light with rays instead of searching the screen; needs SSGI",
+    "Отражения лучами (эксперимент)": "Ray-traced reflections (experimental)",
+    "Отражения: где": "Reflections: where",
+    "Только там, где SSR ничего не нашёл": "Only where SSR found nothing",
+    "Везде, где луч попал": "Wherever the ray hits",
+    "Кэш поверхностей (эксперимент)": "Surface cache (experimental)",
+    "Свет для попаданий лучей вне кадра; около 23 МБ": "Light for ray hits off screen; about 23 MB",
     "Трава и листья затеняют с этой долей; 0 — не затеняют. Около +0,7 мс":
         "Grass and leaves occlude at this share; 0: they do not. About +0.7 ms",
     "Значения ниже": "The values below",

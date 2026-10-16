@@ -161,6 +161,7 @@ RTAO_PRESETS = {
     "medium": {"rays": 2, "radius": 1.5, "strength": 1.0, "distance": 40.0, "foliage": 0.0},
     "high": {"rays": 4, "radius": 2.0, "strength": 1.0, "distance": 60.0, "foliage": 0.35},
 }
+RT_REFLECT_MODES = [("Только там, где SSR ничего не нашёл", "1"), ("Везде, где луч попал", "2")]
 RTAO_PRESET_CHOICES = [("Низкое", "low", "1 луч, радиус 1 м, до 25 м; около 0,6 мс"),
                        ("Среднее", "medium", "2 луча, радиус 1,5 м, до 40 м; около 1 мс"),
                        ("Высокое", "high", "4 луча, радиус 2 м, до 60 м, листва; около 2,3 мс"),
@@ -194,6 +195,10 @@ DEFAULTS = {
     "rtao_strength": 1.0,
     "rtao_distance": 40.0,
     "rtao_foliage": 0.0,
+    "rt_gi": False,
+    "rt_reflect": False,
+    "rt_reflect_mode": "1",
+    "rt_surface": False,
     "patches_dir": "",
     "language": "1",
     "fullscreen": False,
@@ -394,7 +399,17 @@ def game_environment(s):
         write_live_settings(settings_user_dir(s) / "rtao.txt",
                             {"rays": int(s.get("rtao_rays", 2)), "radius": float(s.get("rtao_radius", 1.5)),
                              "strength": float(s.get("rtao_strength", 1.0)), "far": distance,
-                             "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)), "enabled": 1})
+                             "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)),
+                             "surface": 1 if s.get("rt_surface") else 0, "enabled": 1})
+        # Experimental, on the RTAO's scene: reflections (vk_rt_reflect.cpp) after the game's SSR.
+        if s.get("rt_reflect"):
+            env["BB_RT_REFLECT"] = "1"
+            write_live_settings(settings_user_dir(s) / "rtreflect.txt",
+                                {"enabled": 1, "mode": int(s.get("rt_reflect_mode", "1"))})
+    # The SSGI's ray-traced gather (experimental) traces the RTAO's scene: both must be on.
+    if s.get("ssgi"):
+        write_live_settings(settings_user_dir(s) / "ssgi.txt",
+                            {"rt": 1 if s.get("rt_gi") and s.get("rtao") else 0})
     # Experimental shaders (shader packs): the enabled packs' .spv files go to <user>/shader/patch,
     # and BB_PATCH_SHADERS=1 makes the port load them in place of its own translations.
     # Each file is fitted to this version's own translation of its shader (shader cache): 0.6 has
@@ -883,6 +898,32 @@ class LauncherWindow(Adw.ApplicationWindow):
         rtao_value_changed()
         rtao_rows_sensitive()
         self.rt_class = rt_capability()
+        # Experimental effects on the RTAO's scene (branch rt-lighting-exp).
+        self.rt_gi_row = Adw.SwitchRow(title=tr("Отражённый свет лучами (эксперимент)"),
+                                       subtitle=tr("SSGI ищет свет лучами вместо поиска по экрану; нужен SSGI"),
+                                       active=self.settings.get("rt_gi", False))
+        rtao.add(self.rt_gi_row)
+        self.rt_reflect_row = Adw.SwitchRow(title=tr("Отражения лучами (эксперимент)"),
+                                            subtitle="BB_RT_REFLECT",
+                                            active=self.settings.get("rt_reflect", False))
+        rtao.add(self.rt_reflect_row)
+        self.rt_reflect_mode_row = combo_row(tr("Отражения: где"), None, RT_REFLECT_MODES,
+                                             self.settings.get("rt_reflect_mode", "1"))
+        rtao.add(self.rt_reflect_mode_row)
+        self.rt_surface_row = Adw.SwitchRow(title=tr("Кэш поверхностей (эксперимент)"),
+                                            subtitle=tr("Свет для попаданий лучей вне кадра; около 23 МБ"),
+                                            active=self.settings.get("rt_surface", False))
+        rtao.add(self.rt_surface_row)
+
+        def rt_extra_sensitive(*_):
+            on = self.rtao_row.get_active()
+            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_surface_row):
+                row.set_sensitive(on)
+            self.rt_reflect_mode_row.set_sensitive(on and self.rt_reflect_row.get_active())
+
+        self.rtao_row.connect("notify::active", rt_extra_sensitive)
+        self.rt_reflect_row.connect("notify::active", rt_extra_sensitive)
+        rt_extra_sensitive()
         page.add(rtao)
 
         screen = Adw.PreferencesGroup(title=tr("Экран"))
@@ -1388,6 +1429,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["rtao_strength"] = float(self.rtao_strength_row.get_value())
         s["rtao_distance"] = float(self.rtao_distance_row.get_value())
         s["rtao_foliage"] = float(self.rtao_foliage_row.get_value())
+        s["rt_gi"] = self.rt_gi_row.get_active()
+        s["rt_reflect"] = self.rt_reflect_row.get_active()
+        s["rt_reflect_mode"] = combo_value(self.rt_reflect_mode_row)
+        s["rt_surface"] = self.rt_surface_row.get_active()
         s["online"] = self.online_row.get_active()
         s["online_bbsc"] = self.bbsc_row.get_active()
         s["online_community"] = self.community_row.get_text().strip()
