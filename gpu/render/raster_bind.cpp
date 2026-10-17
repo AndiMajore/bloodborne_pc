@@ -311,6 +311,13 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     bool uses_dma = false;
+    light_quad_draw = false;
+    if (rtao && !pipeline->IsCompute()) {
+        for (const auto* stage : pipeline->GetStages()) {
+            light_quad_draw |= stage && stage->sw_stage == Shader::SwStage::Vertex &&
+                               stage->pgm_hash == RayTracedAO::LightQuadVs;
+        }
+    }
 
     static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
     if (stats && ((helper_full + helper_partial + helper_serial) & 1023) == 0) {
@@ -881,9 +888,18 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                              Shader::PushData& push_data, u32& write_index) {
     BB_SECTION(BindBuffers);
     const u64 alignment = instance.StorageMinAlignment();
+    u32 ring_size0 = 0; // the light passes: slot 0 the per-frame block, slot 1 the lights
     for (u32 index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
         if (const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, index) : nullptr) {
+            if (index == 0) {
+                ring_size0 = ring->size;
+            } else if (index == 1 && light_quad_draw && stage.sw_stage == Shader::SwStage::Fragment &&
+                       ring_size0 == RayTracedAO::LightFrameBlockSize && !desc.IsSpecial() &&
+                       memory->IsValidGpuMapping(ring->address, 0)) {
+                rtao->OnLightBuffer(ring->address, memory->ClampRangeSize(ring->address, ring->size),
+                                    stage.pgm_hash);
+            }
             // Copied into the constant ring by the GPU command thread (read-only).
             if (!desc.IsSpecial()) {
                 if (ring->size == 864 && gbuffer_draw &&

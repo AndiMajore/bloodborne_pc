@@ -174,6 +174,7 @@ struct Settings {
     float fire_smooth_pos = 0.5f; // 0..0.98: the share of last frame's place (higher: steadier, but shadows trail when moving)
     float fire_pull = 0.3f;      // metres a fire light sits in front of the surface behind the flame
     float fire_min = 0.3f;       // a tile's brightest emission texel must reach this to make a light (lower: fire-lit smoke makes lights on what is behind it)
+    float lights_dump = 0.0f;    // a new value: the next frame's light list is logged in full
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };

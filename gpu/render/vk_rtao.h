@@ -142,6 +142,31 @@ public:
         return {*emit_view, settings.emission, *lights_views[lights_out], lights_count, settings.fire_light,
                 settings.fire_shadow, settings.fire_range, settings.fire_size};
     }
+    /// bbport (the light list, ticket 59, vk_rtao_lights.cpp): the game's local lights. Its
+    /// light passes draw a 16x15 grid of screen tiles per pixel-shader variant (vs LightQuadVs),
+    /// every tile of a variant binding the same constant buffer of light records (64 bytes a point,
+    /// 144 a spot; ps slot 1; slot 0 the per-frame block of LightFrameBlockSize bytes). Positions
+    /// are in view space; the list holds them in world space.
+    static constexpr u64 LightQuadVs = 0x8747a367;
+    static constexpr u32 LightFrameBlockSize = 208;
+    static constexpr u32 LightRecordSize = 144;
+    struct SceneLight {
+        std::array<float, 3> position;  // world
+        float radius;                   // metres (point: 1 / sqrt(record[3]); spot: its range)
+        std::array<float, 3> color;     // x intensity
+        std::array<float, 3> direction; // world, spots
+        float cone;                     // half-angle in radians, spots
+        u64 ps_hash;                    // the variant that drew it
+        bool spot;
+        bool shadowed;                  // record[15] > 0 (spots with a shadow map)
+    };
+    /// A light pass bound `size` bytes of light records at `address` (the GPU thread, per draw;
+    /// one buffer is read once a frame).
+    void OnLightBuffer(VAddr address, u64 size, u64 ps_hash);
+    /// The last complete frame's lights.
+    [[nodiscard]] const std::vector<SceneLight>& FrameLights() const noexcept {
+        return lights_last;
+    }
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
         history_valid = false;
@@ -434,6 +459,17 @@ private:
     vk::UniqueDescriptorSetLayout lights_desc_layout;
     vk::UniquePipelineLayout lights_layout;
     vk::UniquePipeline lights_pipeline;
+    // The light list (vk_rtao_lights.cpp): this frame's so far, the last complete one.
+    std::vector<SceneLight> lights_building, lights_last;
+    struct LightBufferKey {
+        u64 size;
+        std::array<u32, 16> head; // the first record
+        bool operator==(const LightBufferKey&) const = default;
+    };
+    std::vector<LightBufferKey> lights_buffers_seen; // this frame's light buffers (each read once)
+    u32 lights_frames = 0, lights_buffers_total = 0;
+    float lights_dump_seen = 0.0f;
+    void FinishLightFrame(); // OnFrameStart: the frame's list becomes lights_last, reports
     bool EnsureEmission(u32 w, u32 h);
     void RecordEmission(VideoCore::ImageId color, u32 mode);
     void RecordFireLights();

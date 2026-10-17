@@ -291,6 +291,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "emission_trace") s.emission_trace = value;
     else if (key == "emission_sat") s.emission_sat = std::clamp(value, 0.0f, 1.0f);
     else if (key == "emission_blur") s.emission_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
+    else if (key == "lights_dump") s.lights_dump = value;
     else if (key == "fire_light") s.fire_light = std::clamp(value, 0.0f, 64.0f);
     else if (key == "fire_shadow") s.fire_shadow = std::clamp(value, 0.0f, 1.0f);
     else if (key == "fire_range") s.fire_range = std::clamp(value, 0.5f, 100.0f);
