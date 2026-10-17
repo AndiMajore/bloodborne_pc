@@ -27,8 +27,10 @@ struct EmissionConstants {
     std::array<s32, 2> full_size;
     std::array<s32, 2> quarter_size;
     u32 mode;
+    float min_saturation;
+    s32 radius;
 };
-static_assert(sizeof(EmissionConstants) == 20);
+static_assert(sizeof(EmissionConstants) == 28);
 
 void Barrier(Scheduler& scheduler, vk::Image image, vk::ImageLayout old_layout,
              vk::AccessFlags2 src_access, vk::AccessFlags2 dst_access) {
@@ -145,9 +147,13 @@ void RayTracedAO::RecordEmission(VideoCore::ImageId color_id, u32 mode) {
     }
     const EmissionConstants constants{.full_size = {s32(w), s32(h)},
                                       .quarter_size = {s32(qw), s32(qh)},
-                                      .mode = mode};
+                                      .mode = mode,
+                                      .min_saturation = settings.emission_sat,
+                                      .radius = s32(settings.emission_blur)};
+    // mode 1 then the blur's two halves (2: emit -> opaque, 3: opaque -> emit) when it has a radius.
+    const u32 last_mode = mode == 1 && settings.emission_blur > 0 ? 3 : mode;
     scheduler.RecordCrumb({.name = mode == 0 ? "rt emission opaque" : "rt emission"},
-                          [constants, color_view, opaque = *emit_opaque_view, emit = *emit_view, qw, qh,
+                          [constants, last_mode, color_view, opaque = *emit_opaque_view, emit = *emit_view, qw, qh,
                            pipeline = *emit_pipeline, layout = *emit_layout](vk::CommandBuffer cmdbuf) {
                               const vk::DescriptorImageInfo c{.imageView = color_view,
                                                               .imageLayout = vk::ImageLayout::eGeneral};
@@ -167,9 +173,24 @@ void RayTracedAO::RecordEmission(VideoCore::ImageId color_id, u32 mode) {
                                                          .pImageInfo = &e}};
                               cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
                               cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
-                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0,
-                                                   sizeof(constants), &constants);
-                              cmdbuf.dispatch((qw + 7) / 8, (qh + 7) / 8, 1);
+                              auto pc = constants;
+                              for (;;) {
+                                  cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                                       sizeof(pc), &pc);
+                                  cmdbuf.dispatch((qw + 7) / 8, (qh + 7) / 8, 1);
+                                  if (pc.mode >= last_mode) {
+                                      break;
+                                  }
+                                  ++pc.mode;
+                                  const vk::MemoryBarrier2 b{
+                                      .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                      .srcAccessMask = vk::AccessFlagBits2::eShaderWrite |
+                                                       vk::AccessFlagBits2::eShaderRead,
+                                      .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                      .dstAccessMask = vk::AccessFlagBits2::eShaderRead |
+                                                       vk::AccessFlagBits2::eShaderWrite};
+                                  cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
+                              }
                           });
     if (mode == 1) {
         Barrier(scheduler, vk::Image(emit_image), vk::ImageLayout::eGeneral,
@@ -188,7 +209,10 @@ void RayTracedAO::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, 
                     emit_draws, !color ? "none" : color == emit_scene ? "scene" : "other", scene_depth ? 1 : 0,
                     blended ? 1 : 0, depth_write ? 1 : 0, indices, instances, (unsigned long long)ps_hash);
     }
-    if (settings.emission_at == 1 && color && color != emit_scene && emit_frame != frame) {
+    // The transparents are drawn with the scene depth; the first draw without it (the full-screen
+    // fog composite, no depth target) or into another image ends them. With the fog the whole
+    // scene would glow grey.
+    if (settings.emission_at == 1 && color && (color != emit_scene || !scene_depth) && emit_frame != frame) {
         RecordEmission(emit_scene, 1);
         if (emit_trace_lines) {
             std::printf("  -> emission taken before draw %u\n", emit_draws);
@@ -207,7 +231,7 @@ void RayTracedAO::OnOpaqueSceneLit(VideoCore::ImageId color_id) {
     // The last frame's outcome (per 600 frames in the log).
     if (++emit_frames == 600) {
         std::printf("RTAO: emission: made in %u of 600 frames (%u without; at %s)\n", emit_taken, emit_missed,
-                    settings.emission_at == 1 ? "the first draw leaving the scene" : "the first full-screen pass");
+                    settings.emission_at == 1 ? "the end of the transparents" : "the first full-screen pass");
         emit_frames = emit_taken = emit_missed = 0;
     }
     if (emit_snapshot_frame + 1 == frame) {

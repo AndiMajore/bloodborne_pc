@@ -289,6 +289,8 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "emission") s.emission = std::clamp(value, 0.0f, 16.0f);
     else if (key == "emission_at") s.emission_at = std::clamp(u32(std::max(value, 0.0f)), 0u, 1u);
     else if (key == "emission_trace") s.emission_trace = value;
+    else if (key == "emission_sat") s.emission_sat = std::clamp(value, 0.0f, 1.0f);
+    else if (key == "emission_blur") s.emission_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);

@@ -1,26 +1,52 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: the transparents' light for the ray-traced lighting effects (vk_rtao_emission.cpp).
 // mode 0, at the first transparent draw: the lit opaque scene, a 4x4 box per texel, kept.
-// mode 1, at the first full-screen pass after the transparents: the scene the same way, minus the
-// kept opaque scene: what fires, sparks and glows added (where smoke darkened it: nothing).
+// mode 1, after the transparents: the scene the same way, minus the kept opaque scene: what fires,
+//   sparks and glows added (where smoke darkened it: nothing). Smoke and mist also lighten a dark
+//   background, but grey: only saturated light counts in full (min_saturation, 0: all of it).
+// mode 2 / 3: a separable Gaussian over `radius` texels (horizontal emit -> opaque, vertical
+//   opaque -> emit): the flame as a glowing volume around its silhouette, not only behind it.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(binding = 0) uniform texture2D scene_tex;                  // full res, RGBA16F
-layout(binding = 1, rgba16f) uniform image2D opaque_img;          // quarter res
-layout(binding = 2, rgba16f) uniform writeonly image2D emit_img;  // quarter res
+layout(binding = 0) uniform texture2D scene_tex;         // full res, RGBA16F
+layout(binding = 1, rgba16f) uniform image2D opaque_img; // quarter res (mode 2: the blur's middle)
+layout(binding = 2, rgba16f) uniform image2D emit_img;   // quarter res
 
 layout(push_constant) uniform Constants {
     ivec2 full_size;
     ivec2 quarter_size;
     uint mode;
+    float min_saturation;
+    int radius;
 };
+
+vec3 Blur(ivec2 qp, ivec2 step_dir, bool from_emit) {
+    const float sigma = max(float(radius) * 0.5, 0.5);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (int i = -radius; i <= radius; ++i) {
+        const ivec2 p = clamp(qp + step_dir * i, ivec2(0), quarter_size - 1);
+        const float w = exp(-0.5 * float(i * i) / (sigma * sigma));
+        sum += (from_emit ? imageLoad(emit_img, p).rgb : imageLoad(opaque_img, p).rgb) * w;
+        weight += w;
+    }
+    return sum / weight;
+}
 
 void main() {
     const ivec2 qp = ivec2(gl_GlobalInvocationID.xy);
     if (qp.x >= quarter_size.x || qp.y >= quarter_size.y) {
+        return;
+    }
+    if (mode == 2u) {
+        imageStore(opaque_img, qp, vec4(Blur(qp, ivec2(1, 0), true), 1.0));
+        return;
+    }
+    if (mode == 3u) {
+        imageStore(emit_img, qp, vec4(Blur(qp, ivec2(0, 1), false), 1.0));
         return;
     }
     const ivec2 base = qp * 4;
@@ -33,10 +59,15 @@ void main() {
     c *= 1.0 / 16.0;
     if (mode == 0u) {
         imageStore(opaque_img, qp, vec4(c, 1.0));
-    } else {
-        const vec3 opaque = imageLoad(opaque_img, qp).rgb;
-        // Not finite (a NaN in the scene) counts as nothing.
-        const vec3 e = max(c - opaque, vec3(0.0));
-        imageStore(emit_img, qp, vec4(all(lessThan(e, vec3(65000.0))) ? e : vec3(0.0), 1.0));
+        return;
     }
+    const vec3 opaque = imageLoad(opaque_img, qp).rgb;
+    vec3 e = max(c - opaque, vec3(0.0));
+    const float hi = max(e.r, max(e.g, e.b)), lo = min(e.r, min(e.g, e.b));
+    const float saturation = hi > 1e-5 ? (hi - lo) / hi : 0.0;
+    if (min_saturation > 0.0) {
+        e *= smoothstep(min_saturation * 0.5, min_saturation, saturation);
+    }
+    // Not finite (a NaN in the scene) counts as nothing.
+    imageStore(emit_img, qp, vec4(all(lessThan(e, vec3(65000.0))) ? e : vec3(0.0), 1.0));
 }
