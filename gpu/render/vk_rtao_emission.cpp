@@ -14,6 +14,7 @@
 #include <vk_mem_alloc.h>
 #include "bbgpu/shaders/rtao_emission_comp.h"
 #include "bbgpu/shaders/rtao_fire_lights_comp.h"
+#include "bbgpu/shaders/rt_fire_debug_comp.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
 #include "textures/texture_cache.h"
@@ -49,6 +50,17 @@ struct FireLightConstants {
     u32 pad;
 };
 static_assert(sizeof(FireLightConstants) == 120);
+struct FireDebugConstants {
+    std::array<float, 12> view;
+    std::array<float, 4> proj;
+    std::array<float, 2> full_size;
+    std::array<float, 2> jitter;
+    std::array<float, 4> up_radius;
+    float height;
+    u32 count;
+    std::array<float, 2> pad;
+};
+static_assert(sizeof(FireDebugConstants) == 112);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
 
 void Barrier(Scheduler& scheduler, vk::Image image, vk::ImageLayout old_layout,
@@ -350,6 +362,92 @@ void RayTracedAO::RecordFireLights() {
     lights_frame = frame;
 }
 
+void RayTracedAO::RecordFireDebug(VideoCore::ImageId color_id) {
+    // Last frame's lights (this frame's are made after the transparents).
+    if (!depth_id || !lights_views[lights_out] || lights_frame + 1 != frame) {
+        return;
+    }
+    auto& color = texture_cache.GetImage(color_id);
+    auto& depth = texture_cache.GetImage(depth_id);
+    const u32 w = color.info.size.width, h = color.info.size.height;
+    if (depth.info.size.width != w || depth.info.size.height != h) {
+        return;
+    }
+    const auto device = instance.GetDevice();
+    if (!fire_debug_pipeline) {
+        const auto binding = [](u32 index, vk::DescriptorType type) {
+            return vk::DescriptorSetLayoutBinding{.binding = index, .descriptorType = type, .descriptorCount = 1,
+                                                  .stageFlags = vk::ShaderStageFlagBits::eCompute};
+        };
+        const std::array bindings = {binding(0, vk::DescriptorType::eSampledImage),
+                                     binding(1, vk::DescriptorType::eSampledImage),
+                                     binding(2, vk::DescriptorType::eStorageImage)};
+        fire_debug_desc_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = u32(bindings.size()),
+            .pBindings = bindings.data(),
+        }));
+        const vk::PushConstantRange range{.stageFlags = vk::ShaderStageFlagBits::eCompute,
+                                          .offset = 0,
+                                          .size = sizeof(FireDebugConstants)};
+        fire_debug_layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*fire_debug_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &range,
+        }));
+        const auto module = CompileSPV(RT_FIRE_DEBUG_COMP, device);
+        fire_debug_pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute, .module = module, .pName = "main"},
+                    .layout = *fire_debug_layout,
+                }));
+        device.destroyShaderModule(module);
+    }
+    scheduler.EndRendering();
+    const auto compute = vk::PipelineStageFlagBits2::eComputeShader;
+    runtime.Transit(&color, vk::ImageLayout::eGeneral, compute,
+                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, compute, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    const vk::ImageView color_view = CachedView(color, color.info.pixel_format, vk::ImageAspectFlagBits::eColor);
+    const vk::ImageView depth_view = CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
+    const auto view = camera_motion.View();
+    // The world's up (y) in view space: the view rows' y column.
+    const FireDebugConstants constants{
+        .view = view,
+        .proj = camera_motion.Projection(),
+        .full_size = {float(w), float(h)},
+        .jitter = camera_motion.Jitter(),
+        .up_radius = {view[1], view[5], view[9], settings.fire_size},
+        .height = settings.fire_height,
+        .count = lights_count,
+    };
+    scheduler.RecordCrumb({.name = "rt fire debug"},
+                          [constants, color_view, depth_view, lights = *lights_views[lights_out], w, h,
+                           pipeline = *fire_debug_pipeline, layout = *fire_debug_layout](vk::CommandBuffer cmdbuf) {
+                              const vk::DescriptorImageInfo d{.imageView = depth_view, .imageLayout = vk::ImageLayout::eGeneral};
+                              const vk::DescriptorImageInfo l{.imageView = lights, .imageLayout = vk::ImageLayout::eGeneral};
+                              const vk::DescriptorImageInfo c{.imageView = color_view, .imageLayout = vk::ImageLayout::eGeneral};
+                              const std::array writes = {
+                                  vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &d},
+                                  vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &l},
+                                  vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &c}};
+                              cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+                              cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+                              cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                              const vk::MemoryBarrier2 b{.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                                         .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                                                         .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                                         .dstAccessMask = vk::AccessFlagBits2::eShaderRead};
+                              cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
+                          });
+}
+
 void RayTracedAO::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, bool blended,
                                     bool depth_write, u32 indices, u32 instances, u64 ps_hash) {
     ++emit_draws;
@@ -401,6 +499,9 @@ void RayTracedAO::OnOpaqueSceneLit(VideoCore::ImageId color_id) {
     emit_snapshot_frame = frame;
     emit_scene = color_id;
     emit_draws = 0;
+    if (settings.fire_debug) {
+        RecordFireDebug(color_id); // before the opaque base is kept: not counted as light
+    }
     RecordEmission(color_id, 0);
 }
 

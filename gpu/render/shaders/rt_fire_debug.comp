@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: the fire lights' cylinders drawn into the scene (fire_debug=1 in rtao.txt,
+// vk_rtao_emission.cpp). Per pixel the view ray against every light's upright cylinder (fire_size
+// wide, fire_height tall, a quarter of it below the light's point, as ssgi_gather_rt.comp samples
+// it): orange, brightest at its silhouette; faint where the scene is in front of it (a flame's
+// cylinder is mostly inside its stake). The light's point: a yellow dot.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D depth_tex;  // full res, D32 0..1
+layout(binding = 1) uniform texture2D lights_tex; // count x 2: world position (w 1: a light), power
+layout(binding = 2, rgba16f) uniform image2D color_img; // the lit opaque scene
+
+layout(push_constant) uniform Constants {
+    vec4 view[3];  // world -> view rows
+    vec4 proj;
+    vec2 full_size;
+    vec2 jitter;
+    vec4 up_radius; // xyz the world's up in view space, w the radius
+    float height;
+    uint count;
+    vec2 pad;
+};
+
+float ViewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+vec3 ViewPos(vec2 pixel, float depth) {
+    const vec2 uv = (pixel - jitter) / full_size;
+    const vec2 ndc = uv * 2.0 - 1.0;
+    const float z = ViewZ(depth);
+    return vec3(ndc.x * z / proj.x, ndc.y * z / proj.y, z);
+}
+
+// The ray's entry into the cylinder from `base` along `axis` (height h, radius r) and the
+// cosine between the surface there and the ray (1 face on, 0 at the silhouette); t < 0: missed.
+vec2 Cylinder(vec3 D, vec3 base, vec3 axis, float h, float r) {
+    const vec3 m = -base;
+    const vec3 dp = D - dot(D, axis) * axis;
+    const vec3 mp = m - dot(m, axis) * axis;
+    const float a = dot(dp, dp), b = 2.0 * dot(dp, mp), c = dot(mp, mp) - r * r;
+    float best = -1.0, facing = 0.0;
+    const float disc = b * b - 4.0 * a * c;
+    if (a > 1e-8 && disc >= 0.0) {
+        const float t = (-b - sqrt(disc)) / (2.0 * a);
+        const float s = dot(m + t * D, axis);
+        if (t > 0.0 && s >= 0.0 && s <= h) {
+            best = t;
+            const vec3 n = normalize(mp + t * dp);
+            facing = abs(dot(n, D));
+        }
+    }
+    const float da = dot(D, axis);
+    if (abs(da) > 1e-6) {
+        for (int cap = 0; cap < 2; ++cap) {
+            const float t = ((cap == 0 ? 0.0 : h) - dot(m, axis)) / da;
+            const vec3 q = m + t * D;
+            const vec3 qp = q - dot(q, axis) * axis;
+            if (t > 0.0 && dot(qp, qp) <= r * r && (best < 0.0 || t < best)) {
+                best = t;
+                facing = abs(da);
+            }
+        }
+    }
+    return vec2(best, facing);
+}
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(full_size.x) || p.y >= int(full_size.y)) {
+        return;
+    }
+    const float depth = texelFetch(depth_tex, p, 0).r;
+    const vec3 D = normalize(ViewPos(vec2(p) + 0.5, 0.5));
+    const float scene_t = depth >= 1.0 ? 1.0e9 : length(ViewPos(vec2(p) + 0.5, depth));
+    const vec3 axis = normalize(up_radius.xyz);
+    vec4 color = imageLoad(color_img, p);
+    vec3 tint = vec3(0.0);
+    float alpha = 0.0;
+    for (uint i = 0u; i < count; ++i) {
+        const vec4 a = texelFetch(lights_tex, ivec2(i, 0), 0);
+        if (a.w == 0.0) {
+            continue;
+        }
+        const vec4 h = vec4(a.xyz, 1.0);
+        const vec3 L = vec3(dot(view[0], h), dot(view[1], h), dot(view[2], h));
+        const vec2 hit = Cylinder(D, L - axis * (0.25 * height), axis, height, up_radius.w);
+        if (hit.x > 0.0) {
+            const float rim = 1.0 - hit.y; // bright at the silhouette
+            const float a_here = (hit.x < scene_t ? 0.25 : 0.08) + (hit.x < scene_t ? 0.6 : 0.2) * rim * rim;
+            if (a_here > alpha) {
+                alpha = a_here;
+                tint = vec3(1.0, 0.45, 0.05);
+            }
+        }
+        // The light's point: a dot of 6 cm.
+        const float along = dot(L, D);
+        if (along > 0.0 && length(L - along * D) < 0.06) {
+            alpha = 1.0;
+            tint = vec3(1.0, 1.0, 0.2);
+        }
+    }
+    if (alpha > 0.0) {
+        const float bright = max(max(color.r, color.g), max(color.b, 1.0));
+        color.rgb = mix(color.rgb, tint * bright, clamp(alpha, 0.0, 1.0));
+        imageStore(color_img, p, color);
+    }
+}

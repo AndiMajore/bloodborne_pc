@@ -170,6 +170,7 @@ struct Settings {
     float fire_shadow = 0.0f;    // 0..1: the fires' unshadowed light taken away again (the game's own fire light, darkened where blocked)
     float fire_range = 12.0f;    // metres a fire light reaches
     float fire_size = 0.75f;     // metres: a fire light's radius (its cylinder's); lit from and traced to anywhere in it (soft shadows, the stake does not hide all of it)
+    bool fire_debug = false;     // the fire lights' cylinders drawn into the scene (orange; the light's point yellow)
     float fire_height = 1.0f;    // metres: the fire light's cylinder (a flame), a quarter below its point
     float fire_wrap = 0.4f;      // 0..1: the fire light's cosine wrapped round (thin swaying leaves stop strobing)
     float fire_smooth = 0.9f;    // 0..0.98: the share of last frame's fire light's power (flicker)

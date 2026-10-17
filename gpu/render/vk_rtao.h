@@ -517,6 +517,11 @@ private:
     bool EnsureEmission(u32 w, u32 h);
     void RecordEmission(VideoCore::ImageId color, u32 mode);
     void RecordFireLights();
+    // fire_debug=1: the fire lights' cylinders drawn into the scene.
+    vk::UniqueDescriptorSetLayout fire_debug_desc_layout;
+    vk::UniquePipelineLayout fire_debug_layout;
+    vk::UniquePipeline fire_debug_pipeline;
+    void RecordFireDebug(VideoCore::ImageId color);
     bool hold_enabled = true;     // BB_RTAO_HOLD=0: no retirement hold (to test what it protects)
     bool test_move = false;       // BB_RTAO_TEST_MOVE=1 (layer memory, BB_DRAW_PIPE=0): mirrors moved
     bool test_move_pending = false; // back in place between the AO upsample and the pass
