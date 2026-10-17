@@ -7,7 +7,10 @@
 // hit's depth and its square, the light passes sample this map in the game's place. Without a
 // hit within the range: the range's end (lit). Modes 1 and 2: a separable Gaussian over `blur`
 // texels (in_img -> map_img): a variance map's moments may be blurred, which softens the edges
-// (the light is no point, and its source is mostly out of sight).
+// (the light is no point, and its source is mostly out of sight). After the blur the variance is
+// capped (var_cap): where two casters overlap (the sword over the body), their mixed depths made
+// a large variance, which Chebyshev reads as lit: a bright seam inside the shadow. The soft edge
+// against the lit ground stays, it comes mostly from the blurred mean.
 #version 460
 #extension GL_EXT_ray_query : require
 
@@ -27,6 +30,7 @@ layout(push_constant) uniform Constants {
     uint size;
     uint mode;      // 0 trace, 1 blur x, 2 blur y
     int blur;       // texels
+    float var_cap;  // the blurred variance's largest standard deviation (depth units); 0: none
 };
 
 void main() {
@@ -45,7 +49,12 @@ void main() {
             sum += imageLoad(in_img, q).xy * w;
             weight += w;
         }
-        imageStore(map_img, p, vec4(sum / weight, 0.0, 0.0));
+        vec2 m = sum / weight;
+        if (mode == 2u && var_cap > 0.0) {
+            const float variance = max(m.y - m.x * m.x, 0.0);
+            m.y = m.x * m.x + min(variance, var_cap * var_cap);
+        }
+        imageStore(map_img, p, vec4(m, 0.0, 0.0));
         return;
     }
     const vec2 uv = (vec2(p) + 0.5) / float(size);

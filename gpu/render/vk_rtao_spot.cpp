@@ -31,8 +31,9 @@ struct SpotMapConstants {
     u32 size;
     u32 mode;
     s32 blur;
+    float var_cap;
 };
-static_assert(sizeof(SpotMapConstants) == 80);
+static_assert(sizeof(SpotMapConstants) == 84);
 
 // a (4x4, rows) x the 3x4 rows of b extended by (0 0 0 1).
 std::array<std::array<float, 4>, 4> Mul(const std::array<std::array<float, 4>, 4>& a,
@@ -168,6 +169,7 @@ void RayTracedAO::RecordSpotMap() {
         .near = settings.spot_near,
         .size = size,
         .blur = s32(settings.spot_blur),
+        .var_cap = settings.spot_soft / spot_range,
     };
     scheduler.EndRendering();
     const vk::ImageMemoryBarrier2 to_write{
