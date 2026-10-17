@@ -178,7 +178,11 @@ struct Settings {
     float sun_spread = 0.01f;    // radians the sun rays spread over (a soft edge)
     u32 sun_erode = 4;           // pixels: the game's shadow is shrunk by this where it is used
     float sun_far = 200.0f;
-    u32 sun_debug = 0;           // 1: the rays alone (no fallback to the game's shadow); 2: the direction reversed      // metres a sun ray reaches
+    u32 sun_debug = 0;
+    bool spot_shadow = true;     // experimental: the shadowed spot's 512x512 map replaced by a ray-traced one
+    u32 spot_res = 1024;         // its size (the 20 deg spot at the Central Yharnam lamp: under a centimetre a texel; 2048 cost ~0.6 ms)
+    float spot_near = 0.3f;      // metres from the light its rays start (the lamp's own housing)
+           // 1: the rays alone (no fallback to the game's shadow); 2: the direction reversed      // metres a sun ray reaches
     float lights_dump = 0.0f;    // a new value: the next frame's light list is logged in full
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)

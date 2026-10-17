@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: a spot light's shadow map by ray tracing (spot_shadow= in rtao.txt, vk_rtao_spot.cpp).
+// The game's shadowed spot (ps 82951fa5) samples a 512x512 variance shadow map: at its view ->
+// light clip matrix's u = cx / cw * 0.5 + 0.5, v = -cy / cw * 0.5 + 0.5 the moments of the depth
+// cw / range (cw: the distance along the light's axis), Chebyshev against its own. Here, per texel
+// of a larger map, one ray from the light through the texel against the RTAO's scene: its first
+// hit's depth and its square, the light passes sample this map in the game's place. Without a
+// hit within the range: far (lit).
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rg32f) uniform writeonly image2D map_img;
+layout(binding = 1) uniform accelerationStructureEXT scene; // the RTAO's TLAS (view space)
+
+layout(push_constant) uniform Constants {
+    vec4 row_x;     // view (this frame) -> light clip, rows x, y and w
+    vec4 row_y;
+    vec4 row_w;
+    vec3 light;     // view space
+    float inv_range;
+    float near;     // metres from the light the rays start (the lamp's own housing)
+    uint size;
+};
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(size) || p.y >= int(size)) {
+        return;
+    }
+    const vec2 uv = (vec2(p) + 0.5) / float(size);
+    const float a = uv.x * 2.0 - 1.0, b = 1.0 - uv.y * 2.0;
+    // The texel's ray: where cx = a cw and cy = b cw, two planes through the light.
+    vec3 dir = normalize(cross(row_x.xyz - a * row_w.xyz, row_y.xyz - b * row_w.xyz));
+    if (dot(row_w.xyz, dir) < 0.0) {
+        dir = -dir;
+    }
+    rayQueryEXT q;
+    // Foliage (non-opaque) left out, as for the AO.
+    rayQueryInitializeEXT(q, scene, gl_RayFlagsCullNoOpaqueEXT, 0xFF, light, near, dir, 1.0 / inv_range);
+    while (rayQueryProceedEXT(q)) {
+    }
+    float depth = 1.0e4;
+    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        const vec3 hit = light + dir * rayQueryGetIntersectionTEXT(q, true);
+        depth = (dot(row_w.xyz, hit) + row_w.w) * inv_range;
+    }
+    imageStore(map_img, p, vec4(depth, depth * depth, 0.0, 0.0));
+}

@@ -151,13 +151,15 @@ void RayTracedAO::OnSunDraw(VideoCore::ImageId color, u64 ps_hash) {
         return;
     }
     sun_done_frame = frame;
+    RecordSpotMap(); // the shadowed spot's map: before the light passes as well
     // The report: per 600 frames, how often the sun draw found everything it needs.
     if (++sun_frames == 600) {
         std::printf("RTAO: sun shadow: %u of 600 sun draws ray traced (%u without the RT scene, the mask "
-                    "or the sun's direction); sun (%.3f %.3f %.3f), mask regions: %u (channel %.0f, %.0f)\n",
+                    "or the sun's direction); sun (%.3f %.3f %.3f), mask regions: %u (channel %.0f, %.0f); "
+                    "spot shadow map ray traced in %u\n",
                     sun_traced, sun_frames - sun_traced, sun_dir[0], sun_dir[1], sun_dir[2], sun_regions,
-                    sun_k[0][0], sun_k[1][0]);
-        sun_frames = sun_traced = 0;
+                    sun_k[0][0], sun_k[1][0], spot_maps);
+        sun_frames = sun_traced = spot_maps = 0;
     }
     const vk::AccelerationStructureKHR tlas = FrameTlas();
     if (!settings.sun_shadow || !tlas || sun_mask_frame != frame || sun_dir_frame != frame ||

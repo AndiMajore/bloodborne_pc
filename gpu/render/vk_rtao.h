@@ -174,6 +174,12 @@ public:
     /// Before each draw (its first colour target and pixel shader): the mask pass is noted, and at
     /// the sun's light draw the mask's sun shadow is replaced.
     void OnSunDraw(VideoCore::ImageId color, u64 ps_hash);
+    /// bbport (experimental, spot_shadow= in rtao.txt, vk_rtao_spot.cpp): the shadowed spot's
+    /// shadow map, ray traced larger. The light passes' textures: the spot's map (its sixth image)
+    /// is noted, and any light-pass texture at that address is swapped for the RT map.
+    static constexpr u64 SpotLightPs = 0x82951fa5;
+    void OnSpotMapImage(VAddr address, vk::Format format);
+    [[nodiscard]] vk::ImageView SpotMapView(VAddr address) const noexcept;
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
         history_valid = false;
@@ -492,6 +498,19 @@ private:
     vk::UniquePipelineLayout sun_layout;
     vk::UniquePipeline sun_pipeline;
     bool EnsureSun(u32 w, u32 h);
+    // The shadowed spot's map (vk_rtao_spot.cpp).
+    std::array<std::array<float, 4>, 4> spot_world{}; // world -> light clip (last frame's record)
+    std::array<float, 3> spot_light{};                 // world
+    float spot_range = 0.0f;
+    u32 spot_frame = ~0u, spot_map_frame = ~0u, spot_map_size = 0, spot_maps = 0;
+    VAddr spot_target = 0; // the game's map the light passes sample
+    VideoCore::HostImage spot_map;
+    vk::UniqueImageView spot_map_view;
+    vk::UniqueDescriptorSetLayout spot_desc_layout;
+    vk::UniquePipelineLayout spot_layout;
+    vk::UniquePipeline spot_pipeline;
+    void OnSpotRecord(const float* record);
+    void RecordSpotMap();
     bool EnsureEmission(u32 w, u32 h);
     void RecordEmission(VideoCore::ImageId color, u32 mode);
     void RecordFireLights();

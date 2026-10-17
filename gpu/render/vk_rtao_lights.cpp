@@ -61,6 +61,9 @@ void RayTracedAO::OnLightBuffer(VAddr address, u64 size, u64 ps_hash) {
             .spot = spot,
             .shadowed = spot && r[15] > 0.0f,
         };
+        if (spot && ps_hash == SpotLightPs) {
+            OnSpotRecord(r);
+        }
         if (spot) {
             const float len = std::sqrt(r[28] * r[28] + r[29] * r[29] + r[30] * r[30]);
             if (len > 0.0f) {
