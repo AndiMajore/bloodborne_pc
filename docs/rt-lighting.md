@@ -19,7 +19,9 @@ this frame in view space, valid after the AO pass and until the next frame's.
 
 ## Live settings
 
-- `user/ssgi.txt`: `rt` (0/1), `rays` (1-8), `debug` (1: the bounce alone; 2: classes, green = hit
+- `user/ssgi.txt`: `rt` (0/1), `rays` (1-8), `rt_clip` (default 1.5: the history is clipped to this
+  frame's 3x3 mean +- that many sigma, lower = less trailing, more noise), `rt_max` (default 2: a ray's
+  radiance is capped to it, so lamps and candles do not turn into fireflies), `debug` (1: the bounce alone; 2: classes, green = hit
   seen on screen, blue = from the surface cache, red = hidden, nothing).
 - `user/rtreflect.txt`: `enabled`, `mode` (1/2), `far` (metres, default 40; the static scene only
   reaches the AO's distance plus its margin), `strength` (the weight written, 0-1), `debug` (1:

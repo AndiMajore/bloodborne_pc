@@ -4,8 +4,10 @@
 // ray-traced AO's scene (its TLAS, view space of this frame): a hit that the camera sees (its
 // projection lands on the screen and the depth there agrees) contributes the lit colour at that
 // pixel; a hit hidden from the camera or off screen contributes nothing yet (it still blocks the
-// light from behind it, which the screen march could not know). Same output and temporal blend
-// as ssgi_gather.comp, so the apply pass is shared.
+// light from behind it, which the screen march could not know). Same output as ssgi_gather.comp,
+// so the apply pass is shared. With a few rays a pixel the gather is far noisier than the march,
+// so the reprojected history is clipped to this frame's 3x3 neighbourhood (mean +- k sigma, from
+// the workgroup's tile): history from a moving character no longer trails as light.
 #version 460
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_samplerless_texture_functions : require
@@ -13,7 +15,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_GOOGLE_include_directive : require
 
-layout(local_size_x = 8, local_size_y = 4) in;
+layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0) uniform texture2D depth_tex;   // full res, D32 0..1
 layout(binding = 1) uniform texture2D normal_tex;  // full res, world normal * 0.5 + 0.5
@@ -35,6 +37,8 @@ layout(push_constant) uniform Constants {
     uint rays;        // per half-res pixel
     uint debug;       // 2: rays whose hit was seen on screen (green), read from the surface cache (blue), hidden (red)
     uint surface_parts_count;
+    float clip;       // history clipped to this frame's 3x3 mean +- clip sigma (plus a floor)
+    float max_radiance; // per ray: brighter hits (lamps, candles) are scaled down to it (fireflies)
     uint64_t surface_cache; // the RTAO's surface cache (0: none): radiance of hidden static hits
     uint64_t surface_parts;
 };
@@ -57,19 +61,28 @@ vec2 ScreenPos(vec3 v) {
     const vec2 ndc = vec2(v.x * proj.x / v.z, v.y * proj.y / v.z);
     return (ndc * 0.5 + 0.5) * full_size + jitter;
 }
+shared vec4 tile[8][8]; // this frame's gi (rgb) and view z (a, 0: no value) per invocation
+
+vec3 Capped(vec3 c) {
+    const float m = max(c.r, max(c.g, c.b));
+    return m > max_radiance ? c * (max_radiance / m) : c;
+}
 float IGN(vec2 p) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
 void main() {
     const ivec2 hp = ivec2(gl_GlobalInvocationID.xy);
-    if (hp.x >= int(half_size.x) || hp.y >= int(half_size.y)) {
-        return;
-    }
+    const ivec2 lp = ivec2(gl_LocalInvocationID.xy);
+    const bool inside = hp.x < int(half_size.x) && hp.y < int(half_size.y);
     const ivec2 fp = hp * 2 + 1;
-    const float depth = texelFetch(depth_tex, fp, 0).r;
+    const float depth = inside ? texelFetch(depth_tex, fp, 0).r : 1.0;
     if (depth >= 1.0) {
-        imageStore(gi_img, hp, vec4(0.0, 0.0, 0.0, 1e9));
+        tile[lp.y][lp.x] = vec4(0.0);
+        barrier();
+        if (inside) {
+            imageStore(gi_img, hp, vec4(0.0, 0.0, 0.0, 1e9));
+        }
         return;
     }
     const vec3 P = ViewPos(vec2(fp) + 0.5, depth);
@@ -114,14 +127,14 @@ void main() {
         }
         if (visible) {
             seen += 1.0;
-            gi += texelFetch(color_tex, ivec2(sp), 0).rgb * falloff;
+            gi += Capped(texelFetch(color_tex, ivec2(sp), 0).rgb) * falloff;
             continue;
         }
         // Hidden from the camera or off screen: the surface cache's radiance, if it saw it.
         vec3 cached_radiance;
         if (SurfaceRadiance(q, surface_cache, surface_parts, surface_parts_count, cached_radiance)) {
             cached += 1.0;
-            gi += cached_radiance * falloff;
+            gi += Capped(cached_radiance) * falloff;
         } else {
             hidden += 1.0;
         }
@@ -131,15 +144,43 @@ void main() {
         gi = vec3(hidden, seen, cached) / float(rays);
     }
 
+    // This frame's neighbourhood (same surface: view z within 5%), for the history clip.
+    tile[lp.y][lp.x] = vec4(gi, P.z);
+    barrier();
+    vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+    float n = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const ivec2 q = lp + ivec2(dx, dy);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThan(q, ivec2(7)))) {
+                continue;
+            }
+            const vec4 t = tile[q.y][q.x];
+            if (t.a == 0.0 || abs(t.a - P.z) > 0.05 * abs(P.z)) {
+                continue;
+            }
+            m1 += t.rgb;
+            m2 += t.rgb * t.rgb;
+            n += 1.0;
+        }
+    }
+    m1 /= n; // n >= 1: the pixel itself
+    const vec3 sigma = sqrt(max(m2 / n - m1 * m1, vec3(0.0)));
+    // Wide enough for the noise of 1-2 rays, narrow enough to drop light that moved away; the
+    // floor keeps flat regions from rejecting their own history.
+    const vec3 box = clip * sigma + 0.02 * (m1 + vec3(0.05));
+
     vec4 result = vec4(gi, P.z);
     const vec2 motion = texelFetch(motion_tex, fp, 0).rg;
     const vec2 prev_fp = vec2(fp) + 0.5 + motion;
     const ivec2 prev_hp = ivec2(floor(prev_fp / 2.0));
-    if (all(greaterThanEqual(prev_hp, ivec2(0))) && all(lessThan(prev_hp, ivec2(half_size)))) {
+    if (inside && all(greaterThanEqual(prev_hp, ivec2(0))) && all(lessThan(prev_hp, ivec2(half_size)))) {
         const vec4 prev = texelFetch(prev_gi_tex, prev_hp, 0);
         if (abs(prev.a - P.z) < 0.05 * abs(P.z)) {
-            result.rgb = mix(gi, prev.rgb, history);
+            result.rgb = mix(gi, clamp(prev.rgb, m1 - box, m1 + box), history);
         }
     }
-    imageStore(gi_img, hp, result);
+    if (inside) {
+        imageStore(gi_img, hp, result);
+    }
 }

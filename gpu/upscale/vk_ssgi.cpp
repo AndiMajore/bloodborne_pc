@@ -46,10 +46,12 @@ struct GatherRtConstants {
     u32 rays;
     u32 debug;
     u32 surface_parts_count;
+    float clip;
+    float max_radiance;
     u64 surface_cache;
     u64 surface_parts;
 };
-static_assert(sizeof(GatherRtConstants) == 128);
+static_assert(sizeof(GatherRtConstants) == 136);
 struct ApplyConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
@@ -218,13 +220,15 @@ void ScreenSpaceGI::PollSettings() {
         else if (key == "debug") debug = u32(std::max(value, 0.0f));
         else if (key == "rt") rt = value != 0.0f;
         else if (key == "rays") rays = std::clamp(u32(std::max(value, 1.0f)), 1u, 8u);
+        else if (key == "rt_clip") rt_clip = std::max(value, 0.0f);
+        else if (key == "rt_max") rt_max = std::max(value, 0.01f);
         else if (key == "enabled") enabled = value != 0.0f;
         else if (key == "adaptive") adaptive = std::max(value, 0.0f);
     }
     std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, "
-                "adaptive %.2f, debug %u, rt %d (%u rays)\n",
+                "adaptive %.2f, debug %u, rt %d (%u rays, clip %.2f, max %.2f)\n",
                 enabled ? 1 : 0, strength, radius, directions, steps, history, adaptive, debug,
-                rt ? 1 : 0, rays);
+                rt ? 1 : 0, rays, rt_clip, rt_max);
 }
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color) {
@@ -452,6 +456,8 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .rays = rays,
         .debug = debug,
         .surface_parts_count = surface.part_count,
+        .clip = rt_clip,
+        .max_radiance = rt_max,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
     };
@@ -502,7 +508,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
                                                 rt_writes);
                     cmdbuf.pushConstants(gather_rt_layout, vk::ShaderStageFlagBits::eCompute, 0,
                                          sizeof(gather_rt), &gather_rt);
-                    cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 3) / 4, 1);
+                    cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
                 } else {
                     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, gather_pipeline);
                     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, gather_layout, 0,
