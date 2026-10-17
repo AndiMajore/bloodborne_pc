@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: ray-traced probe GI (experimental, vk_rt_probes.cpp), the probe update. One workgroup
+// per probe of a camera-centred grid, one ray per invocation (a spherical Fibonacci set, rotated
+// each frame) against the RTAO's scene. A hit's radiance: the lit colour where the camera sees
+// it, else the surface cache, else nothing; a miss: the sky term. The rays are projected onto
+// L1 spherical harmonics and blended into the probe with a hysteresis. A probe whose rays mostly
+// hit backfaces close by sits inside geometry and is switched off (weight 0 when shading).
+// Storage is addressed by world cell modulo the grid size, so the grid scrolls with the camera
+// without copies; a probe that changed cell starts over.
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform texture2D lit_tex;   // full res, lit opaque scene (this frame)
+layout(binding = 1) uniform texture2D depth_tex; // full res
+layout(binding = 2) uniform accelerationStructureEXT scene; // view space
+struct Probe {
+    vec4 r, g, b;   // L1 SH per colour (Y00, Y1-1, Y10, Y11)
+    ivec4 cell;     // world cell, w: active (1) or inside geometry (0)
+};
+layout(binding = 3, std430) buffer Probes { Probe probes[]; };
+
+layout(push_constant) uniform Constants {
+    vec4 view[3];        // world -> view
+    vec4 proj;
+    vec2 full_size;
+    vec2 jitter;
+    ivec4 grid_origin;   // world cell of the grid's first probe; w: unused
+    ivec4 dims;          // xyz probes per axis, w: rays per probe
+    float spacing;       // metres between probes
+    float hysteresis;    // weight of the old value
+    float max_dist;      // ray length
+    float sky;           // radiance of a miss
+    uint frame;
+    uint surface_parts_count;
+    uint64_t surface_cache;
+    uint64_t surface_parts;
+};
+
+#include "rt_surface_lookup.glsl"
+
+shared vec3 sh_r[64], sh_g[64], sh_b[64];
+shared vec4 sh_0[64]; // per invocation: (Y00 r, Y00 g, Y00 b, backface flag)
+
+float ViewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+vec3 Rows(vec3 v) {
+    const vec4 h = vec4(v, 1.0);
+    return vec3(dot(view[0], h), dot(view[1], h), dot(view[2], h));
+}
+vec3 Fibonacci(uint i, uint n) {
+    const float phi = 2.39996323 * float(i);
+    const float z = 1.0 - (2.0 * float(i) + 1.0) / float(n);
+    const float r = sqrt(max(0.0, 1.0 - z * z));
+    return vec3(r * cos(phi), r * sin(phi), z);
+}
+// A rotation per frame (golden-ratio angles), the same for all probes.
+vec3 Rotate(vec3 d, uint f) {
+    const float a = fract(float(f) * 0.6180339887) * 6.2831853;
+    const float b = fract(float(f) * 0.7548776662) * 3.1415926 - 1.5707963;
+    const float ca = cos(a), sa = sin(a), cb = cos(b), sb = sin(b);
+    d = vec3(ca * d.x - sa * d.y, sa * d.x + ca * d.y, d.z);
+    return vec3(d.x, cb * d.y - sb * d.z, sb * d.y + cb * d.z);
+}
+
+void main() {
+    const uint probe_index = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    const uint rays = uint(dims.w);
+    // The probe's world cell: the grid origin plus its position in the grid; storage by cell.
+    const ivec3 local = ivec3(probe_index % uint(dims.x), (probe_index / uint(dims.x)) % uint(dims.y),
+                              probe_index / uint(dims.x * dims.y));
+    const ivec3 cell = grid_origin.xyz + local;
+    const ivec3 wrapped = ((cell % dims.xyz) + dims.xyz) % dims.xyz;
+    const uint slot = uint(wrapped.x + dims.x * (wrapped.y + dims.y * wrapped.z));
+    const vec3 world = (vec3(cell) + 0.5) * spacing;
+    const vec3 origin = Rows(world);
+
+    vec3 radiance = vec3(0.0);
+    float backface = 0.0;
+    bool used = lane < rays;
+    vec3 dir_world = vec3(0.0);
+    if (used) {
+        dir_world = Rotate(Fibonacci(lane, rays), frame);
+        const vec3 dir = normalize(vec3(dot(view[0].xyz, dir_world), dot(view[1].xyz, dir_world),
+                                        dot(view[2].xyz, dir_world)));
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, scene, gl_RayFlagsCullNoOpaqueEXT, 0xFF, origin, 0.0, dir, max_dist);
+        while (rayQueryProceedEXT(q)) {
+        }
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+            radiance = vec3(sky);
+        } else {
+            const float t = rayQueryGetIntersectionTEXT(q, true);
+            // The game's winding is not consistent enough for front faces: a hit very close
+            // counts as "inside" instead (a probe in a wall sees walls at a few centimetres).
+            backface = t < 0.25 * spacing ? 1.0 : 0.0;
+            const vec3 H = origin + dir * t;
+            const vec2 ndc = vec2(H.x * proj.x / H.z, H.y * proj.y / H.z);
+            const vec2 pixel = (ndc * 0.5 + 0.5) * full_size + jitter;
+            bool visible = all(greaterThanEqual(pixel, vec2(0.0))) && all(lessThan(pixel, full_size));
+            if (visible) {
+                const float z = ViewZ(texelFetch(depth_tex, ivec2(pixel), 0).r);
+                visible = z * H.z > 0.0 && abs(z - H.z) <= max(0.1, 0.03 * abs(H.z));
+            }
+            if (visible) {
+                radiance = texelFetch(lit_tex, ivec2(pixel), 0).rgb;
+            } else {
+                SurfaceRadiance(q, surface_cache, surface_parts, surface_parts_count, radiance);
+            }
+        }
+    }
+    // L1 projection (4 pi / N per sample), summed over the workgroup.
+    const float w = used ? 12.5663706 / float(rays) : 0.0;
+    const float y0 = 0.282095;
+    const vec3 y1 = 0.488603 * dir_world.yzx;
+    sh_0[lane] = vec4(radiance * y0 * w, used ? backface : 0.0);
+    sh_r[lane] = radiance.r * y1 * w;
+    sh_g[lane] = radiance.g * y1 * w;
+    sh_b[lane] = radiance.b * y1 * w;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (lane < s) {
+            sh_0[lane] += sh_0[lane + s];
+            sh_r[lane] += sh_r[lane + s];
+            sh_g[lane] += sh_g[lane + s];
+            sh_b[lane] += sh_b[lane + s];
+        }
+        barrier();
+    }
+    if (lane != 0u) {
+        return;
+    }
+    const vec4 nr = vec4(sh_0[0].r, sh_r[0]);
+    const vec4 ng = vec4(sh_0[0].g, sh_g[0]);
+    const vec4 nb = vec4(sh_0[0].b, sh_b[0]);
+    const bool inside = sh_0[0].a > 0.4 * float(rays);
+    Probe p = probes[slot];
+    const bool fresh = p.cell.xyz != cell;
+    const float h = fresh ? 0.0 : hysteresis;
+    p.r = mix(nr, p.r, h);
+    p.g = mix(ng, p.g, h);
+    p.b = mix(nb, p.b, h);
+    p.cell = ivec4(cell, inside ? 0 : 1);
+    probes[slot] = p;
+}

@@ -43,6 +43,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     ssgi->SetRayTracedAO(rtao.get()); // its ray-traced gather traces the RTAO's scene (rt=1)
     reflect = std::make_unique<RtReflections>(instance, scheduler, texture_cache, runtime,
                                               *camera_motion, *rtao);
+    probes = std::make_unique<RtProbes>(instance, scheduler, texture_cache, runtime,
+                                        *camera_motion, *rtao);
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
                                                   *camera_motion, *scene_targets);
     prompts = std::make_unique<ButtonPrompts>(instance, scheduler, buffer_cache);
@@ -160,6 +162,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         ssgi->OnFrameStart();
         rtao->OnFrameStart();
         reflect->OnFrameStart();
+        probes->OnFrameStart();
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();

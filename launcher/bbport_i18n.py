@@ -76,6 +76,9 @@ EN = {
     "Только там, где SSR ничего не нашёл": "Only where SSR found nothing",
     "Везде, где луч попал": "Wherever the ray hits",
     "Кэш поверхностей (эксперимент)": "Surface cache (experimental)",
+    "Отражённый свет из проб (эксперимент)": "Bounce light from probes (experimental)",
+    "Сетка проб вокруг камеры, лучи по сцене; вместо SSGI, не вместе":
+        "A grid of probes around the camera, rays through the scene; instead of SSGI, not with it",
     "Свет для попаданий лучей вне кадра; около 23 МБ": "Light for ray hits off screen; about 23 MB",
     "Трава и листья затеняют с этой долей; 0 — не затеняют. Около +0,7 мс":
         "Grass and leaves occlude at this share; 0: they do not. About +0.7 ms",

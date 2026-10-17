@@ -196,6 +196,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         if (reflect->Enabled() && cb_descs[0].first) {
             reflect->OnGBufferPass(db_desc.first, cb_descs[0].first);
         }
+        if (probes->Enabled() && cb_descs[0].first && cb_descs[2].first) {
+            probes->OnGBufferPass(db_desc.first, cb_descs[0].first, cb_descs[2].first);
+        }
     }
     if (rtao->Enabled()) {
         const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
@@ -226,7 +229,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
                 rtao->OnOpaqueScene(cb_descs[0].first); // the surface cache's slice (surface=1)
                 ssgi->OnOpaqueScene(cb_descs[0].first);
-                reflect->OnOpaqueScene(cb_descs[0].first); // after SSGI: its bounce included
+                probes->OnOpaqueScene(cb_descs[0].first);
+                reflect->OnOpaqueScene(cb_descs[0].first); // after SSGI and the probes: their bounce included
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
                 // A full-screen pass over the scene (the fog composite): the transparents are in.

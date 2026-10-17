@@ -199,6 +199,7 @@ DEFAULTS = {
     "rt_reflect": False,
     "rt_reflect_mode": "1",
     "rt_surface": False,
+    "rt_probes": False,
     "patches_dir": "",
     "language": "1",
     "fullscreen": False,
@@ -406,6 +407,10 @@ def game_environment(s):
             env["BB_RT_REFLECT"] = "1"
             write_live_settings(settings_user_dir(s) / "rtreflect.txt",
                                 {"enabled": 1, "mode": int(s.get("rt_reflect_mode", "1"))})
+        # Experimental probe GI (vk_rt_probes.cpp): adds its bounce like SSGI; use one of them.
+        if s.get("rt_probes"):
+            env["BB_RT_PROBES"] = "1"
+            write_live_settings(settings_user_dir(s) / "rtprobes.txt", {"enabled": 1})
     # The SSGI's ray-traced gather (experimental) traces the RTAO's scene: both must be on.
     if s.get("ssgi"):
         write_live_settings(settings_user_dir(s) / "ssgi.txt",
@@ -914,10 +919,14 @@ class LauncherWindow(Adw.ApplicationWindow):
                                             subtitle=tr("Свет для попаданий лучей вне кадра; около 23 МБ"),
                                             active=self.settings.get("rt_surface", False))
         rtao.add(self.rt_surface_row)
+        self.rt_probes_row = Adw.SwitchRow(title=tr("Отражённый свет из проб (эксперимент)"),
+                                           subtitle=tr("Сетка проб вокруг камеры, лучи по сцене; вместо SSGI, не вместе"),
+                                           active=self.settings.get("rt_probes", False))
+        rtao.add(self.rt_probes_row)
 
         def rt_extra_sensitive(*_):
             on = self.rtao_row.get_active()
-            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_surface_row):
+            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_surface_row, self.rt_probes_row):
                 row.set_sensitive(on)
             self.rt_reflect_mode_row.set_sensitive(on and self.rt_reflect_row.get_active())
 
@@ -1433,6 +1442,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["rt_reflect"] = self.rt_reflect_row.get_active()
         s["rt_reflect_mode"] = combo_value(self.rt_reflect_mode_row)
         s["rt_surface"] = self.rt_surface_row.get_active()
+        s["rt_probes"] = self.rt_probes_row.get_active()
         s["online"] = self.online_row.get_active()
         s["online_bbsc"] = self.bbsc_row.get_active()
         s["online_community"] = self.community_row.get_text().strip()

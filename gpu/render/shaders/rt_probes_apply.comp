@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: ray-traced probe GI (experimental, vk_rt_probes.cpp), the apply. Per pixel the eight
+// probes around its world position (pushed a little along the normal) are blended trilinearly,
+// each weighted down when it lies behind the surface and dropped when it is inside geometry or
+// belongs to another cell; their L1 radiance becomes irradiance at the normal, and albedo x
+// irradiance / pi x strength is added to the lit opaque scene (before the transparents, as SSGI).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D depth_tex;   // full res
+layout(binding = 1) uniform texture2D normal_tex;  // full res, world normal * 0.5 + 0.5
+layout(binding = 2) uniform texture2D albedo_tex;  // full res, sRGB view: linear
+layout(binding = 3, rgba16f) uniform image2D color_img; // the lit opaque scene, added to
+struct Probe {
+    vec4 r, g, b;
+    ivec4 cell;
+};
+layout(binding = 4, std430) readonly buffer Probes { Probe probes[]; };
+
+layout(push_constant) uniform Constants {
+    vec4 inv_view[3];    // view -> world
+    vec4 proj;
+    vec2 full_size;
+    vec2 jitter;
+    ivec4 grid_origin;
+    ivec4 dims;
+    float spacing;
+    float strength;
+    float normal_bias;   // metres along the normal before the lookup
+    uint debug;          // 1: the irradiance alone; 2: the probes' weight sum (dark: no probe)
+};
+
+float ViewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+
+void main() {
+    const ivec2 fp = ivec2(gl_GlobalInvocationID.xy);
+    if (fp.x >= int(full_size.x) || fp.y >= int(full_size.y)) {
+        return;
+    }
+    const float depth = texelFetch(depth_tex, fp, 0).r;
+    if (depth >= 1.0) {
+        return;
+    }
+    const vec2 ndc = (vec2(fp) + 0.5 - jitter) / full_size * 2.0 - 1.0;
+    const float z = ViewZ(depth);
+    const vec4 P = vec4(ndc.x * z / proj.x, ndc.y * z / proj.y, z, 1.0);
+    const vec3 W = vec3(dot(inv_view[0], P), dot(inv_view[1], P), dot(inv_view[2], P));
+    const vec3 N = normalize(texelFetch(normal_tex, fp, 0).xyz * 2.0 - 1.0);
+    const vec3 g = (W + N * normal_bias) / spacing - 0.5;
+    const ivec3 c0 = ivec3(floor(g));
+    const vec3 f = g - vec3(c0);
+
+    vec4 r = vec4(0.0), gg = vec4(0.0), b = vec4(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        const ivec3 o = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        const ivec3 cell = c0 + o;
+        const ivec3 local = cell - grid_origin.xyz;
+        if (any(lessThan(local, ivec3(0))) || any(greaterThanEqual(local, dims.xyz))) {
+            continue;
+        }
+        const ivec3 wrapped = ((cell % dims.xyz) + dims.xyz) % dims.xyz;
+        const Probe p = probes[wrapped.x + dims.x * (wrapped.y + dims.y * wrapped.z)];
+        if (p.cell.xyz != cell || p.cell.w == 0) {
+            continue;
+        }
+        const vec3 tri = mix(1.0 - f, f, vec3(o));
+        const vec3 probe_pos = (vec3(cell) + 0.5) * spacing;
+        const vec3 to_probe = normalize(probe_pos - W);
+        const float facing = (dot(to_probe, N) + 1.0) * 0.5;
+        const float w = tri.x * tri.y * tri.z * (facing * facing + 0.2);
+        r += p.r * w;
+        gg += p.g * w;
+        b += p.b * w;
+        total += w;
+    }
+    if (total <= 1e-4) {
+        if (debug == 2u) {
+            imageStore(color_img, fp, vec4(0.0, 0.0, 0.0, 1.0));
+        }
+        return;
+    }
+    r /= total;
+    gg /= total;
+    b /= total;
+    // Irradiance at N from L1: pi Y00 L00 + 2pi/3 sum Y1m(N) L1m.
+    const vec4 basis = vec4(3.14159265 * 0.282095, 2.0943951 * 0.488603 * N.yzx);
+    const vec3 irradiance = max(vec3(dot(r, basis), dot(gg, basis), dot(b, basis)), vec3(0.0));
+    const vec3 diffuse = irradiance / 3.14159265;
+    const vec4 color = imageLoad(color_img, fp);
+    if (debug == 1u) {
+        imageStore(color_img, fp, vec4(diffuse * strength, color.a));
+    } else if (debug == 2u) {
+        imageStore(color_img, fp, vec4(vec3(min(total, 1.0)), color.a));
+    } else {
+        const vec3 albedo = texelFetch(albedo_tex, fp, 0).rgb;
+        imageStore(color_img, fp, vec4(color.rgb + albedo * diffuse * strength, color.a));
+    }
+}

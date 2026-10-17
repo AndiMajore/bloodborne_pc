@@ -27,6 +27,7 @@ class CommandProcessor;
 #include "upscale/vk_camera_motion.h"
 #include "render/vk_rtao.h"
 #include "render/vk_rt_reflect.h"
+#include "render/vk_rt_probes.h"
 #include "upscale/vk_ssgi.h"
 #include "render/vk_constant_ring.h"
 #include "upscale/vk_scene_resolution.h"
@@ -510,6 +511,7 @@ private:
     std::unique_ptr<ScreenSpaceGI> ssgi;         // bbport: BB_SSGI=1 (upscale/vk_ssgi.h)
     std::unique_ptr<RayTracedAO> rtao; // bbport: BB_RTAO=1 (render/vk_rtao.h)
     std::unique_ptr<RtReflections> reflect; // bbport: BB_RT_REFLECT=1 (experimental)
+    std::unique_ptr<RtProbes> probes;        // bbport: BB_RT_PROBES=1 (experimental)
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
     std::unique_ptr<ObjectMotion> object_motion;
