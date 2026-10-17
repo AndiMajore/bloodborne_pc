@@ -194,7 +194,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             rtao->OnGBufferPass(db_desc.first, cb_descs[0].first);
         }
         if (reflect->Enabled() && cb_descs[0].first) {
-            reflect->OnGBufferPass(db_desc.first, cb_descs[0].first);
+            reflect->OnGBufferPass(db_desc.first, cb_descs[0].first, cb_descs[1].first);
         }
         if (probes->Enabled() && cb_descs[0].first && cb_descs[2].first) {
             probes->OnGBufferPass(db_desc.first, cb_descs[0].first, cb_descs[2].first);

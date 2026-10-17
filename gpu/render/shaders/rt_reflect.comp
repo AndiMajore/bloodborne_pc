@@ -5,7 +5,9 @@
 // mirror ray goes into the ray-traced AO's scene; a hit the camera sees now (its projection lands
 // on the screen and the depth there agrees) is shaded with last frame's lit image at the hit's
 // reprojected position. The game's lighting pass then applies its own specular weighting, as it
-// does to SSR. mode 1: only where SSR found nothing; mode 2: wherever the ray gives a value.
+// does to SSR. mode 1: only where SSR found nothing; mode 2: wherever the ray gives a value;
+// mode 3: the game's SSR was left out (replace_ssr): its target is not read, every texel written
+// (nothing where the ray gives no value).
 #version 460
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_samplerless_texture_functions : require
@@ -21,6 +23,7 @@ layout(binding = 2) uniform texture2D lit_prev;    // half res, last frame's lit
 layout(binding = 3, rgba16f) uniform image2D ssr_img; // the game's SSR target, read and written
 layout(binding = 4) uniform accelerationStructureEXT scene; // the RTAO's TLAS (view space)
 layout(binding = 5) uniform texture2D emission_tex; // quarter res, last frame's transparents' light
+layout(binding = 6) uniform texture2D gloss_tex;    // full res, the G-buffer's c1: x the gloss (soften > 0)
 
 layout(push_constant) uniform Constants {
     vec4 view[3];      // world -> view (this frame), 3x4 rows
@@ -40,6 +43,8 @@ layout(push_constant) uniform Constants {
     float emission;    // x emission_tex (0: none bound)
     uint64_t surface_cache; // the RTAO's surface cache (0: none)
     uint64_t surface_parts;
+    float soften;      // x the material's lobe: the ray's cone (0: a mirror)
+    uint frame;
 };
 
 #include "rt_surface_lookup.glsl"
@@ -66,11 +71,14 @@ void main() {
     if (sp.x >= int(ssr_size.x) || sp.y >= int(ssr_size.y)) {
         return;
     }
-    const vec4 ssr = imageLoad(ssr_img, sp);
+    const vec4 ssr = mode == 3u ? vec4(0.0) : imageLoad(ssr_img, sp);
     const vec2 scale = full_size / ssr_size;
     const ivec2 fp = ivec2((vec2(sp) + 0.5) * scale);
     const float depth = texelFetch(depth_tex, fp, 0).r;
     if (depth >= 1.0) {
+        if (mode == 3u) {
+            imageStore(ssr_img, sp, vec4(0.0));
+        }
         return; // sky: SSR wrote nothing to reflect there either
     }
     const vec3 P = ViewPos(vec2(fp) + 0.5, depth);
@@ -80,12 +88,31 @@ void main() {
     if (dot(N, V) > 0.0) {
         N = -N;
     }
-    const vec3 R = reflect(V, N);
+    vec3 R = reflect(V, N);
+    // Not every surface is a mirror: the game's lights give a material the specular power
+    // 2^(13 gloss); its lobe (about sqrt(2 / (n + 2)) radians) x soften is the cone the ray is
+    // spread over, a new direction each frame (the game's blurred SSR levels and the upscaler's
+    // history average it).
+    if (soften > 0.0) {
+        const float n = exp2(13.0 * texelFetch(gloss_tex, fp, 0).x);
+        const float cone = soften * sqrt(2.0 / (n + 2.0));
+        const vec3 up = abs(R.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+        const vec3 T = normalize(cross(up, R));
+        const vec3 B = cross(R, T);
+        const float a = 6.2831853 * fract(52.9829189 * fract(dot(vec2(sp) + float(frame % 16u) * 5.588238,
+                                                                   vec2(0.06711056, 0.00583715))));
+        const float r = sqrt(fract(52.9829189 * fract(dot(vec2(sp.yx) + float(frame % 16u) * 1.618034,
+                                                          vec2(0.06711056, 0.00583715)))));
+        const vec3 jittered = normalize(R + (T * cos(a) + B * sin(a)) * (tan(min(cone, 1.2)) * r));
+        if (dot(jittered, N) > 0.0) {
+            R = jittered;
+        }
+    }
     // Rays back towards the camera are left to SSR's own handling (it skips them too).
     const bool traced = dot(R, V) > 0.05;
     vec4 result = ssr;
     vec3 klass = vec3(0.5); // debug 2: grey = left as SSR made it
-    if (traced && (mode == 2u || ssr.a <= 0.0 || debug != 0u)) {
+    if (traced && (mode >= 2u || ssr.a <= 0.0 || debug != 0u)) {
         rayQueryEXT q;
         const vec3 origin = P + N * (0.02 + 0.002 * length(P));
         rayQueryInitializeEXT(q, scene, gl_RayFlagsCullNoOpaqueEXT, 0xFF, origin, 0.0, R, far);

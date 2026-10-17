@@ -200,6 +200,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_geometry = 0;
 
     PrepareRenderState(pipeline);
+    // bbport (RT reflections, replace_ssr=1): the game's SSR draw left out, the trace that follows
+    // writes its whole target.
+    if (reflect->Enabled()) {
+        const auto* fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        if (fs && fs->pgm_hash == RtReflections::SsrShader && reflect->SkipGameSsr()) {
+            return;
+        }
+    }
     NoteUpscalerDraw(pipeline);
     const PreparedDraw* draw_prepared = bind_prepared;
     // bbport: vertex and index buffers are resolved while the helper binds textures (their

@@ -5,7 +5,9 @@
 // at its reprojected position and written into the SSR target, which the game's lighting pass
 // weights by the surface's own specular as it does SSR's result. mode 1 fills only SSR's misses,
 // mode 2 replaces SSR wherever the ray gives a value. Needs the RTAO (its TLAS).
-// <user>/rtreflect.txt: enabled, mode, far, strength, debug (re-read while the game runs).
+// replace_ssr=1: the game's SSR draw is left out (~1.4 ms) and the trace writes its whole target
+// (as mode 2, nothing where the ray finds no visible hit).
+// <user>/rtreflect.txt: enabled, mode, far, strength, debug, replace_ssr (re-read while the game runs).
 
 #pragma once
 
@@ -41,13 +43,16 @@ public:
     }
     void OnFrameStart();
     /// The G-buffer pass: its depth and normal (c0) targets.
-    void OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal);
+    void OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal, VideoCore::ImageId material);
     /// Every draw's first colour target and fragment shader: the end of the SSR pass is where
     /// the reflections are traced.
     void OnColorTarget(VideoCore::ImageId color, u64 ps_hash);
     /// The lit opaque scene of this frame (before the transparents): kept as next frame's radiance.
     void OnOpaqueScene(VideoCore::ImageId color);
     static constexpr u64 SsrShader = 0x6c2323c2ull;
+    /// The game's SSR draw (before it is recorded): true when it is to be left out this frame
+    /// (replace_ssr=1 and the trace will run right after it, writing the whole target).
+    [[nodiscard]] bool SkipGameSsr();
 
 private:
     void PollSettings();
@@ -66,6 +71,10 @@ private:
     bool enabled = false;
     bool active = true;     // enabled=0 in the file: off live
     u32 mode = 1;
+    bool replace_ssr = false;
+    float soften = 1.0f; // the rays' cone x the material's lobe (G-buffer c1.x: gloss, power 2^(13 gloss))
+    bool replaced_this_frame = false;
+    u32 replaced = 0; // (per report)
     u32 debug = 0;
     float far = 40.0f;
     float strength = 1.0f;
@@ -73,7 +82,7 @@ private:
     long long settings_mtime = -1;
     std::chrono::steady_clock::time_point last_poll{};
 
-    VideoCore::ImageId depth_id{}, normal_id{};
+    VideoCore::ImageId depth_id{}, normal_id{}, material_id{}; // material: the G-buffer's c1 (x: gloss)
     VideoCore::ImageId last_color{}, ssr_target{};
     bool done_this_frame = false, copied_this_frame = false;
     bool copy_valid = false; // the copy holds a frame (the previous one when traced)

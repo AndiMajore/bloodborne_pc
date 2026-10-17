@@ -39,8 +39,10 @@ struct TraceConstants {
     float emission; // x the RTAO's emission image (the transparents' light); 0: none
     u64 surface_cache;
     u64 surface_parts;
+    float soften;   // x the material's lobe (its gloss in the G-buffer): the ray's cone; 0: a mirror
+    u32 frame;
 };
-static_assert(sizeof(TraceConstants) == 248); // push constants: 256 bytes on RADV and NVIDIA
+static_assert(sizeof(TraceConstants) == 256); // push constants: 256 bytes on RADV and NVIDIA
 struct CopyConstants {
     std::array<s32, 2> full_size;
     std::array<s32, 2> half_size;
@@ -58,7 +60,7 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
                   sizeof(TraceConstants);
     if (!enabled) {
         if (env && env[0] == '1') {
-            std::printf("RT reflections: off (needs the RTAO with ray queries and 248 bytes of push "
+            std::printf("RT reflections: off (needs the RTAO with ray queries and 256 bytes of push "
                         "constants)\n");
         }
         return;
@@ -111,7 +113,8 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
     using DT = vk::DescriptorType;
     const std::array trace_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eSampledImage), binding(3, DT::eStorageImage),
-                                       binding(4, DT::eAccelerationStructureKHR), binding(5, DT::eSampledImage)};
+                                       binding(4, DT::eAccelerationStructureKHR), binding(5, DT::eSampledImage),
+                                       binding(6, DT::eSampledImage)};
     const std::array copy_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eStorageImage)};
     make_layouts(trace_bindings, sizeof(TraceConstants), trace_desc_layout, trace_layout);
     make_layouts(copy_bindings, sizeof(CopyConstants), copy_desc_layout, copy_layout);
@@ -132,15 +135,15 @@ void RtReflections::OnFrameStart() {
     if (!enabled) {
         return;
     }
-    done_this_frame = copied_this_frame = false;
+    done_this_frame = copied_this_frame = replaced_this_frame = false;
     ssr_target = last_color = {};
     ++frame;
     PollSettings();
     if (frame % 600 == 0 && (passes || skipped)) {
         std::printf("RT reflections: %u passes in 600 frames, %u skipped (no RTAO scene, no "
-                    "history or a size mismatch); mode %u, far %.0f m\n",
-                    passes, skipped, mode, far);
-        passes = skipped = 0;
+                    "history or a size mismatch); mode %u, far %.0f m; the game's SSR left out in %u\n",
+                    passes, skipped, mode, far, replaced);
+        passes = skipped = replaced = 0;
     }
 }
 
@@ -173,14 +176,37 @@ void RtReflections::PollSettings() {
         else if (key == "far") far = std::clamp(value, 1.0f, 500.0f);
         else if (key == "strength") strength = std::clamp(value, 0.0f, 1.0f);
         else if (key == "debug") debug = std::clamp(u32(std::max(value, 0.0f)), 0u, 2u);
+        else if (key == "replace_ssr") replace_ssr = value != 0.0f;
+        else if (key == "soften") soften = std::clamp(value, 0.0f, 4.0f);
     }
-    std::printf("RT reflections: settings: enabled %d, mode %u, far %.0f m, strength %.2f, debug %u\n",
-                active ? 1 : 0, mode, far, strength, debug);
+    std::printf("RT reflections: settings: enabled %d, mode %u, far %.0f m, strength %.2f, debug %u, "
+                "replace_ssr %d, soften %.2f\n",
+                active ? 1 : 0, mode, far, strength, debug, replace_ssr ? 1 : 0, soften);
 }
 
-void RtReflections::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal) {
+void RtReflections::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal,
+                                  VideoCore::ImageId material) {
     depth_id = depth;
     normal_id = normal;
+    material_id = material;
+}
+
+bool RtReflections::SkipGameSsr() {
+    // Only when the trace will run (its conditions in Record): else the target keeps stale content.
+    if (!enabled || !active || !replace_ssr || done_this_frame || !rtao.FrameTlas() || !copy_valid ||
+        !camera_motion.HistoryValid() || !depth_id || !normal_id || !ssr_target) {
+        return false;
+    }
+    const auto& ssr = texture_cache.GetImage(ssr_target);
+    const auto& depth = texture_cache.GetImage(depth_id);
+    const auto& normal = texture_cache.GetImage(normal_id);
+    if (ssr.info.pixel_format != vk::Format::eR16G16B16A16Sfloat ||
+        normal.info.size.width != depth.info.size.width) {
+        return false;
+    }
+    replaced_this_frame = true;
+    ++replaced;
+    return true;
 }
 
 void RtReflections::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
@@ -363,6 +389,16 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
     runtime.Transit(&depth, vk::ImageLayout::eGeneral, compute, vk::AccessFlagBits2::eShaderRead);
     runtime.Transit(&normal, vk::ImageLayout::eGeneral, compute, vk::AccessFlagBits2::eShaderRead);
     runtime.Transit(&ssr, vk::ImageLayout::eGeneral, compute, rw);
+    // The material target (its gloss), when it has the depth's size: the rays' cone (soften).
+    VideoCore::Image* material = nullptr;
+    if (material_id && soften > 0.0f) {
+        auto& m = texture_cache.GetImage(material_id);
+        if (m.info.pixel_format == vk::Format::eR8G8B8A8Unorm && m.info.size.width == depth.info.size.width &&
+            m.info.size.height == depth.info.size.height) {
+            material = &m;
+            runtime.Transit(material, vk::ImageLayout::eGeneral, compute, vk::AccessFlagBits2::eShaderRead);
+        }
+    }
     runtime.FlushBarriers();
     const vk::ImageView depth_view =
         CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
@@ -370,6 +406,9 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         CachedView(normal, normal.info.pixel_format, vk::ImageAspectFlagBits::eColor);
     const vk::ImageView ssr_view =
         CachedView(ssr, ssr.info.pixel_format, vk::ImageAspectFlagBits::eColor);
+    const vk::ImageView material_view =
+        material ? CachedView(*material, material->info.pixel_format, vk::ImageAspectFlagBits::eColor)
+                 : vk::ImageView{};
     const u32 sw = ssr.info.size.width, sh = ssr.info.size.height;
     const auto surface = rtao.FrameSurface();
     // Last frame's, as the lit copy; without it the copy is bound in its place, x 0.
@@ -387,22 +426,25 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         .lit_size = {float(copy_w), float(copy_h)},
         .far = far,
         .strength = strength,
-        .mode = mode,
+        .mode = replaced_this_frame ? 3u : mode, // 3: the game's SSR left out, the whole target ours
         .debug = debug,
         .surface_parts_count = surface.part_count,
         .emission = emission.strength,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
+        .soften = material_view ? soften : 0.0f,
+        .frame = frame,
     };
     scheduler.RecordCrumb(
         {.name = "rt reflect"},
         [constants, depth_view, normal_view, ssr_view, lit = *copy_view, emission_view, tlas, sw, sh,
+         gloss = material_view ? material_view : normal_view,
          pipeline = *trace_pipeline, layout = *trace_layout](vk::CommandBuffer cmdbuf) {
             const auto info = [](vk::ImageView view) {
                 return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
             };
             const auto d = info(depth_view), n = info(normal_view), l = info(lit), s = info(ssr_view),
-                       e = info(emission_view);
+                       e = info(emission_view), g = info(gloss);
             const vk::WriteDescriptorSetAccelerationStructureKHR as_info{
                 .accelerationStructureCount = 1,
                 .pAccelerationStructures = &tlas,
@@ -419,7 +461,9 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
                 vk::WriteDescriptorSet{.pNext = &as_info, .dstBinding = 4, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
                 vk::WriteDescriptorSet{.dstBinding = 5, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &e}};
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &e},
+                vk::WriteDescriptorSet{.dstBinding = 6, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &g}};
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
             cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
             cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants),
