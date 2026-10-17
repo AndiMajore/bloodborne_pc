@@ -36,7 +36,7 @@ layout(push_constant) uniform Constants {
     float history;    // 0..1 blend with the previous result
     uint frame;
     uint rays;        // per half-res pixel
-    uint debug;       // 2: rays whose hit was seen on screen (green), read from the surface cache (blue), hidden (red)
+    uint debug;       // 3: the emission image; 2: rays whose hit was seen on screen (green), read from the surface cache (blue), hidden (red)
     uint surface_parts_count;
     float clip;       // history clipped to this frame's 3x3 mean +- clip sigma (plus a floor)
     float max_radiance; // per ray: brighter hits (lamps, candles) are scaled down to it (fireflies)
@@ -146,6 +146,9 @@ void main() {
     gi /= float(rays);
     if (debug == 2u) {
         gi = vec3(hidden, seen, cached) / float(rays);
+    }
+    if (debug == 3u) { // the emission image alone (the transparents' light, last frame)
+        gi = texelFetch(emission_tex, fp / 4, 0).rgb * emission;
     }
 
     // This frame's neighbourhood (same surface: view z within 5%), for the history clip.

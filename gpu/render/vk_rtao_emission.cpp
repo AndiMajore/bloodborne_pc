@@ -179,6 +179,23 @@ void RayTracedAO::RecordEmission(VideoCore::ImageId color_id, u32 mode) {
     }
 }
 
+void RayTracedAO::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, bool blended,
+                                    bool depth_write, u32 indices, u32 instances, u64 ps_hash) {
+    ++emit_draws;
+    if (emit_trace_lines && emit_trace_lines < 400) {
+        ++emit_trace_lines;
+        std::printf("  draw %u: target %s, scene depth %d, blended %d, depth write %d, %u indices x %u, ps %016llx\n",
+                    emit_draws, !color ? "none" : color == emit_scene ? "scene" : "other", scene_depth ? 1 : 0,
+                    blended ? 1 : 0, depth_write ? 1 : 0, indices, instances, (unsigned long long)ps_hash);
+    }
+    if (settings.emission_at == 1 && color && color != emit_scene && emit_frame != frame) {
+        RecordEmission(emit_scene, 1);
+        if (emit_trace_lines) {
+            std::printf("  -> emission taken before draw %u\n", emit_draws);
+        }
+    }
+}
+
 void RayTracedAO::OnOpaqueSceneLit(VideoCore::ImageId color_id) {
     if (!enabled || !Active() || !color_id || settings.emission <= 0.0f || emit_snapshot_frame == frame) {
         return;
@@ -187,12 +204,33 @@ void RayTracedAO::OnOpaqueSceneLit(VideoCore::ImageId color_id) {
     if (color.info.pixel_format != vk::Format::eR16G16B16A16Sfloat || !resources_ready) {
         return;
     }
+    // The last frame's outcome (per 600 frames in the log).
+    if (++emit_frames == 600) {
+        std::printf("RTAO: emission: made in %u of 600 frames (%u without; at %s)\n", emit_taken, emit_missed,
+                    settings.emission_at == 1 ? "the first draw leaving the scene" : "the first full-screen pass");
+        emit_frames = emit_taken = emit_missed = 0;
+    }
+    if (emit_snapshot_frame + 1 == frame) {
+        ++(emit_frame + 1 == frame ? emit_taken : emit_missed);
+    }
+    if (emit_trace_lines) {
+        std::printf("  (end of the traced frame: %u draws)\n", emit_draws);
+        emit_trace_lines = 0;
+    }
+    if (settings.emission_trace != emit_trace_seen) { // a new value: trace this frame's draws
+        emit_trace_seen = settings.emission_trace;
+        emit_trace_lines = 1;
+        std::printf("RTAO: emission trace, frame %u (draws after the opaque scene; at %u):\n", frame,
+                    settings.emission_at);
+    }
     emit_snapshot_frame = frame;
+    emit_scene = color_id;
+    emit_draws = 0;
     RecordEmission(color_id, 0);
 }
 
 void RayTracedAO::OnSceneComposite(VideoCore::ImageId color_id) {
-    if (!enabled || !color_id || emit_snapshot_frame != frame || emit_frame == frame || !emit_image) {
+    if (settings.emission_at != 0 || !enabled || !color_id || emit_snapshot_frame != frame || emit_frame == frame || !emit_image) {
         return;
     }
     auto& color = texture_cache.GetImage(color_id);

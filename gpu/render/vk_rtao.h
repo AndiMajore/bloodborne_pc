@@ -113,6 +113,12 @@ public:
     /// Read the frame after (FrameEmission): a pixel's light there, at a quarter of the scene size.
     void OnOpaqueSceneLit(VideoCore::ImageId color); // vk_rtao_emission.cpp
     void OnSceneComposite(VideoCore::ImageId color); // vk_rtao_emission.cpp
+    /// The opaque scene is kept this frame, the emission not taken yet.
+    [[nodiscard]] bool EmissionPending() const noexcept {
+        return emit_snapshot_frame == frame && (emit_frame != frame || emit_trace_lines);
+    }
+    void OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, bool blended, bool depth_write,
+                           u32 indices, u32 instances, u64 ps_hash); // vk_rtao_emission.cpp
     struct Emission {
         vk::ImageView view{}; // RGBA16F, eGeneral; empty: none (bind something else, strength 0)
         float strength = 0.0f;
@@ -395,6 +401,11 @@ private:
     u32 emit_w = 0, emit_h = 0;
     u32 emit_snapshot_frame = ~0u, emit_frame = ~0u - 1;
     bool emit_written = false;
+    VideoCore::ImageId emit_scene{};   // the scene colour the opaque base was taken from
+    u32 emit_draws = 0;                // draws since then (this frame)
+    u32 emit_trace_lines = 0;
+    u32 emit_taken = 0, emit_missed = 0, emit_frames = 0; // per 600 frames: emission made / not
+    float emit_trace_seen = 0.0f;
     vk::UniqueDescriptorSetLayout emit_desc_layout;
     vk::UniquePipelineLayout emit_layout;
     vk::UniquePipeline emit_pipeline;

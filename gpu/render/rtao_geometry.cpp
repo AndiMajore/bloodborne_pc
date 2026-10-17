@@ -287,6 +287,8 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "surface") flag(s.surface);
     else if (key == "surface_budget") s.surface_budget = std::clamp(u32(std::max(value, 0.0f)), 1024u, 4000000u);
     else if (key == "emission") s.emission = std::clamp(value, 0.0f, 16.0f);
+    else if (key == "emission_at") s.emission_at = std::clamp(u32(std::max(value, 0.0f)), 0u, 1u);
+    else if (key == "emission_trace") s.emission_trace = value;
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);

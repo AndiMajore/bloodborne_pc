@@ -161,6 +161,8 @@ struct Settings {
     float foliage = 0.0f; // > 0: alpha-tested draws occlude with this probability per hit (0: left out)
     bool surface = false;        // experimental: the surface cache (radiance per static pool triangle)
     u32 surface_budget = 131072; // static triangles looked at per frame
+    u32 emission_at = 1;         // 0: the first full-screen pass with the scene depth after the transparents, 1: the first draw leaving the scene colour
+    float emission_trace = 0.0f; // a new value: one frame's draws after the opaque scene are logged
     float emission = 1.0f;       // experimental: the transparents' light (fires) for the RT lighting effects, x this (0: off)
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)

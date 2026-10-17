@@ -238,9 +238,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 // (Not an SSGI trigger: the lighting composites into intermediate RGBA16F
                 // targets come first and would be hit before they draw.)
                 upscaler->OnSceneComposite();
-                rtao->OnSceneComposite(cb_descs[0].first); // the transparents' light (emission)
+                rtao->OnSceneComposite(cb_descs[0].first); // the transparents' light (emission_at=0)
             }
         }
+    }
+    // bbport: after the opaque scene, each draw for the emission's other trigger (emission_at=1: the
+    // first draw that leaves the scene colour) and its trace (emission_trace=1).
+    if (rtao->Enabled() && rtao->EmissionPending()) {
+        const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
+                                ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
+                                : 0;
+        rtao->OnDrawAfterOpaque(cb_descs[0].first, db_desc.first && db_desc.first == camera_motion->Depth(),
+                                regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass,
+                                regs.depth_control.depth_write_enable, regs.num_indices,
+                                regs.num_instances.NumInstances(), ps_hash);
     }
 }
 
