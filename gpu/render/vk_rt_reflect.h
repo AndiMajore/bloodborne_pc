@@ -5,7 +5,7 @@
 // at its reprojected position and written into the SSR target, which the game's lighting pass
 // weights by the surface's own specular as it does SSR's result. mode 1 fills only SSR's misses,
 // mode 2 replaces SSR wherever the ray gives a value. Needs the RTAO (its TLAS).
-// replace_ssr=1: the game's SSR draw is left out (~1.4 ms) and the trace writes its whole target
+// replace_ssr=1 (default): the game's SSR draw is left out (~1.5 ms) and the trace writes its whole target
 // (as mode 2, nothing where the ray finds no visible hit).
 // <user>/rtreflect.txt: enabled, mode, far, strength, debug, replace_ssr (re-read while the game runs).
 
@@ -71,7 +71,7 @@ private:
     bool enabled = false;
     bool active = true;     // enabled=0 in the file: off live
     u32 mode = 1;
-    bool replace_ssr = false;
+    bool replace_ssr = true;
     float soften = 1.0f; // the rays' cone x the material's lobe (G-buffer c1.x: gloss, power 2^(13 gloss))
     bool replaced_this_frame = false;
     u32 replaced = 0; // (per report)
