@@ -130,6 +130,8 @@ public:
         float light_shadow = 0.0f;
         float light_range = 0.0f;
         float light_size = 0.0f;
+        float light_height = 0.0f;
+        float light_wrap = 0.0f;
     };
     [[nodiscard]] Emission FrameEmission() const noexcept {
         if (!Active() || (settings.emission <= 0.0f && settings.fire_light <= 0.0f) || !emit_view ||
@@ -140,7 +142,8 @@ public:
             return {*emit_view, settings.emission};
         }
         return {*emit_view, settings.emission, *lights_views[lights_out], lights_count, settings.fire_light,
-                settings.fire_shadow, settings.fire_range, settings.fire_size};
+                settings.fire_shadow, settings.fire_range, settings.fire_size, settings.fire_height,
+                settings.fire_wrap};
     }
     /// bbport (the light list, ticket 59, vk_rtao_lights.cpp): the game's local lights. Its
     /// light passes draw a 16x15 grid of screen tiles per pixel-shader variant (vs LightQuadVs),

@@ -50,7 +50,9 @@ layout(push_constant) uniform Constants {
     float fire_shadow;  // 0..1: their unshadowed light taken away (the game's own fire light)
     float fire_range;   // metres
     uint fire_count;    // lights in lights_tex (0: none bound)
-    float fire_size;    // metres: a light's radius (shadow rays aim anywhere in it)
+    float fire_size;    // metres: a light's radius (its cylinder's)
+    float fire_height;  // metres: its cylinder's height (a quarter below the light's point)
+    float fire_wrap;    // 0..1: the cosine wrapped round (thin swaying leaves)
 };
 
 #include "../../render/shaders/rt_surface_lookup.glsl"
@@ -90,13 +92,17 @@ float IGN(vec2 p) {
 // The fire lights' irradiance at `origin`: every light's unshadowed share (power x cosine /
 // distance^2, windowed to fire_range) is summed, one is picked in proportion to it (u: 0..1) and
 // traced; the estimate is the picked light's colour x the summed weight, or 0 when blocked. A
-// flame is no point: the shadow ray aims at a random point of a sphere of fire_size around the
-// light (v: three more random numbers), so the stake or wood it burns on does not shadow all of
-// its light, and shadows get soft edges (averaged by the history).
+// fire is no point but a flame: an upright cylinder (fire_size wide, fire_height tall, mostly
+// above the light's point) a random point of which (v) is lit from and traced to each frame, so the
+// history averages an area light: soft shadows, and swaying leaves (whose facing flips from frame to
+// frame) do not strobe. The cosine is wrapped (fire_wrap): a big light reaches round thin things.
+float Wrapped(vec3 N, vec3 d, float inv_len) {
+    return clamp((dot(N, d) * inv_len + fire_wrap) / (1.0 + fire_wrap), 0.0, 1.0);
+}
 vec3 FireLight(vec3 N, vec3 origin, float u, vec3 v, out vec3 unshadowed) {
     unshadowed = vec3(0.0);
     float total = 0.0, picked_w = 0.0;
-    vec3 picked_c = vec3(0.0), picked_d = vec3(0.0);
+    vec3 picked_power = vec3(0.0), picked_d = vec3(0.0);
     const float range2 = fire_range * fire_range;
     for (uint i = 0u; i < fire_count; ++i) {
         const vec4 a = texelFetch(lights_tex, ivec2(i, 0), 0);
@@ -106,13 +112,13 @@ vec3 FireLight(vec3 N, vec3 origin, float u, vec3 v, out vec3 unshadowed) {
         const vec4 h = vec4(a.xyz, 1.0);
         const vec3 d = vec3(dot(view[0], h), dot(view[1], h), dot(view[2], h)) - origin;
         const float dist2 = dot(d, d);
-        const float cosine = dot(N, d) * inversesqrt(max(dist2, 1e-6));
+        const float cosine = Wrapped(N, d, inversesqrt(max(dist2, 1e-6)));
         if (dist2 >= range2 || cosine <= 0.0) {
             continue;
         }
         const float window = 1.0 - dist2 / range2;
-        const vec3 c = texelFetch(lights_tex, ivec2(i, 1), 0).rgb *
-                       (cosine * window * window / max(dist2, 0.25));
+        const vec3 power = texelFetch(lights_tex, ivec2(i, 1), 0).rgb;
+        const vec3 c = power * (cosine * window * window / max(dist2, 0.25));
         const float w = dot(c, vec3(0.2126, 0.7152, 0.0722));
         if (w <= 0.0) {
             continue;
@@ -124,7 +130,7 @@ vec3 FireLight(vec3 N, vec3 origin, float u, vec3 v, out vec3 unshadowed) {
         if (u < p) {
             u /= p;
             picked_w = w;
-            picked_c = c;
+            picked_power = power;
             picked_d = d;
         } else {
             u = (u - p) / (1.0 - p);
@@ -133,19 +139,26 @@ vec3 FireLight(vec3 N, vec3 origin, float u, vec3 v, out vec3 unshadowed) {
     if (picked_w <= 0.0) {
         return vec3(0.0);
     }
-    const float phi = 2.0 * PI * v.x, cos_t = v.y * 2.0 - 1.0;
-    const vec3 in_sphere = vec3(sqrt(1.0 - cos_t * cos_t) * vec2(cos(phi), sin(phi)), cos_t) * (fire_size * pow(v.z, 1.0 / 3.0));
-    const vec3 to = picked_d + in_sphere;
-    const float dist = length(to);
+    // A point of the flame's cylinder (the world's up in view space: the view rows' y).
+    const vec3 up = normalize(vec3(view[0].y, view[1].y, view[2].y));
+    const vec3 side = abs(up.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    const vec3 T = normalize(cross(side, up));
+    const vec3 B = cross(up, T);
+    const float phi = 2.0 * PI * v.x, r = fire_size * sqrt(v.y);
+    const vec3 to = picked_d + (T * cos(phi) + B * sin(phi)) * r + up * (fire_height * (v.z - 0.25));
+    const float dist2 = dot(to, to);
+    const float dist = sqrt(dist2);
+    const float window = max(1.0 - dist2 / range2, 0.0);
+    const vec3 c = picked_power * (Wrapped(N, to, 1.0 / max(dist, 1e-3)) * window * window / max(dist2, 0.25));
     rayQueryEXT q;
     rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullNoOpaqueEXT, 0xFF,
-                          origin, 0.0, to / dist, max(dist - 0.1, 0.0));
+                          origin, 0.0, to / max(dist, 1e-3), max(dist - 0.1, 0.0));
     while (rayQueryProceedEXT(q)) {
     }
     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
         return vec3(0.0);
     }
-    return picked_c * (total / picked_w);
+    return c * (total / picked_w);
 }
 
 void main() {
