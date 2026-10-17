@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: the fires as point lights for the RT SSGI (fire_light= in rtao.txt, vk_rtao_emission.cpp).
 // One workgroup per 64x64 tile of the (blurred) emission image: the brightest texel is the
-// light's place on screen, the depth under it (or, for a flame against the sky, the nearest
-// surface around it) its distance, pulled a little towards the camera (the flame burns in front
-// of what it sits on). Its power is the tile's emission summed over the world area each texel
-// covers at that distance, so a fire keeps its strength near and far. Out: per light two texels,
-// the world position (w 1: a light, 0: none) and the power, blended with the tile's light of the
-// frame before when it is near it (`smoothing`): flames flicker, and the brightest texel wanders.
+// light's place on screen, the nearest surface under the tile's bright flame its distance, pulled
+// a little towards the camera (the flame burns in front of what it sits on). Its power is the
+// tile's emission summed over the world area each texel covers at that distance, so a fire keeps
+// its strength near and far. Out: per light two texels, the world position (w 1: a light, 0: none)
+// and the power, blended with the tile's light of the frame before when it is near it
+// (`smoothing`; flames flicker, the brightest texel wanders), faded in when new or moved.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -35,6 +35,7 @@ const float Calibration = 32.0;
 shared float s_peak[256];
 shared uint s_pos[256];
 shared vec3 s_sum[256];
+shared float s_near[256];
 
 float ViewZ(float depth) {
     return proj.w / min(depth - proj.z, -1e-8);
@@ -85,6 +86,30 @@ void main() {
         }
         barrier();
     }
+    // The depth: the nearest surface under the bright part of the flame anywhere in the tile (the
+    // peak alone may fall into a gap between flame tongues, and a tile with only the tip of a
+    // flame would put the light on the tree or house far behind it: its power grows with its
+    // distance). Only flames over the sky: no light.
+    const float bright = 0.25 * s_peak[0];
+    float near_depth = 1.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            const ivec2 q = base + ivec2(x, y);
+            if (any(greaterThanEqual(q, quarter_size)) ||
+                dot(texelFetch(emit_tex, q, 0).rgb, vec3(0.2126, 0.7152, 0.0722)) < bright) {
+                continue;
+            }
+            near_depth = min(near_depth, texelFetch(depth_tex, FullPixel(q), 0).r);
+        }
+    }
+    s_near[i] = near_depth;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (i < stride) {
+            s_near[i] = min(s_near[i], s_near[i + stride]);
+        }
+        barrier();
+    }
     if (i != 0u) {
         return;
     }
@@ -92,25 +117,9 @@ void main() {
     vec4 position = vec4(0.0), power = vec4(0.0);
     if (s_peak[0] >= min_peak) {
         const ivec2 q = ivec2(s_pos[0] & 0xFFFFu, s_pos[0] >> 16);
-        // The depth: the nearest surface under the bright part of the flame around the peak (the
-        // peak alone may fall into a gap between flame tongues: the background, metres behind).
-        ivec2 fp = FullPixel(q);
-        float depth = texelFetch(depth_tex, fp, 0).r;
-        for (int dy = -3; dy <= 3; ++dy) {
-            for (int dx = -3; dx <= 3; ++dx) {
-                const ivec2 qq = clamp(q + ivec2(dx, dy), ivec2(0), quarter_size - 1);
-                const vec3 e = texelFetch(emit_tex, qq, 0).rgb;
-                if (dot(e, vec3(0.2126, 0.7152, 0.0722)) < 0.5 * s_peak[0]) {
-                    continue;
-                }
-                const ivec2 p = FullPixel(qq);
-                const float d = texelFetch(depth_tex, p, 0).r;
-                if (d < depth) {
-                    depth = d;
-                    fp = p;
-                }
-            }
-        }
+        // At the peak on screen, at the nearest depth under the flame.
+        const ivec2 fp = FullPixel(q);
+        const float depth = s_near[0];
         if (depth < 1.0) {
             vec3 v = ViewPos(vec2(fp) + 0.5, depth);
             const float len = length(v);
@@ -132,7 +141,11 @@ void main() {
             } else if (distance(prev_position.xyz, position.xyz) < 1.0) {
                 position.xyz = mix(position.xyz, prev_position.xyz, smoothing);
                 power = mix(power, prev_power, smoothing);
+            } else { // jumped (another fire, or a wrong depth for a frame): fades in
+                power *= 1.0 - smoothing;
             }
+        } else if (position.w == 1.0) { // new: fades in
+            power *= 1.0 - smoothing;
         }
     }
     imageStore(lights_img, index, position);
