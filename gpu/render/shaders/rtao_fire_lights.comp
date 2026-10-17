@@ -4,9 +4,13 @@
 // light's place on screen, the nearest surface under the tile's bright flame its distance, pulled
 // a little towards the camera (the flame burns in front of what it sits on). Its power is the
 // tile's emission summed over the world area each texel covers at that distance, so a fire keeps
-// its strength near and far. Out: per light two texels, the world position (w 1: a light, 0: none)
-// and the power, blended with the tile's light of the frame before when it is near it
-// (`smoothing`; flames flicker, the brightest texel wanders), faded in when new or moved.
+// its strength near and far (mode 0, into raw_img). Mode 1, one invocation per light: the lights
+// are matched with last frame's by their place in the world, not by tile (a fire moving across the
+// screen changes tiles: tied to the tile, the old light faded out while a new one faded in, two
+// shadows), blended with the nearest within reach (`smoothing` the power, `pos_smoothing` the
+// place: flames flicker, the brightest texel wanders), faded in when new, faded out when gone and
+// no light of this frame took it over. Per light two texels: the world position (w 1: a light,
+// 0: none) and the power (w: the distance from the camera).
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -14,7 +18,9 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(binding = 0) uniform texture2D emit_tex;  // quarter size, the transparents' light
 layout(binding = 1) uniform texture2D depth_tex; // full size, D32 0..1
-layout(binding = 2, rgba32f) uniform image2D lights_img; // tiles x 2, last frame's in it
+layout(binding = 2, rgba32f) uniform image2D raw_img;    // tiles x 2: this frame's (w 0.5: only above half the threshold)
+layout(binding = 3, rgba32f) uniform readonly image2D prev_img;   // tiles x 2: last frame's lights
+layout(binding = 4, rgba32f) uniform writeonly image2D lights_img; // tiles x 2: this frame's lights
 
 layout(push_constant) uniform Constants {
     vec4 inv_view[3]; // view -> world, 3x4 rows
@@ -25,7 +31,11 @@ layout(push_constant) uniform Constants {
     int tiles_x;
     float min_peak; // a tile's brightest texel must reach this
     float pull;     // metres towards the camera
-    float smoothing; // 0..1: the share of last frame's light (0: none, a cut)
+    float smoothing; // 0..1: the share of last frame's power (0: none, a cut)
+    float pos_smoothing; // 0..1: the share of last frame's position
+    uint mode;       // 0: per tile into raw_img; 1: matched with last frame's into lights_img
+    uint count;      // lights
+    uint pad;
 };
 
 const int Tile = 64; // quarter-size texels; 16x16 invocations, 4x4 texels each
@@ -50,7 +60,69 @@ ivec2 FullPixel(ivec2 q) {
     return min(q * 4 + 2, ivec2(full_size) - 1);
 }
 
+float Luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+// The same light within 1 m or a fifth of its distance (a far fire's depth wobbles between its
+// stake and what is behind).
+float Reach(float camera_distance) {
+    return max(1.0, 0.2 * camera_distance);
+}
+
+void Match() {
+    const uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationIndex;
+    if (i >= count) {
+        return;
+    }
+    const ivec2 index = ivec2(i, 0);
+    const vec4 raw_position = imageLoad(raw_img, index);
+    const vec4 raw_power = imageLoad(raw_img, index + ivec2(0, 1));
+    vec4 position = vec4(0.0), power = vec4(0.0);
+    if (raw_position.w > 0.0) {
+        // The nearest of last frame's lights within reach.
+        float best = Reach(raw_power.w);
+        int match = -1;
+        for (uint j = 0u; smoothing > 0.0 && j < count; ++j) {
+            const vec4 p = imageLoad(prev_img, ivec2(j, 0));
+            const float d = distance(p.xyz, raw_position.xyz);
+            if (p.w == 1.0 && d < best) {
+                best = d;
+                match = int(j);
+            }
+        }
+        if (match >= 0) {
+            const vec4 p = imageLoad(prev_img, ivec2(match, 0));
+            const vec4 q = imageLoad(prev_img, ivec2(match, 1));
+            position = vec4(mix(raw_position.xyz, p.xyz, pos_smoothing), 1.0);
+            power = vec4(mix(raw_power.rgb, q.rgb, smoothing), raw_power.w);
+        } else if (raw_position.w == 1.0) { // new (only above the full threshold): fades in
+            position = vec4(raw_position.xyz, 1.0);
+            power = vec4(raw_power.rgb * (1.0 - smoothing), raw_power.w);
+        }
+    } else if (smoothing > 0.0) {
+        // None in this tile now: last frame's light here fades out, unless a light of this frame
+        // (in another tile) is it.
+        const vec4 p = imageLoad(prev_img, index);
+        const vec4 q = imageLoad(prev_img, index + ivec2(0, 1));
+        bool taken = p.w != 1.0;
+        for (uint j = 0u; !taken && j < count; ++j) {
+            const vec4 r = imageLoad(raw_img, ivec2(j, 0));
+            taken = r.w > 0.0 && distance(r.xyz, p.xyz) < Reach(q.w);
+        }
+        if (!taken && Luma(q.rgb) * smoothing > 1e-4) {
+            position = p;
+            power = vec4(q.rgb * smoothing, q.w);
+        }
+    }
+    imageStore(lights_img, index, position);
+    imageStore(lights_img, index + ivec2(0, 1), power);
+}
+
 void main() {
+    if (mode == 1u) {
+        Match();
+        return;
+    }
     const uint i = gl_LocalInvocationIndex;
     const ivec2 tile = ivec2(gl_WorkGroupID.xy);
     const ivec2 base = tile * Tile + ivec2(gl_LocalInvocationID.xy) * 4;
@@ -114,14 +186,10 @@ void main() {
         return;
     }
     const ivec2 index = ivec2(tile.y * tiles_x + tile.x, 0);
-    const vec4 prev_position = smoothing > 0.0 ? imageLoad(lights_img, index) : vec4(0.0);
-    const vec4 prev_power = smoothing > 0.0 ? imageLoad(lights_img, index + ivec2(0, 1)) : vec4(0.0);
     // Hysteresis: a light that is there goes out only below half the threshold (a small, far fire
-    // hovers around it and would blink).
-    const float threshold = prev_position.w == 1.0 ? 0.5 * min_peak : min_peak;
+    // hovers around it and would blink): w 0.5 continues a light only (mode 1).
     vec4 position = vec4(0.0), power = vec4(0.0);
-    float camera_distance = 0.0;
-    if (s_peak[0] >= threshold) {
+    if (s_peak[0] >= 0.5 * min_peak) {
         const ivec2 q = ivec2(s_pos[0] & 0xFFFFu, s_pos[0] >> 16);
         // At the peak on screen, at the nearest depth under the flame.
         const ivec2 fp = FullPixel(q);
@@ -130,32 +198,14 @@ void main() {
             vec3 v = ViewPos(vec2(fp) + 0.5, depth);
             const float len = length(v);
             v *= max(len - pull, 0.1) / len;
-            camera_distance = len;
             const vec4 h = vec4(v, 1.0);
-            position = vec4(dot(inv_view[0], h), dot(inv_view[1], h), dot(inv_view[2], h), 1.0);
+            position = vec4(dot(inv_view[0], h), dot(inv_view[1], h), dot(inv_view[2], h),
+                            s_peak[0] >= min_peak ? 1.0 : 0.5);
             // A quarter-size texel's width and height in the world at this distance.
             const vec2 texel = 8.0 * abs(v.z) / (abs(proj.xy) * full_size);
-            power = vec4(s_sum[0] * (texel.x * texel.y * Calibration), 0.0);
+            power = vec4(s_sum[0] * (texel.x * texel.y * Calibration), len);
         }
     }
-    if (smoothing > 0.0) {
-        // A far fire's depth wobbles between its stake and what is behind: the same light within
-        // 1 m or a fifth of its distance.
-        const float same = max(1.0, 0.2 * camera_distance);
-        if (prev_position.w == 1.0) {
-            if (position.w == 0.0) { // gone (or below the threshold) this frame: fades out
-                position = prev_position;
-                power = prev_power * smoothing;
-            } else if (distance(prev_position.xyz, position.xyz) < same) {
-                position.xyz = mix(position.xyz, prev_position.xyz, smoothing);
-                power = mix(power, prev_power, smoothing);
-            } else { // jumped (another fire, or a wrong depth for a frame): fades in
-                power *= 1.0 - smoothing;
-            }
-        } else if (position.w == 1.0) { // new: fades in
-            power *= 1.0 - smoothing;
-        }
-    }
-    imageStore(lights_img, index, position);
-    imageStore(lights_img, index + ivec2(0, 1), power);
+    imageStore(raw_img, index, position);
+    imageStore(raw_img, index + ivec2(0, 1), power);
 }

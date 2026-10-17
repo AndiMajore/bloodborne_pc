@@ -136,10 +136,10 @@ public:
             emit_frame + 1 != frame) {
             return {};
         }
-        if (settings.fire_light <= 0.0f || !lights_view || lights_frame + 1 != frame) {
+        if (settings.fire_light <= 0.0f || !lights_views[lights_out] || lights_frame + 1 != frame) {
             return {*emit_view, settings.emission};
         }
-        return {*emit_view, settings.emission, *lights_view, lights_count, settings.fire_light,
+        return {*emit_view, settings.emission, *lights_views[lights_out], lights_count, settings.fire_light,
                 settings.fire_shadow, settings.fire_range, settings.fire_size};
     }
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
@@ -424,7 +424,10 @@ private:
     vk::UniquePipeline emit_pipeline;
     // The fires as point lights, from the emission (rtao_fire_lights.comp): one per 64x64 tile.
     VideoCore::HostImage lights_image;
-    vk::UniqueImageView lights_view;
+    // Layers: 0 this frame's per tile; 1 and 2 the lights, matched with the frame before's (they
+    // take turns: lights_out is this frame's).
+    std::array<vk::UniqueImageView, 3> lights_views;
+    u32 lights_out = 1;
     u32 lights_count = 0, lights_tiles_x = 0, lights_tiles_y = 0;
     u32 lights_frame = ~0u - 1;
     bool lights_written = false;

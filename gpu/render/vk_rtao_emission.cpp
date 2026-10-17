@@ -43,8 +43,12 @@ struct FireLightConstants {
     float min_peak;
     float pull;
     float smoothing;
+    float pos_smoothing;
+    u32 mode;
+    u32 count;
+    u32 pad;
 };
-static_assert(sizeof(FireLightConstants) == 104);
+static_assert(sizeof(FireLightConstants) == 120);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
 
 void Barrier(Scheduler& scheduler, vk::Image image, vk::ImageLayout old_layout,
@@ -57,7 +61,7 @@ void Barrier(Scheduler& scheduler, vk::Image image, vk::ImageLayout old_layout,
         .oldLayout = old_layout,
         .newLayout = vk::ImageLayout::eGeneral,
         .image = image,
-        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS},
     };
     scheduler.Record([b](vk::CommandBuffer cmdbuf) {
         cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
@@ -104,7 +108,9 @@ bool RayTracedAO::EnsureEmission(u32 w, u32 h) {
 
         const std::array light_bindings = {binding(0, vk::DescriptorType::eSampledImage),
                                            binding(1, vk::DescriptorType::eSampledImage),
-                                           binding(2, vk::DescriptorType::eStorageImage)};
+                                           binding(2, vk::DescriptorType::eStorageImage),
+                                           binding(3, vk::DescriptorType::eStorageImage),
+                                           binding(4, vk::DescriptorType::eStorageImage)};
         lights_desc_layout = Check(device.createDescriptorSetLayoutUnique({
             .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
             .bindingCount = u32(light_bindings.size()),
@@ -130,34 +136,38 @@ bool RayTracedAO::EnsureEmission(u32 w, u32 h) {
     scheduler.Finish(); // the old images may be in flight
     emit_opaque_view.reset();
     emit_view.reset();
-    lights_view.reset();
-    const auto make = [&](VideoCore::HostImage& image, vk::UniqueImageView& view, u32 iw, u32 ih,
-                          vk::Format format) {
+    for (auto& view : lights_views) {
+        view.reset();
+    }
+    const auto make = [&](VideoCore::HostImage& image, vk::UniqueImageView* views, u32 iw, u32 ih,
+                          vk::Format format, u32 layers) {
         image = VideoCore::HostImage(device, instance.GetAllocator());
         image.Create(vk::ImageCreateInfo{
             .imageType = vk::ImageType::e2D,
             .format = format,
             .extent = {iw, ih, 1},
             .mipLevels = 1,
-            .arrayLayers = 1,
+            .arrayLayers = layers,
             .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
             .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
             .initialLayout = vk::ImageLayout::eUndefined,
         });
-        view = Check(device.createImageViewUnique({
-            .image = vk::Image(image),
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
+        for (u32 layer = 0; layer < layers; ++layer) { // a 2D view per layer
+            views[layer] = Check(device.createImageViewUnique({
+                .image = vk::Image(image),
+                .viewType = vk::ImageViewType::e2D,
+                .format = format,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, layer, 1},
+            }));
+        }
     };
-    make(emit_opaque, emit_opaque_view, w, h, vk::Format::eR16G16B16A16Sfloat);
-    make(emit_image, emit_view, w, h, vk::Format::eR16G16B16A16Sfloat);
+    make(emit_opaque, &emit_opaque_view, w, h, vk::Format::eR16G16B16A16Sfloat, 1);
+    make(emit_image, &emit_view, w, h, vk::Format::eR16G16B16A16Sfloat, 1);
     lights_tiles_x = (w + FireLightTile - 1) / FireLightTile;
     lights_tiles_y = (h + FireLightTile - 1) / FireLightTile;
     lights_count = lights_tiles_x * lights_tiles_y;
-    make(lights_image, lights_view, lights_count, 2, vk::Format::eR32G32B32A32Sfloat);
+    make(lights_image, lights_views.data(), lights_count, 2, vk::Format::eR32G32B32A32Sfloat, 3);
     emit_w = w;
     emit_h = h;
     emit_written = false;
@@ -252,7 +262,7 @@ void RayTracedAO::RecordEmission(VideoCore::ImageId color_id, u32 mode) {
 }
 
 void RayTracedAO::RecordFireLights() {
-    if (!depth_id || !lights_view) {
+    if (!depth_id || !lights_views[0]) {
         return;
     }
     auto& depth = texture_cache.GetImage(depth_id);
@@ -266,8 +276,10 @@ void RayTracedAO::RecordFireLights() {
     const vk::ImageView depth_view =
         CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
     // Last frame's lights were read by this frame's SSGI (same queue) before this; they are blended
-    // in when they are last frame's and no cut came between.
+    // in when they are last frame's and no cut came between. This frame's go to the other layer.
     const bool continued = lights_written && lights_frame + 1 == frame && history_valid;
+    const u32 prev = lights_out;
+    lights_out = prev == 1 ? 2 : 1;
     Barrier(scheduler, vk::Image(lights_image),
             lights_written ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined,
             vk::AccessFlagBits2::eShaderRead, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
@@ -281,14 +293,21 @@ void RayTracedAO::RecordFireLights() {
         .min_peak = settings.fire_min,
         .pull = settings.fire_pull,
         .smoothing = continued ? settings.fire_smooth : 0.0f,
+        .pos_smoothing = continued ? settings.fire_smooth_pos : 0.0f,
+        .count = lights_count,
     };
     scheduler.RecordCrumb({.name = "rt fire lights"},
-                          [constants, depth_view, emit = *emit_view, lights = *lights_view,
+                          [constants, depth_view, emit = *emit_view, raw = *lights_views[0],
+                           prev_lights = *lights_views[prev], lights = *lights_views[lights_out],
                            tx = lights_tiles_x, ty = lights_tiles_y, pipeline = *lights_pipeline,
                            layout = *lights_layout](vk::CommandBuffer cmdbuf) {
                               const vk::DescriptorImageInfo e{.imageView = emit,
                                                               .imageLayout = vk::ImageLayout::eGeneral};
                               const vk::DescriptorImageInfo d{.imageView = depth_view,
+                                                              .imageLayout = vk::ImageLayout::eGeneral};
+                              const vk::DescriptorImageInfo r{.imageView = raw,
+                                                              .imageLayout = vk::ImageLayout::eGeneral};
+                              const vk::DescriptorImageInfo p{.imageView = prev_lights,
                                                               .imageLayout = vk::ImageLayout::eGeneral};
                               const vk::DescriptorImageInfo l{.imageView = lights,
                                                               .imageLayout = vk::ImageLayout::eGeneral};
@@ -301,12 +320,29 @@ void RayTracedAO::RecordFireLights() {
                                                          .pImageInfo = &d},
                                   vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
                                                          .descriptorType = vk::DescriptorType::eStorageImage,
+                                                         .pImageInfo = &r},
+                                  vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eStorageImage,
+                                                         .pImageInfo = &p},
+                                  vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eStorageImage,
                                                          .pImageInfo = &l}};
                               cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
                               cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
-                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0,
-                                                   sizeof(constants), &constants);
+                              // Mode 0 per tile into layer 0, then mode 1 per light: matched with the
+                              // frame before's into this frame's layer.
+                              auto pc = constants;
+                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
                               cmdbuf.dispatch(tx, ty, 1);
+                              const vk::MemoryBarrier2 b{
+                                  .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                  .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                                  .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                  .dstAccessMask = vk::AccessFlagBits2::eShaderRead};
+                              cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
+                              pc.mode = 1;
+                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
+                              cmdbuf.dispatch((pc.count + 255) / 256, 1, 1);
                           });
     Barrier(scheduler, vk::Image(lights_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
             vk::AccessFlagBits2::eShaderRead);
