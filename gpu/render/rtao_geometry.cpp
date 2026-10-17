@@ -297,6 +297,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "sun_debug") s.sun_debug = std::clamp(u32(std::max(value, 0.0f)), 0u, 7u);
     else if (key == "spot_shadow") flag(s.spot_shadow);
     else if (key == "spot_res") s.spot_res = std::clamp(u32(std::max(value, 0.0f)), 256u, 8192u);
+    else if (key == "spot_blur") s.spot_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
     else if (key == "spot_near") s.spot_near = std::clamp(value, 0.0f, 10.0f);
     else if (key == "sun_far") s.sun_far = std::clamp(value, 1.0f, 2000.0f);
     else if (key == "lights_dump") s.lights_dump = value;

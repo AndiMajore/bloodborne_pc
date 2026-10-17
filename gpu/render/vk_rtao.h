@@ -504,8 +504,8 @@ private:
     float spot_range = 0.0f;
     u32 spot_frame = ~0u, spot_map_frame = ~0u, spot_map_size = 0, spot_maps = 0;
     VAddr spot_target = 0; // the game's map the light passes sample
-    VideoCore::HostImage spot_map;
-    vk::UniqueImageView spot_map_view;
+    VideoCore::HostImage spot_map, spot_blur;
+    vk::UniqueImageView spot_map_view, spot_blur_view;
     vk::UniqueDescriptorSetLayout spot_desc_layout;
     vk::UniquePipelineLayout spot_layout;
     vk::UniquePipeline spot_pipeline;

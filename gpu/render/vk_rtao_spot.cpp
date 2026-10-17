@@ -29,8 +29,10 @@ struct SpotMapConstants {
     float inv_range;
     float near;
     u32 size;
+    u32 mode;
+    s32 blur;
 };
-static_assert(sizeof(SpotMapConstants) == 72);
+static_assert(sizeof(SpotMapConstants) == 80);
 
 // a (4x4, rows) x the 3x4 rows of b extended by (0 0 0 1).
 std::array<std::array<float, 4>, 4> Mul(const std::array<std::array<float, 4>, 4>& a,
@@ -95,6 +97,8 @@ void RayTracedAO::RecordSpotMap() {
                                            .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
             vk::DescriptorSetLayoutBinding{.binding = 1,
                                            .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
+                                           .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+            vk::DescriptorSetLayoutBinding{.binding = 2, .descriptorType = vk::DescriptorType::eStorageImage,
                                            .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute}};
         spot_desc_layout = Check(device.createDescriptorSetLayoutUnique({
             .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
@@ -121,24 +125,29 @@ void RayTracedAO::RecordSpotMap() {
     if (spot_map_size != size) {
         scheduler.Finish(); // the old map may be in flight
         spot_map_view.reset();
-        spot_map = VideoCore::HostImage(device, instance.GetAllocator());
-        spot_map.Create(vk::ImageCreateInfo{
-            .imageType = vk::ImageType::e2D,
-            .format = vk::Format::eR32G32Sfloat,
-            .extent = {size, size, 1},
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
-            .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
-            .initialLayout = vk::ImageLayout::eUndefined,
-        });
-        spot_map_view = Check(device.createImageViewUnique({
-            .image = vk::Image(spot_map),
-            .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR32G32Sfloat,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
+        spot_blur_view.reset();
+        const auto make = [&](VideoCore::HostImage& image, vk::UniqueImageView& view) {
+            image = VideoCore::HostImage(device, instance.GetAllocator());
+            image.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = vk::Format::eR32G32Sfloat,
+                .extent = {size, size, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            view = Check(device.createImageViewUnique({
+                .image = vk::Image(image),
+                .viewType = vk::ImageViewType::e2D,
+                .format = vk::Format::eR32G32Sfloat,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+        };
+        make(spot_map, spot_map_view);   // the map the light passes read
+        make(spot_blur, spot_blur_view); // the blur's middle
         spot_map_size = size;
         std::printf("RTAO: spot shadow map %ux%u (the shadowed spot's, ray traced; spot_shadow=1)\n", size, size);
     }
@@ -158,6 +167,7 @@ void RayTracedAO::RecordSpotMap() {
         .inv_range = 1.0f / spot_range,
         .near = settings.spot_near,
         .size = size,
+        .blur = s32(settings.spot_blur),
     };
     scheduler.EndRendering();
     const vk::ImageMemoryBarrier2 to_write{
@@ -170,6 +180,8 @@ void RayTracedAO::RecordSpotMap() {
         .image = vk::Image(spot_map),
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
+    auto to_write_blur = to_write;
+    to_write_blur.image = vk::Image(spot_blur);
     const vk::ImageMemoryBarrier2 to_read{
         .srcStageMask = Compute,
         .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
@@ -180,26 +192,47 @@ void RayTracedAO::RecordSpotMap() {
         .image = vk::Image(spot_map),
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
-    scheduler.RecordCrumb({.name = "rt spot map"},
-                          [constants, to_write, to_read, tlas, map = *spot_map_view, size,
-                           pipeline = *spot_pipeline, layout = *spot_layout](vk::CommandBuffer cmdbuf) {
-                              cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_write});
-                              const vk::DescriptorImageInfo o{.imageView = map, .imageLayout = vk::ImageLayout::eGeneral};
-                              const vk::WriteDescriptorSetAccelerationStructureKHR as{
-                                  .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
-                              const std::array writes = {
-                                  vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
-                                                         .descriptorType = vk::DescriptorType::eStorageImage,
-                                                         .pImageInfo = &o},
-                                  vk::WriteDescriptorSet{.pNext = &as, .dstBinding = 1, .descriptorCount = 1,
-                                                         .descriptorType = vk::DescriptorType::eAccelerationStructureKHR}};
-                              cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
-                              cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
-                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants),
-                                                   &constants);
-                              cmdbuf.dispatch((size + 7) / 8, (size + 7) / 8, 1);
-                              cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
-                          });
+    scheduler.RecordCrumb(
+        {.name = "rt spot map"},
+        [constants, to_write, to_write_blur, to_read, tlas, map = *spot_map_view, mid = *spot_blur_view, size,
+         pipeline = *spot_pipeline, layout = *spot_layout](vk::CommandBuffer cmdbuf) {
+            const std::array to_writes = {to_write, to_write_blur};
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 2, .pImageMemoryBarriers = to_writes.data()});
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+            const vk::WriteDescriptorSetAccelerationStructureKHR as{.accelerationStructureCount = 1,
+                                                                    .pAccelerationStructures = &tlas};
+            // out <- in: one dispatch of `mode` (the trace reads no image; it is bound all the same).
+            const auto run = [&](vk::ImageView out, vk::ImageView in, u32 mode) {
+                const vk::DescriptorImageInfo o{.imageView = out, .imageLayout = vk::ImageLayout::eGeneral};
+                const vk::DescriptorImageInfo i{.imageView = in, .imageLayout = vk::ImageLayout::eGeneral};
+                const std::array writes = {
+                    vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                           .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &o},
+                    vk::WriteDescriptorSet{.pNext = &as, .dstBinding = 1, .descriptorCount = 1,
+                                           .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
+                    vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
+                                           .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &i}};
+                cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+                auto pc = constants;
+                pc.mode = mode;
+                cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
+                cmdbuf.dispatch((size + 7) / 8, (size + 7) / 8, 1);
+                const vk::MemoryBarrier2 b{.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                           .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                                           .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                           .dstAccessMask = vk::AccessFlagBits2::eShaderRead |
+                                                            vk::AccessFlagBits2::eShaderWrite};
+                cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &b});
+            };
+            if (constants.blur > 0) { // trace into the map, blur x into the middle, y back into the map
+                run(map, mid, 0);
+                run(mid, map, 1);
+                run(map, mid, 2);
+            } else {
+                run(map, mid, 0);
+            }
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
+        });
     spot_map_frame = frame;
     ++spot_maps;
 }

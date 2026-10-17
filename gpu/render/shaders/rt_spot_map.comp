@@ -5,7 +5,9 @@
 // cw / range (cw: the distance along the light's axis), Chebyshev against its own. Here, per texel
 // of a larger map, one ray from the light through the texel against the RTAO's scene: its first
 // hit's depth and its square, the light passes sample this map in the game's place. Without a
-// hit within the range: far (lit).
+// hit within the range: the range's end (lit). Modes 1 and 2: a separable Gaussian over `blur`
+// texels (in_img -> map_img): a variance map's moments may be blurred, which softens the edges
+// (the light is no point, and its source is mostly out of sight).
 #version 460
 #extension GL_EXT_ray_query : require
 
@@ -13,6 +15,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0, rg32f) uniform writeonly image2D map_img;
 layout(binding = 1) uniform accelerationStructureEXT scene; // the RTAO's TLAS (view space)
+layout(binding = 2, rg32f) uniform readonly image2D in_img;  // modes 1 and 2
 
 layout(push_constant) uniform Constants {
     vec4 row_x;     // view (this frame) -> light clip, rows x, y and w
@@ -22,11 +25,27 @@ layout(push_constant) uniform Constants {
     float inv_range;
     float near;     // metres from the light the rays start (the lamp's own housing)
     uint size;
+    uint mode;      // 0 trace, 1 blur x, 2 blur y
+    int blur;       // texels
 };
 
 void main() {
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(size) || p.y >= int(size)) {
+        return;
+    }
+    if (mode != 0u) {
+        const ivec2 step_dir = mode == 1u ? ivec2(1, 0) : ivec2(0, 1);
+        const float sigma = max(float(blur) * 0.5, 0.5);
+        vec2 sum = vec2(0.0);
+        float weight = 0.0;
+        for (int i = -blur; i <= blur; ++i) {
+            const ivec2 q = clamp(p + step_dir * i, ivec2(0), ivec2(int(size) - 1));
+            const float w = exp(-0.5 * float(i * i) / (sigma * sigma));
+            sum += imageLoad(in_img, q).xy * w;
+            weight += w;
+        }
+        imageStore(map_img, p, vec4(sum / weight, 0.0, 0.0));
         return;
     }
     const vec2 uv = (vec2(p) + 0.5) / float(size);
@@ -41,7 +60,7 @@ void main() {
     rayQueryInitializeEXT(q, scene, gl_RayFlagsCullNoOpaqueEXT, 0xFF, light, near, dir, 1.0 / inv_range);
     while (rayQueryProceedEXT(q)) {
     }
-    float depth = 1.0e4;
+    float depth = 1.0;
     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
         const vec3 hit = light + dir * rayQueryGetIntersectionTEXT(q, true);
         depth = (dot(row_w.xyz, hit) + row_w.w) * inv_range;
