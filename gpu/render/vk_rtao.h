@@ -122,12 +122,25 @@ public:
     struct Emission {
         vk::ImageView view{}; // RGBA16F, eGeneral; empty: none (bind something else, strength 0)
         float strength = 0.0f;
+        // The fires as point lights (fire_light=, rtao_fire_lights.comp): RGBA32F, count x 2
+        // (world position, w 1: a light; power), eGeneral; empty: none (count 0).
+        vk::ImageView lights{};
+        u32 light_count = 0;
+        float light_strength = 0.0f;
+        float light_shadow = 0.0f;
+        float light_range = 0.0f;
+        float light_size = 0.0f;
     };
     [[nodiscard]] Emission FrameEmission() const noexcept {
-        if (!Active() || settings.emission <= 0.0f || !emit_view || emit_frame + 1 != frame) {
+        if (!Active() || (settings.emission <= 0.0f && settings.fire_light <= 0.0f) || !emit_view ||
+            emit_frame + 1 != frame) {
             return {};
         }
-        return {*emit_view, settings.emission};
+        if (settings.fire_light <= 0.0f || !lights_view || lights_frame + 1 != frame) {
+            return {*emit_view, settings.emission};
+        }
+        return {*emit_view, settings.emission, *lights_view, lights_count, settings.fire_light,
+                settings.fire_shadow, settings.fire_range, settings.fire_size};
     }
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
@@ -409,8 +422,18 @@ private:
     vk::UniqueDescriptorSetLayout emit_desc_layout;
     vk::UniquePipelineLayout emit_layout;
     vk::UniquePipeline emit_pipeline;
+    // The fires as point lights, from the emission (rtao_fire_lights.comp): one per 64x64 tile.
+    VideoCore::HostImage lights_image;
+    vk::UniqueImageView lights_view;
+    u32 lights_count = 0, lights_tiles_x = 0, lights_tiles_y = 0;
+    u32 lights_frame = ~0u - 1;
+    bool lights_written = false;
+    vk::UniqueDescriptorSetLayout lights_desc_layout;
+    vk::UniquePipelineLayout lights_layout;
+    vk::UniquePipeline lights_pipeline;
     bool EnsureEmission(u32 w, u32 h);
     void RecordEmission(VideoCore::ImageId color, u32 mode);
+    void RecordFireLights();
     bool hold_enabled = true;     // BB_RTAO_HOLD=0: no retirement hold (to test what it protects)
     bool test_move = false;       // BB_RTAO_TEST_MOVE=1 (layer memory, BB_DRAW_PIPE=0): mirrors moved
     bool test_move_pending = false; // back in place between the AO upsample and the pass

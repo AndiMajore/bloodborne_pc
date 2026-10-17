@@ -50,11 +50,15 @@ struct GatherRtConstants {
     float clip;
     float max_radiance;
     float emission;
-    u32 pad;
+    float fire_light; // the fires as point lights (the RTAO's fire_light); 0: none
     u64 surface_cache;
     u64 surface_parts;
+    float fire_shadow;
+    float fire_range;
+    u32 fire_count;
+    float fire_size;
 };
-static_assert(sizeof(GatherRtConstants) == 144);
+static_assert(sizeof(GatherRtConstants) == 160);
 struct ApplyConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
@@ -160,7 +164,7 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
                                            .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
                                            .descriptorCount = 1,
                                            .stageFlags = vk::ShaderStageFlagBits::eCompute},
-            sampled(7)};
+            sampled(7), sampled(8)};
         make_layouts(rt_bindings, sizeof(GatherRtConstants), gather_rt_desc_layout, gather_rt_layout);
         gather_rt_pipeline = make_pipeline(SSGI_GATHER_RT_COMP, *gather_rt_layout);
         std::printf("SSGI: ray-traced gather available (rt=1 in ssgi.txt, experimental)\n");
@@ -419,6 +423,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     // in its place and weighted 0.
     const auto emission = rtao ? rtao->FrameEmission() : RayTracedAO::Emission{};
     const vk::ImageView emission_view = emission.view ? emission.view : color_view;
+    const vk::ImageView lights_view = emission.lights ? emission.lights : emission_view;
     const GatherConstants gather{
         .view = camera_motion.View(),
         .proj = camera_motion.Projection(),
@@ -468,8 +473,13 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .clip = rt_clip,
         .max_radiance = rt_max,
         .emission = emission.strength,
+        .fire_light = emission.light_strength,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
+        .fire_shadow = emission.light_shadow,
+        .fire_range = emission.light_range,
+        .fire_count = emission.lights ? emission.light_count : 0u,
+        .fire_size = emission.light_size,
     };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];
@@ -477,7 +487,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     scheduler.RecordCrumb(
         {.name = "ssgi"},
         [gather, gather_rt, tlas, apply, depth_view, normal_view, color_view, albedo_view, motion, emission_view,
-         gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
+         lights_view, gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
          gather_pipeline = *gather_pipeline, gather_layout = *gather_layout,
          gather_rt_pipeline = *gather_rt_pipeline, gather_rt_layout = *gather_rt_layout,
          apply_pipeline = *apply_pipeline, apply_layout = *apply_layout,
@@ -498,7 +508,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
             {
                 const auto d = info(depth_view), n = info(normal_view), c = info(color_view),
                            m = info(motion), p = info(gi_read), o = info(gi_write),
-                           e = info(emission_view);
+                           e = info(emission_view), l = info(lights_view);
                 const std::array writes = {write_of(0, sampled, &d), write_of(1, sampled, &n),
                                            write_of(2, sampled, &c), write_of(3, sampled, &m),
                                            write_of(4, sampled, &p), write_of(5, storage, &o),
@@ -508,9 +518,10 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
                         .accelerationStructureCount = 1,
                         .pAccelerationStructures = &tlas,
                     };
-                    std::array<vk::WriteDescriptorSet, 8> rt_writes{};
+                    std::array<vk::WriteDescriptorSet, 9> rt_writes{};
                     std::copy(writes.begin(), writes.begin() + 6, rt_writes.begin());
                     rt_writes[7] = write_of(7, sampled, &e);
+                    rt_writes[8] = write_of(8, sampled, &l);
                     rt_writes[6] = vk::WriteDescriptorSet{
                         .pNext = &as_info,
                         .dstBinding = 6,

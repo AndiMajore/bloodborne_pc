@@ -13,9 +13,11 @@
 #include <cstdio>
 #include <vk_mem_alloc.h>
 #include "bbgpu/shaders/rtao_emission_comp.h"
+#include "bbgpu/shaders/rtao_fire_lights_comp.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
 #include "textures/texture_cache.h"
+#include "upscale/vk_camera_motion.h"
 #include "vulkan/instance.h"
 #include "vulkan/shader_module.h"
 
@@ -31,6 +33,19 @@ struct EmissionConstants {
     s32 radius;
 };
 static_assert(sizeof(EmissionConstants) == 28);
+struct FireLightConstants {
+    std::array<float, 12> inv_view;
+    std::array<float, 4> proj;
+    std::array<float, 2> full_size;
+    std::array<float, 2> jitter;
+    std::array<s32, 2> quarter_size;
+    s32 tiles_x;
+    float min_peak;
+    float pull;
+    u32 pad;
+};
+static_assert(sizeof(FireLightConstants) == 104);
+constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
 
 void Barrier(Scheduler& scheduler, vk::Image image, vk::ImageLayout old_layout,
              vk::AccessFlags2 src_access, vk::AccessFlags2 dst_access) {
@@ -86,16 +101,43 @@ bool RayTracedAO::EnsureEmission(u32 w, u32 h) {
                     .layout = *emit_layout,
                 }));
         device.destroyShaderModule(module);
+
+        const std::array light_bindings = {binding(0, vk::DescriptorType::eSampledImage),
+                                           binding(1, vk::DescriptorType::eSampledImage),
+                                           binding(2, vk::DescriptorType::eStorageImage)};
+        lights_desc_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = u32(light_bindings.size()),
+            .pBindings = light_bindings.data(),
+        }));
+        const vk::PushConstantRange light_range{.stageFlags = vk::ShaderStageFlagBits::eCompute,
+                                                .offset = 0,
+                                                .size = sizeof(FireLightConstants)};
+        lights_layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*lights_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &light_range,
+        }));
+        const auto light_module = CompileSPV(RTAO_FIRE_LIGHTS_COMP, device);
+        lights_pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute, .module = light_module, .pName = "main"},
+                    .layout = *lights_layout,
+                }));
+        device.destroyShaderModule(light_module);
     }
     scheduler.Finish(); // the old images may be in flight
     emit_opaque_view.reset();
     emit_view.reset();
-    const auto make = [&](VideoCore::HostImage& image, vk::UniqueImageView& view) {
+    lights_view.reset();
+    const auto make = [&](VideoCore::HostImage& image, vk::UniqueImageView& view, u32 iw, u32 ih,
+                          vk::Format format) {
         image = VideoCore::HostImage(device, instance.GetAllocator());
         image.Create(vk::ImageCreateInfo{
             .imageType = vk::ImageType::e2D,
-            .format = vk::Format::eR16G16B16A16Sfloat,
-            .extent = {w, h, 1},
+            .format = format,
+            .extent = {iw, ih, 1},
             .mipLevels = 1,
             .arrayLayers = 1,
             .samples = vk::SampleCountFlagBits::e1,
@@ -106,16 +148,22 @@ bool RayTracedAO::EnsureEmission(u32 w, u32 h) {
         view = Check(device.createImageViewUnique({
             .image = vk::Image(image),
             .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR16G16B16A16Sfloat,
+            .format = format,
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
     };
-    make(emit_opaque, emit_opaque_view);
-    make(emit_image, emit_view);
+    make(emit_opaque, emit_opaque_view, w, h, vk::Format::eR16G16B16A16Sfloat);
+    make(emit_image, emit_view, w, h, vk::Format::eR16G16B16A16Sfloat);
+    lights_tiles_x = (w + FireLightTile - 1) / FireLightTile;
+    lights_tiles_y = (h + FireLightTile - 1) / FireLightTile;
+    lights_count = lights_tiles_x * lights_tiles_y;
+    make(lights_image, lights_view, lights_count, 2, vk::Format::eR32G32B32A32Sfloat);
     emit_w = w;
     emit_h = h;
     emit_written = false;
     emit_frame = ~0u - 1;
+    lights_written = false;
+    lights_frame = ~0u - 1;
     std::printf("RTAO: emission capture %ux%u (the transparents' light for the RT lighting)\n", w, h);
     return true;
 }
@@ -197,7 +245,70 @@ void RayTracedAO::RecordEmission(VideoCore::ImageId color_id, u32 mode) {
                 vk::AccessFlagBits2::eShaderWrite, vk::AccessFlagBits2::eShaderRead);
         emit_written = true;
         emit_frame = frame;
+        if (settings.fire_light > 0.0f) {
+            RecordFireLights();
+        }
     }
+}
+
+void RayTracedAO::RecordFireLights() {
+    if (!depth_id || !lights_view) {
+        return;
+    }
+    auto& depth = texture_cache.GetImage(depth_id);
+    const auto proj = camera_motion.Projection();
+    if (proj[0] == 0.0f || proj[1] == 0.0f || proj[3] == 0.0f) {
+        return;
+    }
+    const auto compute = vk::PipelineStageFlagBits2::eComputeShader;
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, compute, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    const vk::ImageView depth_view =
+        CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
+    // Last frame's lights were read by this frame's SSGI (same queue) before this.
+    Barrier(scheduler, vk::Image(lights_image),
+            lights_written ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined,
+            vk::AccessFlagBits2::eShaderRead, vk::AccessFlagBits2::eShaderWrite);
+    const FireLightConstants constants{
+        .inv_view = camera_motion.InvView(),
+        .proj = proj,
+        .full_size = {float(depth.info.size.width), float(depth.info.size.height)},
+        .jitter = camera_motion.Jitter(),
+        .quarter_size = {s32(emit_w), s32(emit_h)},
+        .tiles_x = s32(lights_tiles_x),
+        .min_peak = settings.fire_min,
+        .pull = settings.fire_pull,
+    };
+    scheduler.RecordCrumb({.name = "rt fire lights"},
+                          [constants, depth_view, emit = *emit_view, lights = *lights_view,
+                           tx = lights_tiles_x, ty = lights_tiles_y, pipeline = *lights_pipeline,
+                           layout = *lights_layout](vk::CommandBuffer cmdbuf) {
+                              const vk::DescriptorImageInfo e{.imageView = emit,
+                                                              .imageLayout = vk::ImageLayout::eGeneral};
+                              const vk::DescriptorImageInfo d{.imageView = depth_view,
+                                                              .imageLayout = vk::ImageLayout::eGeneral};
+                              const vk::DescriptorImageInfo l{.imageView = lights,
+                                                              .imageLayout = vk::ImageLayout::eGeneral};
+                              const std::array writes = {
+                                  vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eSampledImage,
+                                                         .pImageInfo = &e},
+                                  vk::WriteDescriptorSet{.dstBinding = 1, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eSampledImage,
+                                                         .pImageInfo = &d},
+                                  vk::WriteDescriptorSet{.dstBinding = 2, .descriptorCount = 1,
+                                                         .descriptorType = vk::DescriptorType::eStorageImage,
+                                                         .pImageInfo = &l}};
+                              cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+                              cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+                              cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                                   sizeof(constants), &constants);
+                              cmdbuf.dispatch(tx, ty, 1);
+                          });
+    Barrier(scheduler, vk::Image(lights_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
+            vk::AccessFlagBits2::eShaderRead);
+    lights_written = true;
+    lights_frame = frame;
 }
 
 void RayTracedAO::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, bool blended,
@@ -221,7 +332,8 @@ void RayTracedAO::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, 
 }
 
 void RayTracedAO::OnOpaqueSceneLit(VideoCore::ImageId color_id) {
-    if (!enabled || !Active() || !color_id || settings.emission <= 0.0f || emit_snapshot_frame == frame) {
+    if (!enabled || !Active() || !color_id || (settings.emission <= 0.0f && settings.fire_light <= 0.0f) ||
+        emit_snapshot_frame == frame) {
         return;
     }
     auto& color = texture_cache.GetImage(color_id);

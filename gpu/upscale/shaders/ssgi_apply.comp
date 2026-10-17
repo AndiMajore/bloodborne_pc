@@ -58,5 +58,6 @@ void main() {
     // sky-lit garden); the eye would adapt, the tonemapper cannot: damp by the existing light.
     const float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
     const vec3 bounce = albedo * gi * strength / (1.0 + adaptive * luma);
-    imageStore(color_img, fp, debug != 0u ? vec4(bounce, color.a) : vec4(color.rgb + bounce, color.a));
+    // max: the fire lights' fire_shadow may take light away.
+    imageStore(color_img, fp, debug != 0u ? vec4(abs(bounce), color.a) : vec4(max(color.rgb + bounce, vec3(0.0)), color.a));
 }

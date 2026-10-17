@@ -291,6 +291,12 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "emission_trace") s.emission_trace = value;
     else if (key == "emission_sat") s.emission_sat = std::clamp(value, 0.0f, 1.0f);
     else if (key == "emission_blur") s.emission_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
+    else if (key == "fire_light") s.fire_light = std::clamp(value, 0.0f, 64.0f);
+    else if (key == "fire_shadow") s.fire_shadow = std::clamp(value, 0.0f, 1.0f);
+    else if (key == "fire_range") s.fire_range = std::clamp(value, 0.5f, 100.0f);
+    else if (key == "fire_size") s.fire_size = std::clamp(value, 0.0f, 5.0f);
+    else if (key == "fire_pull") s.fire_pull = std::clamp(value, 0.0f, 5.0f);
+    else if (key == "fire_min") s.fire_min = std::clamp(value, 0.0f, 100.0f);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);
