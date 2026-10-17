@@ -462,6 +462,7 @@ private:
     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                              u32 first_image_idx, bool& barrier, TextureSet*& slot);
     /// The prepared sharps of `stage` in the current prepared draw, if they fit it.
+    void CaptureUserData(const Shader::Info& stage); // frame capture: user data and what it points at
     const PreparedStage* FindPreparedStage(const Shader::Info& stage) const;
     /// Whether the helper may bind textures for this pipeline at all (fixed descriptor layout,
     /// no storage writes that invalidate cached images).

@@ -22,6 +22,27 @@ Shader::PushData MakeUserData(const Gcn::Regs& regs) {
 }
 } // namespace
 
+/// Frame capture (the light list, ticket 59): a stage's user data registers ("slot 99"), the
+/// constants the shader reads through them, flattened ("slot 98"), and 256 bytes at every register
+/// pair that holds a GPU address ("slot 100 + register").
+void Rasterizer::CaptureUserData(const Shader::Info& stage) {
+    const auto ud = stage.UserData();
+    FrameCapture::Buffer(stage.pgm_hash, 99, 0, ud.data(), ud.size_bytes());
+    const auto flat = stage.FlatUserData();
+    if (!flat.empty()) {
+        FrameCapture::Buffer(stage.pgm_hash, 98, 0, flat.data(), flat.size_bytes());
+    }
+    for (size_t i = 0; i + 1 < ud.size(); ++i) {
+        const VAddr address = VAddr(ud[i]) | (VAddr(ud[i + 1] & 0xFFFF) << 32);
+        if (ud[i] == 0 || (address >> 32) < 0x10 || (address >> 32) > 0x3F ||
+            !memory->IsValidGpuMapping(address, 0)) {
+            continue;
+        }
+        FrameCapture::Buffer(stage.pgm_hash, 100 + u32(i), address, reinterpret_cast<const void*>(address),
+                             memory->ClampRangeSize(address, 256));
+    }
+}
+
 const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) const {
     // Sharps a draw-preparation worker read from the same flattened user data.
     if (!bind_prepared || BbToggle::Disabled(BbToggle::PreparedResources)) {
@@ -322,6 +343,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
+            if (FrameCapture::Active()) {
+                CaptureUserData(*stage);
+            }
             const PreparedStage* prepared = FindPreparedStage(*stage);
             BindBuffers(*stage, prepared, binding, push_data, set_write_index);
             BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
@@ -351,6 +375,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                 num_buffers + static_cast<u32>(stage->images.size() + stage->samplers.size());
             set_writes.resize(set_writes.size() + num_descriptors);
             stage->PushUd(binding, push_data);
+            if (FrameCapture::Active()) {
+                CaptureUserData(*stage);
+            }
             const PreparedStage* prepared = FindPreparedStage(*stage);
             buffer_stages[task.count] = {stage, prepared, binding, set_write_index};
             auto texture_binding = binding;
@@ -864,6 +891,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
                 }
                 push_data.AddOffset(binding.buffer, 0);
+            }
+            if (FrameCapture::Active() && !desc.IsSpecial() && memory->IsValidGpuMapping(ring->address, 0)) {
+                FrameCapture::Buffer(stage.pgm_hash, index, ring->address,
+                                     reinterpret_cast<const void*>(ring->address),
+                                     memory->ClampRangeSize(ring->address, ring->size));
             }
             buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
         } else if (desc.IsSpecial()) {

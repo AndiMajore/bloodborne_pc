@@ -39,10 +39,19 @@ std::vector<Entry> entries;
 std::vector<std::pair<Target, bool>> pending_sampled;
 std::vector<std::string> pending_buffers;
 
-void AddBuffers(Entry& entry) {
+// bbport (the light list, ticket 59): the vertex shader of the local light draws (passes
+// #108/#110/#112, one quad per light into the two light buffers): every such draw's constants are
+// kept, under a line naming the draw and its pixel shader (the light type).
+constexpr u64 LightQuadVs = 0x8747a367;
+
+void AddBuffers(Entry& entry, u64 vs_hash = 0, u64 ps_hash = 0) {
     // Constants of full-screen passes (post-processing: camera matrices) and of the first draw
-    // of each geometry pass.
-    if (entry.draws <= 4) {
+    // of each geometry pass; of every light draw.
+    const bool light = vs_hash == LightQuadVs && entry.draws <= 1000;
+    if (entry.draws <= 4 || light) {
+        if (light) {
+            entry.buffers.push_back(std::format("  light draw {} ps {:08x}", entry.draws, u32(ps_hash)));
+        }
         for (auto& b : pending_buffers) {
             entry.buffers.push_back(std::move(b));
         }
@@ -223,7 +232,7 @@ void FrameCapture::Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_insta
     AddShader(e, vs_hash);
     AddShader(e, ps_hash);
     AddSampled(e);
-    AddBuffers(e);
+    AddBuffers(e, vs_hash, ps_hash);
 }
 
 void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
