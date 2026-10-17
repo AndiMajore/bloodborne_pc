@@ -167,6 +167,13 @@ public:
     [[nodiscard]] const std::vector<SceneLight>& FrameLights() const noexcept {
         return lights_last;
     }
+    /// bbport (experimental, sun_shadow= in rtao.txt, vk_rtao_sun.cpp): the sun's shadow by ray
+    /// tracing. A fragment shader's constant buffer as bound (the sun's direction and the shadow
+    /// mask's encoding are read from the game's own passes).
+    void OnShaderConstants(u64 hash, u32 slot, VAddr address, u64 size);
+    /// Before each draw (its first colour target and pixel shader): the mask pass is noted, and at
+    /// the sun's light draw the mask's sun shadow is replaced.
+    void OnSunDraw(VideoCore::ImageId color, u64 ps_hash);
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
         history_valid = false;
@@ -470,6 +477,21 @@ private:
     u32 lights_frames = 0, lights_buffers_total = 0;
     float lights_dump_seen = 0.0f;
     void FinishLightFrame(); // OnFrameStart: the frame's list becomes lights_last, reports
+    // The sun's shadow (vk_rtao_sun.cpp).
+    std::array<float, 3> sun_dir{};  // world, towards the sun
+    // The mask pass's regions (its draws): channel (1 y, 2 z), scale, offset, 0.
+    std::array<std::array<float, 4>, 2> sun_k{};
+    u32 sun_regions = 0;
+    u32 sun_dir_frame = ~0u, sun_k_frame = ~0u, sun_mask_frame = ~0u, sun_done_frame = ~0u;
+    u32 sun_frames = 0, sun_traced = 0;
+    VideoCore::ImageId sun_mask{};
+    VideoCore::HostImage sun_vis; // R8, the visibility (mode 0 -> mode 1)
+    vk::UniqueImageView sun_vis_view;
+    u32 sun_w = 0, sun_h = 0;
+    vk::UniqueDescriptorSetLayout sun_desc_layout;
+    vk::UniquePipelineLayout sun_layout;
+    vk::UniquePipeline sun_pipeline;
+    bool EnsureSun(u32 w, u32 h);
     bool EnsureEmission(u32 w, u32 h);
     void RecordEmission(VideoCore::ImageId color, u32 mode);
     void RecordFireLights();

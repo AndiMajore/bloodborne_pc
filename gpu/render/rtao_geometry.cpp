@@ -291,6 +291,11 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "emission_trace") s.emission_trace = value;
     else if (key == "emission_sat") s.emission_sat = std::clamp(value, 0.0f, 1.0f);
     else if (key == "emission_blur") s.emission_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
+    else if (key == "sun_shadow") flag(s.sun_shadow);
+    else if (key == "sun_spread") s.sun_spread = std::clamp(value, 0.0f, 0.2f);
+    else if (key == "sun_erode") s.sun_erode = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
+    else if (key == "sun_debug") s.sun_debug = std::clamp(u32(std::max(value, 0.0f)), 0u, 7u);
+    else if (key == "sun_far") s.sun_far = std::clamp(value, 1.0f, 2000.0f);
     else if (key == "lights_dump") s.lights_dump = value;
     else if (key == "fire_light") s.fire_light = std::clamp(value, 0.0f, 64.0f);
     else if (key == "fire_shadow") s.fire_shadow = std::clamp(value, 0.0f, 1.0f);

@@ -205,6 +205,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                                 ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
                                 : 0;
         rtao->OnColorTarget(cb_descs[0].first, ps_hash);
+        rtao->OnSunDraw(cb_descs[0].first, ps_hash);
         if (reflect->Enabled()) {
             reflect->OnColorTarget(cb_descs[0].first, ps_hash);
         }

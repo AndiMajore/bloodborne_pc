@@ -839,6 +839,9 @@ void Rasterizer::BindGuestBuffer(const Shader::BufferResource& desc, const Gcn::
         buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
         return;
     }
+    if (rtao && stage.sw_stage == Shader::SwStage::Fragment && memory->IsValidGpuMapping(address, 0)) {
+        rtao->OnShaderConstants(stage.pgm_hash, slot, address, memory->ClampRangeSize(address, vsharp.GetSize()));
+    }
     if (Shader::IsPagedBuffer(VideoCore::BufferCache::LayerPagedActive(), vsharp)) {
         // BB_LAYER_MEMORY: nearly all memory as one buffer. The shader reaches it through the
         // page table and the descriptor holds its record; it may touch any buffer of the game's
@@ -892,6 +895,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
     for (u32 index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
         if (const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, index) : nullptr) {
+            if (rtao && stage.sw_stage == Shader::SwStage::Fragment && !desc.IsSpecial() &&
+                memory->IsValidGpuMapping(ring->address, 0)) {
+                rtao->OnShaderConstants(stage.pgm_hash, index, ring->address,
+                                        memory->ClampRangeSize(ring->address, ring->size));
+            }
             if (index == 0) {
                 ring_size0 = ring->size;
             } else if (index == 1 && light_quad_draw && stage.sw_stage == Shader::SwStage::Fragment &&
