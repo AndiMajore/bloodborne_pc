@@ -42,7 +42,7 @@ struct FireLightConstants {
     s32 tiles_x;
     float min_peak;
     float pull;
-    u32 pad;
+    float smoothing;
 };
 static_assert(sizeof(FireLightConstants) == 104);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
@@ -265,10 +265,12 @@ void RayTracedAO::RecordFireLights() {
     runtime.FlushBarriers();
     const vk::ImageView depth_view =
         CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
-    // Last frame's lights were read by this frame's SSGI (same queue) before this.
+    // Last frame's lights were read by this frame's SSGI (same queue) before this; they are blended
+    // in when they are last frame's and no cut came between.
+    const bool continued = lights_written && lights_frame + 1 == frame && history_valid;
     Barrier(scheduler, vk::Image(lights_image),
             lights_written ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined,
-            vk::AccessFlagBits2::eShaderRead, vk::AccessFlagBits2::eShaderWrite);
+            vk::AccessFlagBits2::eShaderRead, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
     const FireLightConstants constants{
         .inv_view = camera_motion.InvView(),
         .proj = proj,
@@ -278,6 +280,7 @@ void RayTracedAO::RecordFireLights() {
         .tiles_x = s32(lights_tiles_x),
         .min_peak = settings.fire_min,
         .pull = settings.fire_pull,
+        .smoothing = continued ? settings.fire_smooth : 0.0f,
     };
     scheduler.RecordCrumb({.name = "rt fire lights"},
                           [constants, depth_view, emit = *emit_view, lights = *lights_view,

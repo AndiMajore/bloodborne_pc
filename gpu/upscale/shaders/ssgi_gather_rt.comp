@@ -221,10 +221,15 @@ void main() {
     vec3 fire = vec3(0.0);
     if (fire_count > 0u && fire_light > 0.0) {
         vec3 unshadowed;
-        const float f = float(frame % 16u);
-        const vec3 sphere = vec3(IGN(vec2(fp) + f * 2.236068 + 31.0), IGN(vec2(fp.yx) + f * 4.123106 + 7.0),
-                                 IGN(vec2(fp) * 1.3 + f * 6.244998 + 3.0));
-        const vec3 lit = FireLight(N, origin, IGN(vec2(fp) + f * 3.141593 + 17.0), sphere, unshadowed);
+        // One pick and shadow ray per gather ray (rays=), each with its own numbers.
+        vec3 lit = vec3(0.0);
+        for (uint r = 0u; r < rays; ++r) {
+            const float f = float(frame % 16u) + float(r) * 16.0;
+            const vec3 sphere = vec3(IGN(vec2(fp) + f * 2.236068 + 31.0), IGN(vec2(fp.yx) + f * 4.123106 + 7.0),
+                                     IGN(vec2(fp) * 1.3 + f * 6.244998 + 3.0));
+            lit += FireLight(N, origin, IGN(vec2(fp) + f * 3.141593 + 17.0), sphere, unshadowed);
+        }
+        lit /= float(max(rays, 1u));
         fire = (lit - fire_shadow * unshadowed) * (fire_light / PI);
         gi += fire;
     }

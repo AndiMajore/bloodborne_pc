@@ -5,7 +5,8 @@
 // surface around it) its distance, pulled a little towards the camera (the flame burns in front
 // of what it sits on). Its power is the tile's emission summed over the world area each texel
 // covers at that distance, so a fire keeps its strength near and far. Out: per light two texels,
-// the world position (w 1: a light, 0: none) and the power.
+// the world position (w 1: a light, 0: none) and the power, blended with the tile's light of the
+// frame before when it is near it (`smoothing`): flames flicker, and the brightest texel wanders.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -13,7 +14,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(binding = 0) uniform texture2D emit_tex;  // quarter size, the transparents' light
 layout(binding = 1) uniform texture2D depth_tex; // full size, D32 0..1
-layout(binding = 2, rgba32f) uniform writeonly image2D lights_img; // tiles x 2
+layout(binding = 2, rgba32f) uniform image2D lights_img; // tiles x 2, last frame's in it
 
 layout(push_constant) uniform Constants {
     vec4 inv_view[3]; // view -> world, 3x4 rows
@@ -24,7 +25,7 @@ layout(push_constant) uniform Constants {
     int tiles_x;
     float min_peak; // a tile's brightest texel must reach this
     float pull;     // metres towards the camera
-    uint pad;
+    float smoothing; // 0..1: the share of last frame's light (0: none, a cut)
 };
 
 const int Tile = 64; // quarter-size texels; 16x16 invocations, 4x4 texels each
@@ -91,17 +92,22 @@ void main() {
     vec4 position = vec4(0.0), power = vec4(0.0);
     if (s_peak[0] >= min_peak) {
         const ivec2 q = ivec2(s_pos[0] & 0xFFFFu, s_pos[0] >> 16);
+        // The depth: the nearest surface under the bright part of the flame around the peak (the
+        // peak alone may fall into a gap between flame tongues: the background, metres behind).
         ivec2 fp = FullPixel(q);
         float depth = texelFetch(depth_tex, fp, 0).r;
-        if (depth >= 1.0) { // a flame against the sky: the nearest surface around it
-            for (int dy = -3; dy <= 3; ++dy) {
-                for (int dx = -3; dx <= 3; ++dx) {
-                    const ivec2 p = FullPixel(clamp(q + ivec2(dx, dy), ivec2(0), quarter_size - 1));
-                    const float d = texelFetch(depth_tex, p, 0).r;
-                    if (d < depth) {
-                        depth = d;
-                        fp = p;
-                    }
+        for (int dy = -3; dy <= 3; ++dy) {
+            for (int dx = -3; dx <= 3; ++dx) {
+                const ivec2 qq = clamp(q + ivec2(dx, dy), ivec2(0), quarter_size - 1);
+                const vec3 e = texelFetch(emit_tex, qq, 0).rgb;
+                if (dot(e, vec3(0.2126, 0.7152, 0.0722)) < 0.5 * s_peak[0]) {
+                    continue;
+                }
+                const ivec2 p = FullPixel(qq);
+                const float d = texelFetch(depth_tex, p, 0).r;
+                if (d < depth) {
+                    depth = d;
+                    fp = p;
                 }
             }
         }
@@ -114,6 +120,19 @@ void main() {
             // A quarter-size texel's width and height in the world at this distance.
             const vec2 texel = 8.0 * abs(v.z) / (abs(proj.xy) * full_size);
             power = vec4(s_sum[0] * (texel.x * texel.y * Calibration), 0.0);
+        }
+    }
+    if (smoothing > 0.0) {
+        const vec4 prev_position = imageLoad(lights_img, index);
+        const vec4 prev_power = imageLoad(lights_img, index + ivec2(0, 1));
+        if (prev_position.w == 1.0) {
+            if (position.w == 0.0) { // gone (or below min_peak) this frame: fades out
+                position = prev_position;
+                power = prev_power * smoothing;
+            } else if (distance(prev_position.xyz, position.xyz) < 1.0) {
+                position.xyz = mix(position.xyz, prev_position.xyz, smoothing);
+                power = mix(power, prev_power, smoothing);
+            }
         }
     }
     imageStore(lights_img, index, position);

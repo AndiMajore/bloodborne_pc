@@ -295,6 +295,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "fire_shadow") s.fire_shadow = std::clamp(value, 0.0f, 1.0f);
     else if (key == "fire_range") s.fire_range = std::clamp(value, 0.5f, 100.0f);
     else if (key == "fire_size") s.fire_size = std::clamp(value, 0.0f, 5.0f);
+    else if (key == "fire_smooth") s.fire_smooth = std::clamp(value, 0.0f, 0.98f);
     else if (key == "fire_pull") s.fire_pull = std::clamp(value, 0.0f, 5.0f);
     else if (key == "fire_min") s.fire_min = std::clamp(value, 0.0f, 100.0f);
     else if (key == "decals") flag(s.include_nowrite);
