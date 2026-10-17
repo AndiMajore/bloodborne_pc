@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: the transparents' light for the ray-traced lighting effects (experimental, emission= in
-// rtao.txt, default 1; vk_rtao.h). Fires, sparks and glows are blended over the scene after the
-// opaque pass, so SSGI, the probes and the reflections, which read the lit opaque scene, never saw
-// them as light. The opaque scene (after SSGI and the probes added their bounce) is kept at a
-// quarter of its size at the first transparent draw; at the first full-screen pass after the
-// transparents (the fog composite) the scene minus that is the emission image. The effects read it
-// the frame after, at a hit's screen position: one frame late and a little blurred, which suits
-// flames; the light seems to come from the surface behind the flame.
+// rtao.txt, default 0, and the fire lights, fire_light=; vk_rtao.h). Fires, sparks and glows are
+// blended over the scene after the opaque pass, so SSGI, the probes and the reflections, which read
+// the lit opaque scene, never saw them as light. The opaque scene (after SSGI and the probes added
+// their bounce) is kept at a quarter of its size at the first transparent draw; at the first
+// full-screen pass after the transparents (the fog composite) the scene minus that is the emission
+// image. The effects read it the frame after, at a hit's screen position: one frame late and a
+// little blurred, which suits flames; the light seems to come from the surface behind the flame.
 #include "render/vk_rtao.h"
 #include "render/vk_rtao_internal.h"
 

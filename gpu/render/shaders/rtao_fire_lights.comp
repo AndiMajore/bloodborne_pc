@@ -114,8 +114,14 @@ void main() {
         return;
     }
     const ivec2 index = ivec2(tile.y * tiles_x + tile.x, 0);
+    const vec4 prev_position = smoothing > 0.0 ? imageLoad(lights_img, index) : vec4(0.0);
+    const vec4 prev_power = smoothing > 0.0 ? imageLoad(lights_img, index + ivec2(0, 1)) : vec4(0.0);
+    // Hysteresis: a light that is there goes out only below half the threshold (a small, far fire
+    // hovers around it and would blink).
+    const float threshold = prev_position.w == 1.0 ? 0.5 * min_peak : min_peak;
     vec4 position = vec4(0.0), power = vec4(0.0);
-    if (s_peak[0] >= min_peak) {
+    float camera_distance = 0.0;
+    if (s_peak[0] >= threshold) {
         const ivec2 q = ivec2(s_pos[0] & 0xFFFFu, s_pos[0] >> 16);
         // At the peak on screen, at the nearest depth under the flame.
         const ivec2 fp = FullPixel(q);
@@ -124,6 +130,7 @@ void main() {
             vec3 v = ViewPos(vec2(fp) + 0.5, depth);
             const float len = length(v);
             v *= max(len - pull, 0.1) / len;
+            camera_distance = len;
             const vec4 h = vec4(v, 1.0);
             position = vec4(dot(inv_view[0], h), dot(inv_view[1], h), dot(inv_view[2], h), 1.0);
             // A quarter-size texel's width and height in the world at this distance.
@@ -132,13 +139,14 @@ void main() {
         }
     }
     if (smoothing > 0.0) {
-        const vec4 prev_position = imageLoad(lights_img, index);
-        const vec4 prev_power = imageLoad(lights_img, index + ivec2(0, 1));
+        // A far fire's depth wobbles between its stake and what is behind: the same light within
+        // 1 m or a fifth of its distance.
+        const float same = max(1.0, 0.2 * camera_distance);
         if (prev_position.w == 1.0) {
-            if (position.w == 0.0) { // gone (or below min_peak) this frame: fades out
+            if (position.w == 0.0) { // gone (or below the threshold) this frame: fades out
                 position = prev_position;
                 power = prev_power * smoothing;
-            } else if (distance(prev_position.xyz, position.xyz) < 1.0) {
+            } else if (distance(prev_position.xyz, position.xyz) < same) {
                 position.xyz = mix(position.xyz, prev_position.xyz, smoothing);
                 power = mix(power, prev_power, smoothing);
             } else { // jumped (another fire, or a wrong depth for a frame): fades in

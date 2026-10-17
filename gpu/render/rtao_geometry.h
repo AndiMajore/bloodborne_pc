@@ -165,14 +165,14 @@ struct Settings {
     float emission_trace = 0.0f; // a new value: one frame's draws after the opaque scene are logged
     float emission_sat = 0.35f;  // only light this saturated counts in full (fire, embers; not grey smoke); 0: all
     u32 emission_blur = 8;       // the emission's Gaussian radius in quarter-size texels (a glowing volume); 0: none
-    float emission = 4.0f;       // experimental: the transparents' light (fires) for the RT lighting effects, x this (0: off)
-    float fire_light = 1.0f;     // experimental: the fires as point lights with shadow rays in the RT SSGI, x this (0: off)
+    float emission = 0.0f;       // experimental: the transparents' light (fires) for the RT lighting effects, x this (0: off; fire_light replaces it: smoke over a far surface made it glow)
+    float fire_light = 0.5f;     // experimental: the fires as point lights with shadow rays in the RT SSGI, x this (0: off)
     float fire_shadow = 0.0f;    // 0..1: the fires' unshadowed light taken away again (the game's own fire light, darkened where blocked)
     float fire_range = 12.0f;    // metres a fire light reaches
     float fire_size = 0.75f;     // metres: a fire light's radius; its shadow rays aim anywhere in that sphere (soft shadows, the stake does not hide all of it)
     float fire_smooth = 0.8f;    // 0..0.98: the share of last frame's fire light (flicker, wandering peaks)
     float fire_pull = 0.3f;      // metres a fire light sits in front of the surface behind the flame
-    float fire_min = 0.05f;      // a tile's brightest emission texel must reach this to make a light
+    float fire_min = 0.3f;       // a tile's brightest emission texel must reach this to make a light (lower: fire-lit smoke makes lights on what is behind it)
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };
