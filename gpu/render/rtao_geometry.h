@@ -181,7 +181,7 @@ struct Settings {
     u32 sun_debug = 0;
     bool spot_shadow = true;     // experimental: the shadowed spot's 512x512 map replaced by a ray-traced one
     u32 spot_res = 1024;         // its size (the 20 deg spot at the Central Yharnam lamp: under a centimetre a texel; 2048 cost ~0.6 ms)
-    u32 spot_blur = 2;           // texels of Gaussian on its moments: soft edges (0: hard; from 3 the shadow pales: a variance map lets light through where caster and receiver are close)
+    u32 spot_blur = 3;           // texels of Gaussian on its moments: soft edges (0: hard; lower looked too harsh to Andreas; spot_soft keeps overlaps dark)
     float spot_soft = 0.2f;      // metres: the blurred map's largest depth spread (overlapping casters' bright seams; 0: no cap)
     float spot_near = 0.3f;      // metres from the light its rays start (the lamp's own housing)
            // 1: the rays alone (no fallback to the game's shadow); 2: the direction reversed      // metres a sun ray reaches
