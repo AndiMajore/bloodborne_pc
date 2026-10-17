@@ -33,6 +33,7 @@ struct GatherConstants {
     u32 frame;
     u32 directions;
     u32 steps;
+    float emission; // x the RTAO's emission image (the transparents' light); 0: none
 };
 struct GatherRtConstants {
     std::array<float, 12> view;
@@ -48,10 +49,12 @@ struct GatherRtConstants {
     u32 surface_parts_count;
     float clip;
     float max_radiance;
+    float emission;
+    u32 pad;
     u64 surface_cache;
     u64 surface_parts;
 };
-static_assert(sizeof(GatherRtConstants) == 136);
+static_assert(sizeof(GatherRtConstants) == 144);
 struct ApplyConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
@@ -142,7 +145,7 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
                                               .stageFlags = vk::ShaderStageFlagBits::eCompute};
     };
     const std::array gather_bindings = {sampled(0), sampled(1), sampled(2),
-                                        sampled(3), sampled(4), storage(5)};
+                                        sampled(3), sampled(4), storage(5), sampled(6)};
     const std::array apply_bindings = {sampled(0), sampled(1), sampled(2), storage(3)};
     make_layouts(gather_bindings, sizeof(GatherConstants), gather_desc_layout, gather_layout);
     make_layouts(apply_bindings, sizeof(ApplyConstants), apply_desc_layout, apply_layout);
@@ -156,7 +159,8 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
             vk::DescriptorSetLayoutBinding{.binding = 6,
                                            .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
                                            .descriptorCount = 1,
-                                           .stageFlags = vk::ShaderStageFlagBits::eCompute}};
+                                           .stageFlags = vk::ShaderStageFlagBits::eCompute},
+            sampled(7)};
         make_layouts(rt_bindings, sizeof(GatherRtConstants), gather_rt_desc_layout, gather_rt_layout);
         gather_rt_pipeline = make_pipeline(SSGI_GATHER_RT_COMP, *gather_rt_layout);
         std::printf("SSGI: ray-traced gather available (rt=1 in ssgi.txt, experimental)\n");
@@ -411,6 +415,10 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
             vk::AccessFlagBits2::eShaderRead);
 
+    // The transparents' light (fires) from the RTAO, last frame's; without it the colour is bound
+    // in its place and weighted 0.
+    const auto emission = rtao ? rtao->FrameEmission() : RayTracedAO::Emission{};
+    const vk::ImageView emission_view = emission.view ? emission.view : color_view;
     const GatherConstants gather{
         .view = camera_motion.View(),
         .proj = camera_motion.Projection(),
@@ -421,6 +429,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .frame = frame,
         .directions = directions,
         .steps = steps,
+        .emission = emission.strength,
     };
     const ApplyConstants apply{
         .proj = gather.proj,
@@ -458,6 +467,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .surface_parts_count = surface.part_count,
         .clip = rt_clip,
         .max_radiance = rt_max,
+        .emission = emission.strength,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
     };
@@ -466,7 +476,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     const vk::ImageView motion = *motion_view;
     scheduler.RecordCrumb(
         {.name = "ssgi"},
-        [gather, gather_rt, tlas, apply, depth_view, normal_view, color_view, albedo_view, motion,
+        [gather, gather_rt, tlas, apply, depth_view, normal_view, color_view, albedo_view, motion, emission_view,
          gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
          gather_pipeline = *gather_pipeline, gather_layout = *gather_layout,
          gather_rt_pipeline = *gather_rt_pipeline, gather_rt_layout = *gather_rt_layout,
@@ -487,17 +497,20 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
             const auto storage = vk::DescriptorType::eStorageImage;
             {
                 const auto d = info(depth_view), n = info(normal_view), c = info(color_view),
-                           m = info(motion), p = info(gi_read), o = info(gi_write);
+                           m = info(motion), p = info(gi_read), o = info(gi_write),
+                           e = info(emission_view);
                 const std::array writes = {write_of(0, sampled, &d), write_of(1, sampled, &n),
                                            write_of(2, sampled, &c), write_of(3, sampled, &m),
-                                           write_of(4, sampled, &p), write_of(5, storage, &o)};
+                                           write_of(4, sampled, &p), write_of(5, storage, &o),
+                                           write_of(6, sampled, &e)};
                 if (tlas) {
                     const vk::WriteDescriptorSetAccelerationStructureKHR as_info{
                         .accelerationStructureCount = 1,
                         .pAccelerationStructures = &tlas,
                     };
-                    std::array<vk::WriteDescriptorSet, 7> rt_writes{};
-                    std::copy(writes.begin(), writes.end(), rt_writes.begin());
+                    std::array<vk::WriteDescriptorSet, 8> rt_writes{};
+                    std::copy(writes.begin(), writes.begin() + 6, rt_writes.begin());
+                    rt_writes[7] = write_of(7, sampled, &e);
                     rt_writes[6] = vk::WriteDescriptorSet{
                         .pNext = &as_info,
                         .dstBinding = 6,

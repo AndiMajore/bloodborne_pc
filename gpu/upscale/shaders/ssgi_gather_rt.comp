@@ -24,6 +24,7 @@ layout(binding = 3) uniform texture2D motion_tex;  // full res, pixels, previous
 layout(binding = 4) uniform texture2D prev_gi_tex; // half res, previous output
 layout(binding = 5, rgba16f) uniform writeonly image2D gi_img; // half res: rgb gi, a view z
 layout(binding = 6) uniform accelerationStructureEXT scene;   // the RTAO's TLAS (view space)
+layout(binding = 7) uniform texture2D emission_tex; // quarter res, the transparents' light (last frame)
 
 layout(push_constant) uniform Constants {
     vec4 view[3];     // world -> view, 3x4 rows
@@ -39,6 +40,8 @@ layout(push_constant) uniform Constants {
     uint surface_parts_count;
     float clip;       // history clipped to this frame's 3x3 mean +- clip sigma (plus a floor)
     float max_radiance; // per ray: brighter hits (lamps, candles) are scaled down to it (fireflies)
+    float emission;     // x emission_tex, added after the cap (0: none bound)
+    uint pad;
     uint64_t surface_cache; // the RTAO's surface cache (0: none): radiance of hidden static hits
     uint64_t surface_parts;
 };
@@ -127,7 +130,8 @@ void main() {
         }
         if (visible) {
             seen += 1.0;
-            gi += Capped(texelFetch(color_tex, ivec2(sp), 0).rgb) * falloff;
+            gi += (Capped(texelFetch(color_tex, ivec2(sp), 0).rgb) +
+                   texelFetch(emission_tex, ivec2(sp) / 4, 0).rgb * emission) * falloff;
             continue;
         }
         // Hidden from the camera or off screen: the surface cache's radiance, if it saw it.

@@ -230,6 +230,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 rtao->OnOpaqueScene(cb_descs[0].first); // the surface cache's slice (surface=1)
                 ssgi->OnOpaqueScene(cb_descs[0].first);
                 probes->OnOpaqueScene(cb_descs[0].first);
+                rtao->OnOpaqueSceneLit(cb_descs[0].first); // the emission's opaque base: bounce included
                 reflect->OnOpaqueScene(cb_descs[0].first); // after SSGI and the probes: their bounce included
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
@@ -237,6 +238,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 // (Not an SSGI trigger: the lighting composites into intermediate RGBA16F
                 // targets come first and would be hit before they draw.)
                 upscaler->OnSceneComposite();
+                rtao->OnSceneComposite(cb_descs[0].first); // the transparents' light (emission)
             }
         }
     }

@@ -205,12 +205,12 @@ void RayTracedAO::PollSettings() {
     settings.build_fast_trace = settings.build_fast_trace && fast_trace_allowed;
     std::printf("RTAO: settings: enabled %d, %u rays, denoiser %u (maxn %.0f, clip %.1f / %.2f), radius %.2f, "
                 "strength %.2f, power %.2f, far %.0f m, snap %.0f m, normals %s, trace %s, cache %d (maxsize %.0f m), "
-                "debug %u, stage %u\n",
+                "debug %u, stage %u, emission %.2f\n",
                 settings.active ? 1 : 0, settings.rays, settings.denoise, settings.max_n, settings.clip_k,
                 settings.clip_floor, settings.radius, settings.strength, settings.power, settings.ao_far,
                 settings.snap_far, settings.depth_normals ? "depth" : "shading",
                 settings.use_rt_pipeline ? "pipeline" : "ray query", settings.cache_enabled ? 1 : 0,
-                settings.cache_max_size, settings.debug, settings.stage);
+                settings.cache_max_size, settings.debug, settings.stage, settings.emission);
 }
 
 RayTracedAO::~RayTracedAO() {

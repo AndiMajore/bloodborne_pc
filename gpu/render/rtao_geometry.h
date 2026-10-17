@@ -161,6 +161,7 @@ struct Settings {
     float foliage = 0.0f; // > 0: alpha-tested draws occlude with this probability per hit (0: left out)
     bool surface = false;        // experimental: the surface cache (radiance per static pool triangle)
     u32 surface_budget = 131072; // static triangles looked at per frame
+    float emission = 1.0f;       // experimental: the transparents' light (fires) for the RT lighting effects, x this (0: off)
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };

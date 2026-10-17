@@ -36,7 +36,7 @@ struct TraceConstants {
     u32 mode;
     u32 debug;
     u32 surface_parts_count;
-    u32 pad;
+    float emission; // x the RTAO's emission image (the transparents' light); 0: none
     u64 surface_cache;
     u64 surface_parts;
 };
@@ -111,7 +111,7 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
     using DT = vk::DescriptorType;
     const std::array trace_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eSampledImage), binding(3, DT::eStorageImage),
-                                       binding(4, DT::eAccelerationStructureKHR)};
+                                       binding(4, DT::eAccelerationStructureKHR), binding(5, DT::eSampledImage)};
     const std::array copy_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eStorageImage)};
     make_layouts(trace_bindings, sizeof(TraceConstants), trace_desc_layout, trace_layout);
     make_layouts(copy_bindings, sizeof(CopyConstants), copy_desc_layout, copy_layout);
@@ -372,6 +372,9 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         CachedView(ssr, ssr.info.pixel_format, vk::ImageAspectFlagBits::eColor);
     const u32 sw = ssr.info.size.width, sh = ssr.info.size.height;
     const auto surface = rtao.FrameSurface();
+    // Last frame's, as the lit copy; without it the copy is bound in its place, x 0.
+    const auto emission = rtao.FrameEmission();
+    const vk::ImageView emission_view = emission.view ? emission.view : *copy_view;
     const TraceConstants constants{
         .view = camera_motion.View(),
         .inv_view = camera_motion.InvView(),
@@ -387,18 +390,19 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         .mode = mode,
         .debug = debug,
         .surface_parts_count = surface.part_count,
-        .pad = 0,
+        .emission = emission.strength,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
     };
     scheduler.RecordCrumb(
         {.name = "rt reflect"},
-        [constants, depth_view, normal_view, ssr_view, lit = *copy_view, tlas, sw, sh,
+        [constants, depth_view, normal_view, ssr_view, lit = *copy_view, emission_view, tlas, sw, sh,
          pipeline = *trace_pipeline, layout = *trace_layout](vk::CommandBuffer cmdbuf) {
             const auto info = [](vk::ImageView view) {
                 return vk::DescriptorImageInfo{.imageView = view, .imageLayout = vk::ImageLayout::eGeneral};
             };
-            const auto d = info(depth_view), n = info(normal_view), l = info(lit), s = info(ssr_view);
+            const auto d = info(depth_view), n = info(normal_view), l = info(lit), s = info(ssr_view),
+                       e = info(emission_view);
             const vk::WriteDescriptorSetAccelerationStructureKHR as_info{
                 .accelerationStructureCount = 1,
                 .pAccelerationStructures = &tlas,
@@ -413,7 +417,9 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
                 vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
                                        .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &s},
                 vk::WriteDescriptorSet{.pNext = &as_info, .dstBinding = 4, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eAccelerationStructureKHR}};
+                                       .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
+                vk::WriteDescriptorSet{.dstBinding = 5, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &e}};
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
             cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
             cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants),

@@ -24,6 +24,7 @@ struct Probe {
     ivec4 cell;     // world cell, w: active (1) or inside geometry (0)
 };
 layout(binding = 3, std430) buffer Probes { Probe probes[]; };
+layout(binding = 4) uniform texture2D emission_tex; // quarter res, the transparents' light (last frame)
 
 layout(push_constant) uniform Constants {
     vec4 view[3];        // world -> view
@@ -38,6 +39,8 @@ layout(push_constant) uniform Constants {
     float sky;           // radiance of a miss
     uint frame;
     uint surface_parts_count;
+    float emission;      // x emission_tex (0: none bound)
+    uint pad;
     uint64_t surface_cache;
     uint64_t surface_parts;
 };
@@ -110,7 +113,8 @@ void main() {
                 visible = z * H.z > 0.0 && abs(z - H.z) <= max(0.1, 0.03 * abs(H.z));
             }
             if (visible) {
-                radiance = texelFetch(lit_tex, ivec2(pixel), 0).rgb;
+                radiance = texelFetch(lit_tex, ivec2(pixel), 0).rgb +
+                           texelFetch(emission_tex, ivec2(pixel) / 4, 0).rgb * emission;
             } else {
                 SurfaceRadiance(q, surface_cache, surface_parts, surface_parts_count, radiance);
             }

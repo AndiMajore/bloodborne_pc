@@ -35,10 +35,12 @@ struct UpdateConstants {
     float sky;
     u32 frame;
     u32 surface_parts_count;
+    float emission; // x the RTAO's emission image (the transparents' light); 0: none
+    u32 pad;
     u64 surface_cache;
     u64 surface_parts;
 };
-static_assert(sizeof(UpdateConstants) == 152);
+static_assert(sizeof(UpdateConstants) == 160);
 struct ApplyConstants {
     std::array<float, 12> inv_view;
     std::array<float, 4> proj;
@@ -130,7 +132,7 @@ RtProbes::RtProbes(const Instance& instance_, Scheduler& scheduler_,
     using DT = vk::DescriptorType;
     const std::array update_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                         binding(2, DT::eAccelerationStructureKHR),
-                                        binding(3, DT::eStorageBuffer)};
+                                        binding(3, DT::eStorageBuffer), binding(4, DT::eSampledImage)};
     const std::array apply_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eSampledImage), binding(3, DT::eStorageImage),
                                        binding(4, DT::eStorageBuffer)};
@@ -290,6 +292,8 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
         origin[i] = s32(std::floor(cam[i] / spacing)) - Dims[i] / 2;
     }
     const auto surface = rtao.FrameSurface();
+    const auto emission = rtao.FrameEmission(); // without it the colour is bound in its place, x 0
+    const vk::ImageView emission_view = emission.view ? emission.view : color_view;
     const u32 w = depth.info.size.width, h = depth.info.size.height;
     const UpdateConstants update{
         .view = camera_motion.View(),
@@ -304,6 +308,7 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
         .sky = sky,
         .frame = frame,
         .surface_parts_count = surface.part_count,
+        .emission = emission.strength,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
     };
@@ -323,7 +328,7 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
     const u32 probes = u32(Dims[0] * Dims[1] * Dims[2]);
     scheduler.RecordCrumb(
         {.name = "rt probes"},
-        [update, apply, clear, probes, tlas, depth_view, normal_view, albedo_view, color_view, w, h,
+        [update, apply, clear, probes, tlas, depth_view, normal_view, albedo_view, color_view, emission_view, w, h,
          buffer = probe_buffer, update_pipeline = *update_pipeline, update_layout = *update_layout,
          apply_pipeline = *apply_pipeline, apply_layout = *apply_layout](vk::CommandBuffer cmdbuf) {
             const auto barrier = [&](vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
@@ -344,7 +349,7 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
             };
             const vk::DescriptorBufferInfo probes_info{buffer, 0, VK_WHOLE_SIZE};
             {
-                const auto c = image(color_view), d = image(depth_view);
+                const auto c = image(color_view), d = image(depth_view), e = image(emission_view);
                 const vk::WriteDescriptorSetAccelerationStructureKHR as{.accelerationStructureCount = 1,
                                                                         .pAccelerationStructures = &tlas};
                 const std::array writes = {
@@ -356,7 +361,9 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
                                            .descriptorType = vk::DescriptorType::eAccelerationStructureKHR},
                     vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
                                            .descriptorType = vk::DescriptorType::eStorageBuffer,
-                                           .pBufferInfo = &probes_info}};
+                                           .pBufferInfo = &probes_info},
+                    vk::WriteDescriptorSet{.dstBinding = 4, .descriptorCount = 1,
+                                           .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &e}};
                 cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, update_pipeline);
                 cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, update_layout, 0, writes);
                 cmdbuf.pushConstants(update_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(update), &update);

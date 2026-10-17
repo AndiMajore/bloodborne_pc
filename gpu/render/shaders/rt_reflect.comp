@@ -20,6 +20,7 @@ layout(binding = 1) uniform texture2D normal_tex;  // full res, world normal * 0
 layout(binding = 2) uniform texture2D lit_prev;    // half res, last frame's lit opaque scene
 layout(binding = 3, rgba16f) uniform image2D ssr_img; // the game's SSR target, read and written
 layout(binding = 4) uniform accelerationStructureEXT scene; // the RTAO's TLAS (view space)
+layout(binding = 5) uniform texture2D emission_tex; // quarter res, last frame's transparents' light
 
 layout(push_constant) uniform Constants {
     vec4 view[3];      // world -> view (this frame), 3x4 rows
@@ -36,6 +37,7 @@ layout(push_constant) uniform Constants {
     uint mode;         // 1 fill SSR misses, 2 ours wherever valid
     uint debug;        // 1 ours alone (SSR cleared), 2 classes: green ours, cyan surface cache, red hidden, blue miss, grey SSR kept
     uint surface_parts_count;
+    float emission;    // x emission_tex (0: none bound)
     uint64_t surface_cache; // the RTAO's surface cache (0: none)
     uint64_t surface_parts;
 };
@@ -110,7 +112,9 @@ void main() {
                       all(lessThan(pp, lit_size));
             vec3 L;
             if (visible) {
-                L = texelFetch(lit_prev, ivec2(pp), 0).rgb;
+                // Fires and glows (blended after the opaque scene) from the emission image.
+                L = texelFetch(lit_prev, ivec2(pp), 0).rgb +
+                    texelFetch(emission_tex, ivec2(pp) / 2, 0).rgb * emission;
                 klass = vec3(0.0, 1.0, 0.0);
             } else if (SurfaceRadiance(q, surface_cache, surface_parts, surface_parts_count, L)) {
                 visible = true; // the surface cache saw it

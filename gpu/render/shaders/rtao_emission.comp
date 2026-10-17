@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: the transparents' light for the ray-traced lighting effects (vk_rtao_emission.cpp).
+// mode 0, at the first transparent draw: the lit opaque scene, a 4x4 box per texel, kept.
+// mode 1, at the first full-screen pass after the transparents: the scene the same way, minus the
+// kept opaque scene: what fires, sparks and glows added (where smoke darkened it: nothing).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D scene_tex;                  // full res, RGBA16F
+layout(binding = 1, rgba16f) uniform image2D opaque_img;          // quarter res
+layout(binding = 2, rgba16f) uniform writeonly image2D emit_img;  // quarter res
+
+layout(push_constant) uniform Constants {
+    ivec2 full_size;
+    ivec2 quarter_size;
+    uint mode;
+};
+
+void main() {
+    const ivec2 qp = ivec2(gl_GlobalInvocationID.xy);
+    if (qp.x >= quarter_size.x || qp.y >= quarter_size.y) {
+        return;
+    }
+    const ivec2 base = qp * 4;
+    vec3 c = vec3(0.0);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            c += texelFetch(scene_tex, min(base + ivec2(x, y), full_size - 1), 0).rgb;
+        }
+    }
+    c *= 1.0 / 16.0;
+    if (mode == 0u) {
+        imageStore(opaque_img, qp, vec4(c, 1.0));
+    } else {
+        const vec3 opaque = imageLoad(opaque_img, qp).rgb;
+        // Not finite (a NaN in the scene) counts as nothing.
+        const vec3 e = max(c - opaque, vec3(0.0));
+        imageStore(emit_img, qp, vec4(all(lessThan(e, vec3(65000.0))) ? e : vec3(0.0), 1.0));
+    }
+}

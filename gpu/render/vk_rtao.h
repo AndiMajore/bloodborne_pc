@@ -104,6 +104,25 @@ public:
     }
     /// The lit opaque scene of this frame: a slice of the surface cache is refreshed from it.
     void OnOpaqueScene(VideoCore::ImageId color); // vk_rtao_surface.cpp
+
+    /// bbport (experimental, emission= in rtao.txt): the light the transparents add (fires,
+    /// sparks, glows), for the ray-traced lighting effects, which otherwise only see the lit
+    /// opaque scene. The opaque scene after SSGI and the probes added their bounce is kept at a
+    /// quarter of its size (OnOpaqueSceneLit); at the first full-screen pass over the scene the
+    /// transparents are in, and max(scene - opaque, 0) becomes the emission image (OnSceneComposite).
+    /// Read the frame after (FrameEmission): a pixel's light there, at a quarter of the scene size.
+    void OnOpaqueSceneLit(VideoCore::ImageId color); // vk_rtao_emission.cpp
+    void OnSceneComposite(VideoCore::ImageId color); // vk_rtao_emission.cpp
+    struct Emission {
+        vk::ImageView view{}; // RGBA16F, eGeneral; empty: none (bind something else, strength 0)
+        float strength = 0.0f;
+    };
+    [[nodiscard]] Emission FrameEmission() const noexcept {
+        if (!Active() || settings.emission <= 0.0f || !emit_view || emit_frame + 1 != frame) {
+            return {};
+        }
+        return {*emit_view, settings.emission};
+    }
     /// A cut (load, warp, upscaler reset): the next pass starts without temporal history.
     void InvalidateHistory() {
         history_valid = false;
@@ -370,6 +389,17 @@ private:
     vk::UniquePipeline surface_pipeline;
     bool CreateSurfaceCache(); // vk_rtao_surface.cpp
     void SurfaceTable(RtaoInternal::PassInputs& in); // vk_rtao_surface.cpp: with a static rebuild
+    // Emission (vk_rtao_emission.cpp): the opaque scene and the transparents' light, quarter size.
+    VideoCore::HostImage emit_opaque, emit_image;
+    vk::UniqueImageView emit_opaque_view, emit_view;
+    u32 emit_w = 0, emit_h = 0;
+    u32 emit_snapshot_frame = ~0u, emit_frame = ~0u - 1;
+    bool emit_written = false;
+    vk::UniqueDescriptorSetLayout emit_desc_layout;
+    vk::UniquePipelineLayout emit_layout;
+    vk::UniquePipeline emit_pipeline;
+    bool EnsureEmission(u32 w, u32 h);
+    void RecordEmission(VideoCore::ImageId color, u32 mode);
     bool hold_enabled = true;     // BB_RTAO_HOLD=0: no retirement hold (to test what it protects)
     bool test_move = false;       // BB_RTAO_TEST_MOVE=1 (layer memory, BB_DRAW_PIPE=0): mirrors moved
     bool test_move_pending = false; // back in place between the AO upsample and the pass
