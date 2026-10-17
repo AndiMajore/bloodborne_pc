@@ -31,6 +31,11 @@ layout(push_constant) uniform Constants {
 
 const float PI = 3.14159265;
 
+vec3 EmissionAt(ivec2 pixel) {
+    const vec2 prev = vec2(pixel) + 0.5 + texelFetch(motion_tex, pixel, 0).rg;
+    const ivec2 q = clamp(ivec2(prev / 4.0), ivec2(0), textureSize(emission_tex, 0) - 1);
+    return texelFetch(emission_tex, q, 0).rgb;
+}
 float ViewZ(float depth) {
     return proj.w / min(depth - proj.z, -1e-8);
 }
@@ -95,8 +100,9 @@ void main() {
                 continue;
             }
             const float falloff = clamp(1.0 - dist / radius, 0.0, 1.0);
+            // The emission is last frame's: where this sample was then (motion: previous - current).
             const vec3 radiance = texelFetch(color_tex, si, 0).rgb +
-                                  texelFetch(emission_tex, si / 4, 0).rgb * emission;
+                                  EmissionAt(si) * emission;
             gi += radiance * (c - max_cos) * falloff;
             max_cos = c;
         }
