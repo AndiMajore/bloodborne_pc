@@ -428,6 +428,13 @@ public:
     /// Held around every queue submission and present (the queue is shared).
     static std::mutex submit_mutex;
 
+    /// bbport: the game is closing (the window closed: the process ends with _Exit next). Takes
+    /// submit_mutex for good, so nothing more is submitted or presented, and waits up to
+    /// `timeout_ms` until the GPU has run every scheduler's submitted work: the process then ends
+    /// with the GPU idle. Ending it mid-frame with the ray-traced lighting running took an RX 9070
+    /// XT off the bus now and then (amdgpu: "device lost from bus" while tearing down the queues).
+    static void QuiesceForExit(u32 timeout_ms);
+
 private:
     static constexpr u32 MaxSegments = SubmissionBatch::MaxSegments;
 

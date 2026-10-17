@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,12 @@
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
+
+namespace {
+// Every scheduler (QuiesceForExit waits for each one's submitted work).
+std::mutex g_schedulers_mutex;
+std::vector<Scheduler*> g_schedulers;
+} // namespace
 
 namespace {
 // ProducerScope state of this thread: the producer function it is in (any scheduler).
@@ -111,6 +118,10 @@ vk::CommandBuffer BeginCommandBuffer(CommandPool& pool) {
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    {
+        std::scoped_lock lk{g_schedulers_mutex};
+        g_schedulers.push_back(this);
+    }
     crumb_stream = Breadcrumbs::NewStream(
         instance, threaded_recording ? "draws: game and presenter" : "presentation");
     // BB_VK_RECORD_THREAD=0 records on the calling thread.
@@ -154,6 +165,10 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
 }
 
 Scheduler::~Scheduler() {
+    {
+        std::scoped_lock lk{g_schedulers_mutex};
+        std::erase(g_schedulers, this);
+    }
     if (!workers.empty()) {
         SyncRecording();
         for (auto& worker : workers) {
@@ -1052,6 +1067,40 @@ void Scheduler::PriorityOpsThread(std::stop_token stop) {
         }
         op.callback();
     }
+}
+
+void Scheduler::QuiesceForExit(u32 timeout_ms) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::milliseconds(timeout_ms);
+    // Not released: the process ends. A holder (a present waiting for the display) lets go within
+    // a frame or so; past the deadline the wait below still runs.
+    bool locked = false;
+    while (!(locked = submit_mutex.try_lock()) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::scoped_lock lk{g_schedulers_mutex};
+    u32 idle = 0;
+    for (Scheduler* scheduler : g_schedulers) {
+        const u64 tick = scheduler->SubmittedTick();
+        if (tick == 0) {
+            ++idle;
+            continue;
+        }
+        const vk::Semaphore semaphore = scheduler->work_semaphore.Handle();
+        const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            deadline - std::chrono::steady_clock::now());
+        const vk::SemaphoreWaitInfo wait{
+            .semaphoreCount = 1, .pSemaphores = &semaphore, .pValues = &tick};
+        if (scheduler->instance.GetDevice().waitSemaphores(wait, u64(std::max<s64>(left.count(), 0))) ==
+            vk::Result::eSuccess) {
+            ++idle;
+        }
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+    std::printf("Exit: GPU work finished for %u of %zu schedulers in %lld ms (submissions %s)\n", idle,
+                g_schedulers.size(), (long long)ms, locked ? "stopped" : "not stopped: the lock was held");
+    std::fflush(stdout);
 }
 
 } // namespace Vulkan

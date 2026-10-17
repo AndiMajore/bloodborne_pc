@@ -4,6 +4,7 @@
 #include "bbport_gnm_hooks.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
 #include "bbport_overlay.h"
+#include "render/scheduler.h"
 #include "bbport_guest_hooks.h"
 #include "bbport_settings.h"
 #include "game_profile.h"
@@ -276,6 +277,8 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             SDL_Delay(2);
         }
         LOG_INFO(Frontend, "Window closed by user");
+        // Not mid-frame: no more submissions, and the GPU finishes what it has first.
+        Vulkan::Scheduler::QuiesceForExit(2000);
         std::fflush(stdout);
         std::_Exit(0);
     });
