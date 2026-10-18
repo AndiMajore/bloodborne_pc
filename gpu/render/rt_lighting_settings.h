@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace RtLightingSettings {
@@ -77,6 +78,6 @@ struct Settings {
 bool Apply(Settings& settings, std::string_view key, float value);
 
 /// The live file's text (key=value tokens, `#` comments). Returns how many were applied.
-uint32_t ApplyText(Settings& settings, std::string_view text);
+uint32_t ApplyText(Settings& settings, std::string_view text, std::string* unknown = nullptr);
 
 } // namespace RtLightingSettings

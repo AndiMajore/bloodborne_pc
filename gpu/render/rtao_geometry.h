@@ -173,9 +173,10 @@ struct Settings {
 
 /// The live files' text: key=value tokens separated by any white space (several per line too), `#`
 /// comments to the end of the line; `apply(key, number)` per token whose value parses, true when
-/// it took the key. Returns how many were applied.
+/// it took the key. Returns how many were applied; the keys not taken go to `unknown` (space
+/// separated) when given.
 template <class ApplyFn>
-uint32_t ForEachSetting(std::string_view text, ApplyFn&& apply) {
+uint32_t ForEachSetting(std::string_view text, ApplyFn&& apply, std::string* unknown = nullptr) {
     uint32_t applied = 0;
     size_t pos = 0;
     const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
@@ -200,6 +201,8 @@ uint32_t ForEachSetting(std::string_view text, ApplyFn&& apply) {
         const float number = std::strtof(value.c_str(), &parse_end);
         if (parse_end != value.c_str() && apply(token.substr(0, eq), number)) {
             ++applied;
+        } else if (unknown) {
+            unknown->append(token.substr(0, eq)).push_back(' ');
         }
     }
     return applied;
@@ -209,7 +212,8 @@ uint32_t ForEachSetting(std::string_view text, ApplyFn&& apply) {
 bool Apply(Settings& settings, std::string_view key, float value);
 
 /// The live file's text: key=value tokens separated by any white space (several per line too).
-/// Returns how many were applied; a change of denoiser sets `history_reset`.
-u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset);
+/// Returns how many were applied; a change of denoiser sets `history_reset`, the keys not taken
+/// go to `unknown` when given.
+u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset, std::string* unknown = nullptr);
 
 } // namespace Rtao

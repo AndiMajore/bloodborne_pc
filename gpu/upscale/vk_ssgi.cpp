@@ -294,7 +294,7 @@ void ScreenSpaceGI::PollSettings() {
     }
     settings_mtime = mtime;
     std::ifstream file(settings_path);
-    std::string line;
+    std::string line, unknown;
     while (std::getline(file, line)) {
         const auto eq = line.find('=');
         if (eq == std::string::npos || line[0] == '#') {
@@ -321,11 +321,15 @@ void ScreenSpaceGI::PollSettings() {
         else if (key == "denoise_luma") denoise_luma = std::max(value, 0.01f);
         else if (key == "denoise_plane") denoise_plane = std::max(value, 0.001f);
         else if (key == "denoise_normal") denoise_normal = std::max(value, 0.0f);
+        else unknown += key + ' ';
     }
     std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, "
                 "adaptive %.2f, debug %u, rt %d (%u rays, clip %.2f, max %.2f)\n",
                 enabled ? 1 : 0, strength, radius, directions, steps, history, adaptive, debug,
                 rt ? 1 : 0, rays, rt_clip, rt_max);
+    if (!unknown.empty()) {
+        std::printf("SSGI: keys in %s skipped (unknown, or no number): %s\n", settings_path.c_str(), unknown.c_str());
+    }
     if (rt_denoise) {
         std::printf("SSGI: rt denoiser on: %.0f frames, clip %.2f, %u passes (luma %.2f, plane %.3f, normal %.0f)\n",
                     denoise_frames, denoise_clip, denoise_passes, denoise_luma, denoise_plane, denoise_normal);
@@ -642,9 +646,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];
     const vk::ImageView motion = *motion_view;
-    if (auto* profiler = GpuProfiler::Get()) {
-        profiler->Mark(0x55601ull, [] { return std::string{"ssgi"}; });
-    }
+    const ProfileScope profile{0x55601ull, "ssgi"};
     scheduler.RecordCrumb(
         {.name = "ssgi"},
         [gather, gather_rt, tlas, apply, denoise, depth_view, normal_view, color_view, albedo_view, motion, emission_view,

@@ -234,10 +234,7 @@ void RtEmission::Record(VideoCore::ImageId color_id, u32 mode) {
                                       .radius = s32(settings.emission_blur)};
     // mode 1 then the blur's two halves (2: emit -> opaque, 3: opaque -> emit) when it has a radius.
     const u32 last_mode = mode == 1 && settings.emission_blur > 0 ? 3 : mode;
-    if (auto* profiler = GpuProfiler::Get()) {
-        profiler->Mark(mode == 0 ? 0x55603ull : 0x55604ull,
-                       [mode] { return std::string{mode == 0 ? "rt emission opaque" : "rt emission"}; });
-    }
+    const ProfileScope profile{mode == 0 ? 0x55603ull : 0x55604ull, mode == 0 ? "rt emission opaque" : "rt emission"};
     scheduler.RecordCrumb({.name = mode == 0 ? "rt emission opaque" : "rt emission"},
                           [constants, last_mode, color_view, opaque = *opaque_view, emit = *emit_view, qw, qh,
                            pipeline = *emit_pipeline, layout = *emit_layout](vk::CommandBuffer cmdbuf) {
@@ -379,9 +376,7 @@ void RtEmission::RecordFireLights() {
         }
     }
     const bool bases_continued = continued;
-    if (auto* profiler = GpuProfiler::Get()) {
-        profiler->Mark(0x55602ull, [] { return std::string{"rt fire lights"}; });
-    }
+    const ProfileScope profile{0x55602ull, "rt fire lights"};
     scheduler.RecordCrumb({.name = "rt fire lights"},
                           [constants, depth_view, emit = *emit_view, raw = *lights_views[0],
                            prev_lights = *lights_views[prev], lights = *lights_views[lights_out], tx = tiles_x,

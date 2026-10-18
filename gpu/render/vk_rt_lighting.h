@@ -41,9 +41,10 @@ public:
     void OnFrameStart();
     void OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal);
 
-    /// Fragment-shader constant buffers wanted (OnShaderConstants).
-    [[nodiscard]] bool WantsShaderConstants() const noexcept {
-        return wants_constants;
+    /// This fragment shader's constant buffers wanted (OnShaderConstants): a hash compare, so
+    /// the bind path tests it before the memory checks.
+    [[nodiscard]] bool WantsShaderConstants(u64 hash) const noexcept {
+        return wants_constants && RtShadows::ReadsConstantsOf(hash);
     }
     void OnShaderConstants(u64 hash, VAddr address, u64 size) {
         shadows->OnShaderConstants(hash, address, size);

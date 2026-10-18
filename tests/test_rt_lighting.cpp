@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <span>
+#include <string>
 #include <vector>
 #include "render/rt_emission_trigger.h"
 #include "render/rt_light_records.h"
@@ -172,6 +173,10 @@ static void LightingSettings() {
                         "emission_trace=1") == 0);
     // The RTAO's own keys are not the experiments': rtlighting.txt ignores them.
     assert(ApplyText(s, "rays=4 strength=0.5") == 0);
+    // The keys skipped are listed for the log: a typo, a key of another file, a value not a number.
+    std::string skipped;
+    assert(ApplyText(s, "fire_lage_base_height=4 fire_light=0.3 rays=2 spot_blur=x # fire_size=1", &skipped) == 1);
+    assert(skipped == "fire_lage_base_height rays spot_blur ");
 }
 
 int main() {

@@ -197,7 +197,11 @@ void RayTracedAO::PollSettings() {
     std::ifstream file(settings_path);
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     bool history_reset = false;
-    Rtao::ApplyText(settings, text, history_reset);
+    std::string unknown;
+    Rtao::ApplyText(settings, text, history_reset, &unknown);
+    if (!unknown.empty()) {
+        std::printf("RTAO: keys in %s skipped (unknown, or no number): %s\n", settings_path.c_str(), unknown.c_str());
+    }
     if (history_reset) {
         history_valid = false; // the two denoisers' histories differ
     }

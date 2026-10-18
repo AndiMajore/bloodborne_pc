@@ -28,6 +28,9 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
 
 ## Live settings (re-read while the game runs)
 
+Each file's reload logs the keys it skipped ("keys in ... skipped (unknown, or no number)"): a
+typo, or a key that belongs in another of these files.
+
 - `user/ssgi.txt` (SSGI): `rt` (0/1), `rays` (1-8), `rt_clip` (1.5: the history clipped to the
   3x3 mean +- that many sigma), `rt_max` (2: a ray's radiance cap), `debug` (1 the bounce alone;
   2 hit classes: green seen, blue surface cache, red hidden; 3 the emission image; 4 the fire
@@ -79,6 +82,12 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
   - light list: `lights_dump` (a new value logs the next frame's list; every 600 frames a summary).
 
 ## Measured (RX 9070 XT, RADV, 0.6, FSR 4.1.1 2560x1440 -> 4K)
+
+Per pass: `BB_GPU_PROFILE=1` lists every RT pass under its own label (`rt sun shadow`, `rt spot
+map`, `rt reflect copy`, `rt reflect`, `rt probes`, `rtao surface`, `rt emission opaque`, `rt
+emission`, `rt fire lights`, `ssgi`, the `rtao` stages); the game's segment that a pass interrupts
+continues under its own label after it. The table below was taken by whole-frame A/B before those
+labels existed.
 
 0.6-pre1 itself is 1.1-1.4 ms slower than 0.51 at the Doll (ticket 53, a compute shader's outputs
 kept in system RAM): none of these numbers compares with `docs/rtao.md`'s 0.51 ones without that.

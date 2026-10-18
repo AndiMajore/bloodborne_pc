@@ -14,6 +14,7 @@
 #include "bbgpu/shaders/rt_probes_update_comp.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
+#include "render/vk_gpu_profiler.h"
 #include "render/vk_rtao.h"
 #include "textures/texture_cache.h"
 #include "upscale/vk_camera_motion.h"
@@ -187,7 +188,7 @@ void RtProbes::PollSettings() {
     settings_mtime = mtime;
     const float old_spacing = spacing;
     std::ifstream file(settings_path);
-    std::string line;
+    std::string line, unknown;
     while (std::getline(file, line)) {
         const auto eq = line.find('=');
         if (eq == std::string::npos || line.empty() || line[0] == '#') {
@@ -203,11 +204,15 @@ void RtProbes::PollSettings() {
         else if (key == "sky") sky = std::max(value, 0.0f);
         else if (key == "bias") bias = std::clamp(value, 0.0f, 2.0f);
         else if (key == "debug") debug = std::clamp(u32(std::max(value, 0.0f)), 0u, 2u);
+        else unknown += key + ' ';
     }
     reset |= spacing != old_spacing;
     std::printf("RT probes: settings: enabled %d, strength %.2f, spacing %.1f m, %u rays, hysteresis "
                 "%.2f, sky %.2f, bias %.2f, debug %u\n",
                 active ? 1 : 0, strength, spacing, rays, hysteresis, sky, bias, debug);
+    if (!unknown.empty()) {
+        std::printf("RT probes: keys in %s skipped (unknown, or no number): %s\n", settings_path.c_str(), unknown.c_str());
+    }
 }
 
 void RtProbes::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal,
@@ -327,6 +332,7 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
     };
     const bool clear = std::exchange(reset, false);
     const u32 probes = u32(Dims[0] * Dims[1] * Dims[2]);
+    const ProfileScope profile{0x5560Aull, "rt probes"};
     scheduler.RecordCrumb(
         {.name = "rt probes"},
         [update, apply, clear, probes, tlas, depth_view, normal_view, albedo_view, color_view, emission_view, w, h,

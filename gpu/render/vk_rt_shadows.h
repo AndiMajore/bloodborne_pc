@@ -50,6 +50,14 @@ public:
     }
     void OnFrameStart(u32 frame);
     void OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal);
+    /// The sun's resolve, the cascaded shadow map into the screen mask, and the final mask
+    /// pass: the only shaders whose constants are read.
+    static constexpr u64 ResolvePs = 0xf55643de;
+    static constexpr u64 MaskPs = 0xa291c498;
+    /// Whether a fragment shader's constants are read: tested per bind, before any memory check.
+    [[nodiscard]] static constexpr bool ReadsConstantsOf(u64 hash) noexcept {
+        return hash == ResolvePs || hash == MaskPs;
+    }
     /// A fragment shader's buffer as bound (by size: the slot numbering differs between paths).
     void OnShaderConstants(u64 hash, VAddr address, u64 size);
     /// Before each draw (its first colour target and pixel shader).

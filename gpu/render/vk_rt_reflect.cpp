@@ -13,6 +13,7 @@
 #include "bbgpu/shaders/rt_reflect_copy_comp.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
+#include "render/vk_gpu_profiler.h"
 #include "render/vk_rtao.h"
 #include "textures/texture_cache.h"
 #include "upscale/vk_camera_motion.h"
@@ -165,7 +166,7 @@ void RtReflections::PollSettings() {
     }
     settings_mtime = mtime;
     std::ifstream file(settings_path);
-    std::string line;
+    std::string line, unknown;
     while (std::getline(file, line)) {
         const auto eq = line.find('=');
         if (eq == std::string::npos || line.empty() || line[0] == '#') {
@@ -180,10 +181,14 @@ void RtReflections::PollSettings() {
         else if (key == "debug") debug = std::clamp(u32(std::max(value, 0.0f)), 0u, 2u);
         else if (key == "replace_ssr") replace_ssr = value != 0.0f;
         else if (key == "soften") soften = std::clamp(value, 0.0f, 4.0f);
+        else unknown += key + ' ';
     }
     std::printf("RT reflections: settings: enabled %d, mode %u, far %.0f m, strength %.2f, debug %u, "
                 "replace_ssr %d, soften %.2f\n",
                 active ? 1 : 0, mode, far, strength, debug, replace_ssr ? 1 : 0, soften);
+    if (!unknown.empty()) {
+        std::printf("RT reflections: keys in %s skipped (unknown, or no number): %s\n", settings_path.c_str(), unknown.c_str());
+    }
 }
 
 void RtReflections::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal,
@@ -336,6 +341,7 @@ void RtReflections::OnOpaqueScene(VideoCore::ImageId color_id) {
                  copy_valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined, compute,
                  vk::AccessFlagBits2::eShaderRead, vk::AccessFlagBits2::eShaderWrite);
     const CopyConstants constants{.full_size = {s32(w), s32(h)}, .half_size = {s32(hw), s32(hh)}};
+    const ProfileScope profile{0x55608ull, "rt reflect copy"};
     scheduler.RecordCrumb({.name = "rt reflect copy"},
                           [constants, color_view, copy = *copy_view, hw, hh,
                            pipeline = *copy_pipeline, layout = *copy_layout](vk::CommandBuffer cmdbuf) {
@@ -437,6 +443,7 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         .soften = material_view ? soften : 0.0f,
         .frame = frame,
     };
+    const ProfileScope profile{0x55609ull, "rt reflect"};
     scheduler.RecordCrumb(
         {.name = "rt reflect"},
         [constants, depth_view, normal_view, ssr_view, lit = *copy_view, emission_view, tlas, sw, sh,

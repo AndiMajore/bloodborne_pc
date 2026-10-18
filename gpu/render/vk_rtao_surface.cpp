@@ -14,6 +14,7 @@
 #include "bbgpu/shaders/rtao_surface_comp.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
+#include "render/vk_gpu_profiler.h"
 #include "textures/texture_cache.h"
 #include "upscale/vk_camera_motion.h"
 #include "vulkan/instance.h"
@@ -166,6 +167,7 @@ void RayTracedAO::OnOpaqueScene(VideoCore::ImageId color_id) {
         .count = count,
     };
     surface_cursor = (surface_cursor + count) % surface_total;
+    const ProfileScope profile{0x55605ull, "rtao surface"};
     scheduler.RecordCrumb({.name = "rtao surface"},
                           [constants, color_view, depth_view, count, pipeline = *surface_pipeline,
                            layout = *surface_layout](vk::CommandBuffer cmdbuf) {

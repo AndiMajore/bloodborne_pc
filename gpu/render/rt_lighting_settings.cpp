@@ -55,8 +55,9 @@ bool Apply(Settings& s, std::string_view key, float value) {
     return true;
 }
 
-uint32_t ApplyText(Settings& settings, std::string_view text) {
-    return Rtao::ForEachSetting(text, [&](std::string_view key, float number) { return Apply(settings, key, number); });
+uint32_t ApplyText(Settings& settings, std::string_view text, std::string* unknown) {
+    return Rtao::ForEachSetting(
+        text, [&](std::string_view key, float number) { return Apply(settings, key, number); }, unknown);
 }
 
 } // namespace RtLightingSettings

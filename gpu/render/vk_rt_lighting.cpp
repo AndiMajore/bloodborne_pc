@@ -45,7 +45,11 @@ void RtLighting::PollSettings() {
     settings_mtime = mtime;
     std::ifstream file(settings_path);
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    RtLightingSettings::ApplyText(settings, text);
+    std::string unknown;
+    RtLightingSettings::ApplyText(settings, text, &unknown);
+    if (!unknown.empty()) {
+        std::printf("RT lighting: keys in %s skipped (unknown, or no number): %s\n", settings_path.c_str(), unknown.c_str());
+    }
     std::printf("RT lighting: settings from %s: emission %.2f, fire light %.2f (base %.2f: %.2f x %.2f m, lift %.2f m, spark %.2f: "
                 "%.2f m, wrap %.2f, smooth %.2f, switch %.2f, hold %u, merge %.2f m), sun shadow %d, spot shadow %d "
                 "(%u, blur %u, soft %.2f m)\n",

@@ -86,4 +86,29 @@ private:
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
 
+/// A labelled segment for a pass of ours recorded between the game's (the RT passes): the segment
+/// that was open continues after it, so the game's work that follows keeps its own label.
+/// Nothing when profiling is off.
+class ProfileScope {
+public:
+    ProfileScope(u64 key, const char* name) : profiler{GpuProfiler::Get()} {
+        if (!profiler) {
+            return;
+        }
+        resume = profiler->Current();
+        profiler->Mark(key, [name] { return std::string{name}; });
+    }
+    ~ProfileScope() {
+        if (profiler && resume) {
+            profiler->Resume(resume);
+        }
+    }
+    ProfileScope(const ProfileScope&) = delete;
+    ProfileScope& operator=(const ProfileScope&) = delete;
+
+private:
+    GpuProfiler* profiler;
+    u64 resume = 0;
+};
+
 } // namespace Vulkan

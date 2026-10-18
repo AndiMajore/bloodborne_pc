@@ -8,6 +8,7 @@
 #include "bbgpu/shaders/rt_sun_shadow_comp.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
+#include "render/vk_gpu_profiler.h"
 #include "render/vk_rt_pipeline.h"
 #include "render/vk_rt_lights.h"
 #include "render/vk_rtao.h"
@@ -20,8 +21,6 @@
 namespace Vulkan {
 
 namespace {
-constexpr u64 SunResolvePs = 0xf55643de; // the cascaded shadow map into the screen mask
-constexpr u64 SunMaskPs = 0xa291c498;    // the final mask: AO and the sun's shadow
 constexpr u64 SunLightPs = 0xd92266b9;   // the sun's light (reads the mask's z)
 constexpr u64 GlobalLightPs = 0x3fe9e964; // the global pass, before it (reads the mask's y)
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
@@ -95,14 +94,14 @@ void RtShadows::OnShaderConstants(u64 hash, VAddr address, u64 size) {
     const auto* f = reinterpret_cast<const float*>(address);
     // The resolve's camera block is its only 864-byte buffer, the mask pass's coefficients its
     // only 32-byte one.
-    if (hash == SunResolvePs && size == 864) {
+    if (hash == ResolvePs && size == 864) {
         const float x = f[80], y = f[81], z = f[82];
         const float len = std::sqrt(x * x + y * y + z * z);
         if (len > 0.5f && len < 1.5f) {
             sun_dir = {x / len, y / len, z / len};
             sun_dir_frame = frame;
         }
-    } else if (hash == SunMaskPs && size == 32) {
+    } else if (hash == MaskPs && size == 32) {
         // Its two draws (two regions): y = f[1] s + f[5], z = f[2] s + f[6]; the channel that
         // carries the shadow is the one with a scale.
         if (sun_k_frame != frame) {
@@ -120,7 +119,7 @@ void RtShadows::OnShaderConstants(u64 hash, VAddr address, u64 size) {
 }
 
 void RtShadows::OnDraw(VideoCore::ImageId color, u64 ps_hash) {
-    if (ps_hash == SunMaskPs) {
+    if (ps_hash == MaskPs) {
         sun_mask = color;
         sun_mask_frame = frame;
         return;
@@ -238,6 +237,7 @@ void RtShadows::RecordSun() {
         .image = vk::Image(sun_vis),
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
+    const ProfileScope profile{0x55606ull, "rt sun shadow"};
     scheduler.RecordCrumb(
         {.name = "rt sun shadow"},
         [constants, to_write, tlas, depth_view, normal_view, mask_view, vis = *sun_vis_view, w, h,
@@ -378,6 +378,7 @@ void RtShadows::RecordSpotMap() {
         .image = vk::Image(spot_map),
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
+    const ProfileScope profile{0x55607ull, "rt spot map"};
     scheduler.RecordCrumb(
         {.name = "rt spot map"},
         [constants, to_write, to_write_blur, to_read, tlas, map = *spot_map_view, mid = *spot_blur_view, size,

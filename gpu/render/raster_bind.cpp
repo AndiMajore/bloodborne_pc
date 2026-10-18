@@ -840,7 +840,7 @@ void Rasterizer::BindGuestBuffer(const Shader::BufferResource& desc, const Gcn::
         buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
         return;
     }
-    if (rt_lighting->WantsShaderConstants() && stage.sw_stage == Shader::SwStage::Fragment &&
+    if (stage.sw_stage == Shader::SwStage::Fragment && rt_lighting->WantsShaderConstants(stage.pgm_hash) &&
         memory->IsValidGpuMapping(address, 0)) {
         rt_lighting->OnShaderConstants(stage.pgm_hash, address, memory->ClampRangeSize(address, vsharp.GetSize()));
     }
@@ -897,7 +897,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
     for (u32 index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
         if (const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, index) : nullptr) {
-            if (rt_lighting->WantsShaderConstants() && stage.sw_stage == Shader::SwStage::Fragment &&
+            if (stage.sw_stage == Shader::SwStage::Fragment && rt_lighting->WantsShaderConstants(stage.pgm_hash) &&
                 !desc.IsSpecial() && memory->IsValidGpuMapping(ring->address, 0)) {
                 rt_lighting->OnShaderConstants(stage.pgm_hash, ring->address,
                                                memory->ClampRangeSize(ring->address, ring->size));

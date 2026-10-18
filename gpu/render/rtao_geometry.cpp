@@ -296,7 +296,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     return true;
 }
 
-u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset) {
+u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset, std::string* unknown) {
     return ForEachSetting(text, [&](std::string_view key, float number) {
         const u32 denoise_before = settings.denoise;
         if (!Apply(settings, key, number)) {
@@ -304,7 +304,7 @@ u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset) {
         }
         history_reset |= settings.denoise != denoise_before;
         return true;
-    });
+    }, unknown);
 }
 
 } // namespace Rtao
