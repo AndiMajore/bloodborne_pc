@@ -79,6 +79,11 @@ public:
     [[nodiscard]] const RtLights& Lights() const noexcept {
         return *lights;
     }
+    /// The RT bounce light reads the fire lights this frame (SSGI with rt=1, before OnFrameStart):
+    /// without a reader they are not made (fire_light is on by default).
+    void SetFireReader(bool reads) const noexcept {
+        fire_reader = reads;
+    }
 
 private:
     void PollSettings();
@@ -91,6 +96,7 @@ private:
     std::unique_ptr<RtEmission> emission;
     bool wants_constants = false, wants_lights = false, wants_draws = false, wants_emission = false;
     bool lights_collected = false; // the frame that ended collected the light list
+    mutable bool fire_reader = false; // SetFireReader
     float dump_done = 0.0f;        // the last lights_dump value served
     u32 frame = 0;
     std::string settings_path;

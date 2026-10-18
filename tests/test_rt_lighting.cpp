@@ -144,16 +144,20 @@ static void EmissionEnd() {
 static void LightingSettings() {
     using RtLightingSettings::ApplyText;
     const RtLightingSettings::Settings defaults;
-    assert(!defaults.sun_shadow && !defaults.spot_shadow && defaults.fire_light == 0.0f &&
-           defaults.emission == 0.0f && !defaults.EmissionWanted()); // everything off
+    // Off by default except the fire lights (Andreas's choice at the stakes, 2026-10-18; they are
+    // made only while the RT bounce light reads them).
+    assert(!defaults.sun_shadow && !defaults.spot_shadow && defaults.emission == 0.0f);
+    assert(Near(defaults.fire_light, 0.3f) && defaults.EmissionWanted());
     RtLightingSettings::Settings s;
+    assert(ApplyText(s, "fire_light=0") == 1 && !s.EmissionWanted());
     assert(ApplyText(s, "fire_light=0.35 # the fires\nspot_shadow=1\tsun_shadow=0\nunknown=3 fire_smooth=2\n") == 4);
     assert(Near(s.fire_light, 0.35f) && s.spot_shadow && !s.sun_shadow && s.EmissionWanted());
     assert(Near(s.fire_smooth, 0.98f)); // clamped
     assert(ApplyText(s, "# spot_res=4096\nspot_res=100 spot_blur=x") == 1 && s.spot_res == 256);
     // The fire model's defaults are the ones chosen at the stakes (2026-10-18); fire_light switches it on.
     assert(Near(defaults.fire_switch, 0.5f) && defaults.fire_hold == 15 && Near(defaults.fire_merge, 1.0f));
-    assert(Near(defaults.fire_base, 0.7f) && Near(defaults.fire_spark, 0.5f) && Near(defaults.fire_base_size, 0.5f));
+    assert(Near(defaults.fire_base, 1.0f) && Near(defaults.fire_spark, 0.5f) && Near(defaults.fire_base_size, 0.2f));
+    assert(Near(defaults.fire_base_height, 2.0f) && Near(defaults.fire_spark_size, 0.5f));
     assert(defaults.fire_base_lift == 0.0f && ApplyText(s, "fire_base_lift=-9") == 1 && Near(s.fire_base_lift, -5.0f));
     assert(defaults.fire_rays == 1 && ApplyText(s, "fire_rays=20") == 1 && s.fire_rays == 8);
     assert(ApplyText(s, "fire_switch=0.5 fire_hold=12 fire_merge=0") == 3 && Near(s.fire_switch, 0.5f) &&

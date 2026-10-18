@@ -19,8 +19,8 @@ struct Settings {
     // lights near each other merged, their summed power averaged over seconds, anchored to the
     // game's own fire light) as a large upright cylinder, and the tile lights as spheres (sparks)
     // carrying the flicker. The defaults are the ones chosen at the Central Yharnam stakes
-    // (2026-10-18); fire_light switches it all on.
-    float fire_light = 0.0f;      // x their light (0: off)
+    // (2026-10-18), on by default; they light only while the RT bounce light (ssgi.txt rt=1) reads them.
+    float fire_light = 0.3f;      // x their light (0: off)
     float fire_range = 12.0f;     // metres a fire light reaches
     float fire_wrap = 1.0f;       // 0..1: the cosine wrapped round (thin swaying leaves stop strobing)
     uint32_t fire_rays = 1;       // shadow rays to the fires per half-res pixel (1-8, at most SSGI's rays)
@@ -34,15 +34,15 @@ struct Settings {
     uint32_t fire_hold = 15;      // ... and for this many frames after it moved
     float fire_merge = 1.0f;      // metres (horizontally): lights nearer than this merged into the strongest (0: off)
     bool fire_debug = false;      // the bases (cyan cylinders) and the sparks (orange spheres) drawn into the scene
-    float fire_base = 0.7f;         // x a base's averaged power (its brightness)
+    float fire_base = 1.0f;         // x a base's averaged power (its brightness)
     float fire_base_lift = 0.0f;    // metres: the base moved up (negative: down) from the game's fire light it is anchored to
     float fire_spark = 0.5f;        // x a spark's power
-    float fire_base_size = 0.5f;    // metres: the base cylinder's radius
-    float fire_base_height = 3.0f;  // metres: its height, 40 % below the fire's place
+    float fire_base_size = 0.2f;    // metres: the base cylinder's radius
+    float fire_base_height = 2.0f;  // metres: its height, 40 % below the fire's place
     float fire_base_smooth = 0.98f; // 0..0.995: the share of last frame's base power and place
     float fire_base_fade = 0.985f;  // 0..0.999: per frame without its fire on screen (fades over seconds)
     float fire_base_merge = 1.5f;   // metres (horizontal): tile lights within this are one fire
-    float fire_spark_size = 0.7f;   // metres: a spark sphere's radius
+    float fire_spark_size = 0.5f;   // metres: a spark sphere's radius
     // Ray-traced shadows (64, vk_rt_shadows.cpp).
     bool sun_shadow = false;      // the sun's shadow by ray tracing into the game's shadow mask
     float sun_spread = 0.01f;     // radians the sun rays spread over

@@ -268,6 +268,10 @@ void ScreenSpaceGI::OnFrameStart() {
     done_this_frame = false;
     ++frame;
     PollSettings();
+    // The fire lights are made only for the ray-traced gather (the march does not read them).
+    if (lighting) {
+        lighting->SetFireReader(enabled && rt && gather_rt_pipeline && rtao);
+    }
 }
 
 void ScreenSpaceGI::PollSettings() {

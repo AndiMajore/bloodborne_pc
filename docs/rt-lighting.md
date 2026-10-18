@@ -2,8 +2,9 @@
 
 Effects that reuse the acceleration structures the ray-traced AO builds every frame
 (`docs/rtao.md`). All experimental and **all off by default**; they need the RTAO on a GPU with
-Vulkan ray queries. Prototypes on the branch `rt-lighting-exp`: none of them is judged yet, and
-none is in `fork-0.6` (ticket 65).
+Vulkan ray queries. Prototypes on the branch `rt-lighting-exp`, none in `fork-0.6` (ticket 65).
+Two are judged and on by default (2026-10-18): the fire lights (`fire_light` 0.3) and the RT
+bounce light's colour denoiser (`rt_denoise`); both act only with the RT bounce light (`rt=1`).
 
 The RTAO exports its scene and nothing else: `RayTracedAO::FrameTlas` (the TLAS of this frame in
 view space, valid after the AO pass until the next frame's) and `FrameSurface` (the surface
@@ -21,7 +22,7 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
 | Probe GI | `BB_RT_PROBES=1` (off), `rtprobes.txt` | SSGI (use one of them) | a 16x8x16 grid of probes around the camera (`spacing` 3 m), 64 rays per probe a frame, L1 spherical harmonics with hysteresis; per pixel the eight surrounding probes blended. No depth maps yet: thin walls can leak |
 | Surface cache | `surface=1` in `rtao.txt` (0) | (feeds the effects above) | radiance per static pool triangle (8 bytes, ~23 MiB at the full pool), refreshed from the lit screen in slices; a ray hit on the static instance reads it when the hit is not on screen |
 | The transparents' light (emission, 63) | `emission=` in `rtlighting.txt` (0) | (feeds SSGI, probes, reflections) | fires, sparks and glows are blended after the opaque pass, so the effects never saw them. The opaque scene is kept at a quarter of its size at the first transparent draw; at the end of the transparents (the first draw into another target or without the scene depth: before the fog composite) the difference is their light; grey additions (smoke) dropped, the rest blurred. Read the frame after at a hit's screen position. Smoke drifting in front of a far surface makes that surface glow: the fire lights below replace it |
-| Fire lights (63, 67) | `fire_light=` in `rtlighting.txt` (0); needs SSGI `rt=1` | (adds to the RT bounce light) | from the emission, per 64x64 tile a spark: the brightest texel (kept while it stays in its tile, `fire_switch`/`fire_hold`), its depth the nearest one the bright texels around it agree on, its power the tile's emission x its texels' world area, matched with last frame's by place and smoothed; sparks near each other (`fire_merge`) merged. Per fire a steady base: the sparks near it merged, power and place averaged over seconds, snapped to the game's own fire light (its light list), fading when off screen. A base is a large upright cylinder, a spark a sphere; a compact list of both is read per pixel, one picked per shadow ray (`fire_rays`, 1), traced to a random point of its shape each frame (an area light the history averages), the cosine wrapped (`fire_wrap`). Off-screen fires give no light beyond their base's fade |
+| Fire lights (63, 67) | `fire_light=` in `rtlighting.txt` (0.3: on); made only while SSGI `rt=1` reads them | (adds to the RT bounce light) | from the emission, per 64x64 tile a spark: the brightest texel (kept while it stays in its tile, `fire_switch`/`fire_hold`), its depth the nearest one the bright texels around it agree on, its power the tile's emission x its texels' world area, matched with last frame's by place and smoothed; sparks near each other (`fire_merge`) merged. Per fire a steady base: the sparks near it merged, power and place averaged over seconds, snapped to the game's own fire light (its light list), fading when off screen. A base is a large upright cylinder, a spark a sphere; a compact list of both is read per pixel, one picked per shadow ray (`fire_rays`, 1), traced to a random point of its shape each frame (an area light the history averages), the cosine wrapped (`fire_wrap`). Off-screen fires give no light beyond their base's fade |
 | Ray-traced shadows (64) | `sun_shadow=`, `spot_shadow=` in `rtlighting.txt` (0) | the game's sun shadow in its screen mask; the shadowed spot's 512x512 shadow map | sun: before the global pass and the sun's light read the mask, one ray per pixel towards the sun (its direction from the shadow resolve's constants) writes the shadow in the mask's region channel with the game's scale; where a ray finds nothing in the RT scene the game's shadow stays, shrunk by `sun_erode`. Spot: from the light list's record of the shadowed spot (the frame before), a `spot_res` map ray traced from the light (depth and its square as the game's variance map stores them), blurred (`spot_blur`) with the variance capped (`spot_soft`), swapped in for the game's at bind time. The two most invasive hooks on the branch (a game target written; a bound texture replaced by address) |
 | The game's light list (59) | (a consumer: the spot shadow, `lights_dump`) | (none) | the game's light passes draw screen tiles per pixel-shader variant, each binding a buffer of light records (`gpu/render/rt_light_records.h`); decoded once a frame per buffer into world-space points and spots. Not used for lighting yet |
 
@@ -31,7 +32,8 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
   3x3 mean +- that many sigma), `rt_max` (2: a ray's radiance cap), `debug` (1 the bounce alone;
   2 hit classes: green seen, blue surface cache, red hidden; 3 the emission image; 4 the fire
   lights alone).
-  The colour denoiser (tickets 36, 37, 42; off): `rt_denoise` (0/1: instead of the gather's own
+  The colour denoiser (tickets 36, 37, 42; on by default: it removes the fire light's
+  checkerboard with one shadow ray): `rt_denoise` (1/0: instead of the gather's own
   clipped history, the rays of the frame accumulated on the motion vectors where depth and normal
   agree, up to `denoise_frames` (16), the history clipped to the raw 3x3 mean +- `denoise_clip`
   sigma (2; 0 off), then `denoise_passes` (3) edge-avoiding a-trous passes weighted by the plane
@@ -44,21 +46,21 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
 - `user/rtprobes.txt` (probe GI): `enabled`, `strength` (4), `spacing` (m), `rays` (1-64),
   `hysteresis`, `sky`, `bias` (m), `debug` (1 the irradiance alone; 2 coverage).
 - `user/rtao.txt` (the AO; of the experiments only): `surface` (0/1), `surface_budget`.
-- `user/rtlighting.txt` (`BB_RTLIGHTING_FILE`; everything below off by default):
+- `user/rtlighting.txt` (`BB_RTLIGHTING_FILE`; everything below off by default but the fire lights):
   - transparents' light: `emission` (0-16), `emission_sat` (0.35; 0 all), `emission_blur` (8
     quarter-size texels).
   - fire lights (defaults: the ones chosen at the Central Yharnam stakes, 2026-10-18):
-    `fire_light` (0-64; 0 off), `fire_range` (12 m), `fire_rays` (1: shadow rays per half-res
+    `fire_light` (0.3; 0 off), `fire_range` (12 m), `fire_rays` (1: shadow rays per half-res
     pixel; 2 cost 0.27 ms more at the stakes), `fire_wrap` (1), `fire_debug` (1: the bases cyan,
     the sparks orange, a light's point a yellow dot).
-    The sparks: `fire_spark` (0.5: x their power), `fire_spark_size` (0.7 m: the sphere's radius),
+    The sparks: `fire_spark` (0.5: x their power), `fire_spark_size` (0.5 m: the sphere's radius),
     `fire_smooth` (0.9: last frame's share of the power), `fire_smooth_pos` (0.9: of the place),
     `fire_pull` (0.3 m), `fire_min` (0.4: a tile's brightest texel needed; a light goes out below
     half of it), `fire_switch` (0.5) and `fire_hold` (15 frames: a spark stays at its texel unless
     the tile's new brightest is that much brighter, and for that long after it moved), `fire_merge`
     (1 m: sparks nearer than this horizontally become the strongest of them).
-    The bases: `fire_base` (0.7: x the averaged power: the brightness), `fire_base_size` (0.5 m
-    radius), `fire_base_height` (3 m, 40 % below the fire's place), `fire_base_lift` (0 m: the base
+    The bases: `fire_base` (1: x the averaged power: the brightness), `fire_base_size` (0.2 m
+    radius), `fire_base_height` (2 m, 40 % below the fire's place), `fire_base_lift` (0 m: the base
     moved up, negative down, from the game's fire light it is anchored to), `fire_base_smooth` (0.98 a frame),
     `fire_base_fade` (0.985 a frame off screen), `fire_base_merge` (1.5 m: sparks within this
     sideways join a base even when their depth is off along the line of sight).
@@ -92,8 +94,8 @@ everything on with Andreas's settings 16.35-16.50 ms, at the vblank. The game's 
 
 - Characters (the per-frame BLAS) are never in the surface cache: a hidden hit on one stays dark.
 - Surfaces the camera never saw stay dark; the cache bakes view-dependent highlights.
-- The colour denoiser (`rt_denoise`, 36/37/42) is a first version for the RT SSGI only and off; the
-  reflections still rely on the game's SSR blur levels. Not yet judged in motion.
+- The colour denoiser (`rt_denoise`, 36/37/42) is for the RT SSGI only (on by default since
+  2026-10-18); the reflections still rely on the game's SSR blur levels.
 - Reach limited to the static BLAS's (the AO's distance + margin): far occluders of the sun are the
   game's (cascaded) shadow.
 - The SSR target's semantics were read from the game's shader (not shipped): colour x weight with

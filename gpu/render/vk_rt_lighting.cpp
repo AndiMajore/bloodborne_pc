@@ -58,12 +58,13 @@ void RtLighting::PollSettings() {
 
 void RtLighting::UpdateWants() {
     const bool on = rtao.Enabled();
+    const bool fires = settings.fire_light > 0.0f && fire_reader;
     wants_constants = on && shadows->WantsConstants();
     // The light list: for the spot's shadow, a dump, or the fires' bases (anchored to its fire lights).
     wants_lights = on && (settings.spot_shadow || settings.lights_dump != dump_done ||
-                          settings.fire_light > 0.0f);
+                          fires);
     wants_draws = on && shadows->WantsDraws();
-    wants_emission = on && settings.EmissionWanted();
+    wants_emission = on && (settings.emission > 0.0f || fires);
 }
 
 void RtLighting::OnFrameStart() {

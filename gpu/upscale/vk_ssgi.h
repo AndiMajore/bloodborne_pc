@@ -76,9 +76,9 @@ private:
     u32 rays = 2;       // per half-res pixel (rt)
     float rt_max = 2.0f;  // rt: a ray's radiance capped to this (lamps and candles as fireflies)
     float rt_clip = 1.5f; // rt: history clipped to this frame's 3x3 mean +- rt_clip sigma
-    // rt_denoise=1: the colour denoiser instead of the gather's own history (experimental, off):
+    // rt_denoise=1: the colour denoiser instead of the gather's own history (default since 2026-10-18):
     // temporal accumulation on the motion vectors, then edge-avoiding a-trous passes.
-    bool rt_denoise = false;
+    bool rt_denoise = true;       // on by default since 2026-10-18 (Andreas: it removes the fire light's checkerboard)
     float denoise_frames = 16.0f; // the history's length cap
     float denoise_clip = 2.0f;    // history clipped to the raw 3x3 mean +- that many sigma (0: off)
     u32 denoise_passes = 3;       // a-trous passes (steps 1, 2, 4, ...)
