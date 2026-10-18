@@ -32,6 +32,10 @@
 // averaged over seconds (`base_smooth`); a light near no base starts one (faded in from nothing);
 // a base whose fire is not on screen keeps its light and fades (`base_fade` a frame), so turning
 // away from a fire does not switch its light off at once.
+// A light's depth errs along the line of sight (a flicker puts it on the stake one frame and on the
+// wall behind the next): it joins a base it is near sideways (base_merge, horizontally) even when
+// it is off in depth by up to half the camera's distance, and lights that agree in depth too move
+// the base ten times as much as the others. Without that each depth jump started a base of its own behind or before the fire.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -63,7 +67,10 @@ layout(push_constant) uniform Constants {
     float switch_ratio; // sticky lights: a new peak this much brighter than the flame at the light's place (0: off)
     float hold;         // sticky lights: frames a light stays after it moved
     float merge;        // metres: lights nearer than this (horizontally) merged into the strongest (0: off)
-    uint depth_mode;    // 0: the nearest depth under the tile's bright flame; 1: the median around the peak
+    uint depth_mode;    // 0: the nearest depth under the tile's bright flame; 1: the nearest well-supported depth
+    uint anchor_count;  // mode 2: the game's own fire lights (its light list), nearest the camera first
+    uint pad1, pad2;
+    vec4 anchors[6];    // world position, w the light's radius
 };
 
 const uint MaxBases = 32u;
@@ -202,13 +209,28 @@ void Match() {
     imageStore(lights_img, index + ivec2(0, 2), vec4(held, 0.0, 0.0, 0.0));
 }
 
+// A light (or base) `p` against base `b` from the camera: x the sideways distance (horizontal),
+// y the distance along the line of sight.
+vec2 FromBase(vec3 b, vec3 p) {
+    const vec3 camera = vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
+    const vec3 ray = normalize(b - camera);
+    const vec3 d = p - b;
+    const float along = dot(d, ray);
+    const vec3 side = d - along * ray;
+    return vec2(length(side.xz), abs(along));
+}
+float DepthReach(vec3 b) {
+    const vec3 camera = vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
+    return max(base_merge, 0.5 * distance(b, camera));
+}
+
 void Bases() {
     if (gl_GlobalInvocationID.x != 0u) {
         return;
     }
     const uint n = min(bases, MaxBases);
     vec3 position[MaxBases], power[MaxBases], sum_position[MaxBases], sum_power[MaxBases];
-    float weight[MaxBases];
+    float weight[MaxBases], place_weight[MaxBases];
     bool alive[MaxBases], fresh[MaxBases];
     for (uint b = 0u; b < n; ++b) {
         const ivec2 at = ivec2(count + b, 0);
@@ -221,6 +243,7 @@ void Bases() {
         sum_position[b] = vec3(0.0);
         sum_power[b] = vec3(0.0);
         weight[b] = 0.0;
+        place_weight[b] = 0.0;
     }
     for (uint i = 0u; i < count; ++i) {
         const vec4 p = imageLoad(lights_img, ivec2(i, 0));
@@ -233,11 +256,15 @@ void Bases() {
             continue;
         }
         int nearest = -1;
-        float best = base_merge;
+        float best = 1e9;
         for (uint b = 0u; b < n; ++b) {
-            const float d = Horizontal(position[b], p.xyz);
-            if (alive[b] && d < best) {
-                best = d;
+            if (!alive[b]) {
+                continue;
+            }
+            const vec2 d = FromBase(position[b], p.xyz);
+            const float score = d.x + 0.25 * d.y;
+            if (d.x < base_merge && d.y < DepthReach(position[b]) && score < best) {
+                best = score;
                 nearest = int(b);
             }
         }
@@ -254,27 +281,55 @@ void Bases() {
                 continue; // more fires than slots
             }
         }
-        sum_position[nearest] += p.xyz * w;
+        // Its power in full; its place in full when it agrees in depth as well, else a tenth (one
+        // frame's jump barely moves the base; a base started at a wrong depth still finds the fire).
         sum_power[nearest] += q;
         weight[nearest] += w;
+        const float pw = fresh[nearest] || FromBase(position[nearest], p.xyz).y < base_merge ? w : 0.1 * w;
+        sum_position[nearest] += p.xyz * pw;
+        place_weight[nearest] += pw;
     }
     for (uint b = 0u; b < n; ++b) {
         if (!alive[b]) {
             continue;
         }
         if (weight[b] > 0.0) {
-            position[b] = fresh[b] ? sum_position[b] / weight[b]
-                                   : mix(sum_position[b] / weight[b], position[b], base_smooth);
+            if (place_weight[b] > 0.0) {
+                position[b] = fresh[b] ? sum_position[b] / place_weight[b]
+                                       : mix(sum_position[b] / place_weight[b], position[b], base_smooth);
+            }
             power[b] = mix(sum_power[b], power[b], base_smooth);
         } else {
             power[b] *= base_fade;
         }
         alive[b] = Luma(power[b]) > 1e-4 || fresh[b];
     }
+    // A base lined up with one of the game's own fire lights takes that light's place: it is the
+    // fire's, exact and fixed (the flame's depth is a guess that flickers between the stake and
+    // what is behind it).
+    for (uint b = 0u; b < n; ++b) {
+        if (!alive[b]) {
+            continue;
+        }
+        float best = 1e9;
+        int anchor = -1;
+        for (uint a = 0u; a < anchor_count; ++a) {
+            const vec2 d = FromBase(position[b], anchors[a].xyz);
+            const float score = d.x + 0.25 * d.y;
+            if (d.x < base_merge && d.y < DepthReach(position[b]) && score < best) {
+                best = score;
+                anchor = int(a);
+            }
+        }
+        if (anchor >= 0) {
+            position[b] = anchors[anchor].xyz;
+        }
+    }
     // Two bases that drifted onto one fire: the weaker joins the stronger.
     for (uint b = 0u; b < n; ++b) {
         for (uint c = b + 1u; c < n && alive[b]; ++c) {
-            if (alive[c] && Horizontal(position[b], position[c]) < 0.5 * base_merge) {
+            const vec2 d = FromBase(position[b], position[c]);
+            if (alive[c] && d.x < 0.5 * base_merge && d.y < DepthReach(position[b])) {
                 const bool keep_b = Luma(power[b]) >= Luma(power[c]);
                 const uint keep = keep_b ? b : c, drop = keep_b ? c : b;
                 power[keep] = max(power[keep], power[drop]);

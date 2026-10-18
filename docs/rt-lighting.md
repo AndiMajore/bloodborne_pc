@@ -67,7 +67,10 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
     (`fire_base_smooth` 0.98 a frame), x this, as a slim upright cylinder `fire_base_size` (0.3 m)
     by `fire_base_height` (2.5 m, 40 % below); a fire gone from the screen fades by
     `fire_base_fade` (0.985) a frame), `fire_spark` (0.5: the per-tile lights' power, now spheres of
-    `fire_spark_size` 0.3 m). `fire_debug` draws the bases cyan.
+    `fire_spark_size` 0.3 m). A light joins a base it is near sideways even when its depth is off
+    (along the line of sight, up to half the camera's distance), and moves it only a tenth as much
+    then; `fire_base_anchor` (1) snaps a base to the game's own fire light (a warm point light of
+    its light list) lined up with it, exact and fixed. `fire_debug` draws the bases cyan.
   - shadows: `sun_shadow` (0/1), `sun_spread` (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),
     `sun_debug` (1 rays only, 2 reversed, 4 the mask in full shadow: a write test);
     `spot_shadow` (0/1), `spot_res` (1024), `spot_blur` (3 texels), `spot_soft` (0.2 m),

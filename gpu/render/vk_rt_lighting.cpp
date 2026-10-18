@@ -17,7 +17,8 @@ RtLighting::RtLighting(const Instance& instance, Scheduler& scheduler, VideoCore
     lights = std::make_unique<RtLights>(camera_motion);
     shadows = std::make_unique<RtShadows>(instance, scheduler, texture_cache, runtime, camera_motion, rtao, *lights,
                                           settings);
-    emission = std::make_unique<RtEmission>(instance, scheduler, texture_cache, runtime, camera_motion, rtao, settings);
+    emission = std::make_unique<RtEmission>(instance, scheduler, texture_cache, runtime, camera_motion, rtao, *lights,
+                                            settings);
     if (const char* file = std::getenv("BB_RTLIGHTING_FILE"); file && *file) {
         settings_path = file;
     } else {
@@ -55,7 +56,9 @@ void RtLighting::PollSettings() {
 void RtLighting::UpdateWants() {
     const bool on = rtao.Enabled();
     wants_constants = on && shadows->WantsConstants();
-    wants_lights = on && (settings.spot_shadow || settings.lights_dump != dump_done);
+    // The light list: for the spot's shadow, a dump, or the fires' bases' anchors.
+    wants_lights = on && (settings.spot_shadow || settings.lights_dump != dump_done ||
+                          (settings.fire_base > 0.0f && settings.fire_base_anchor));
     wants_draws = on && shadows->WantsDraws();
     wants_emission = on && settings.EmissionWanted();
 }

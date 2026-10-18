@@ -45,6 +45,7 @@ struct Settings {
     float fire_base_fade = 0.985f;  // 0..0.999: per frame without its fire on screen (fades over seconds)
     float fire_base_merge = 1.5f;   // metres (horizontal): tile lights within this are one fire
     float fire_spark_size = 0.3f;   // metres: a spark sphere's radius
+    bool fire_base_anchor = true;   // a base snaps to the game's own fire light (its light list) when one lines up with it
     // Ray-traced shadows (64, vk_rt_shadows.cpp).
     bool sun_shadow = false;      // the sun's shadow by ray tracing into the game's shadow mask
     float sun_spread = 0.01f;     // radians the sun rays spread over

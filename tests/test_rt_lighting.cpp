@@ -158,7 +158,8 @@ static void LightingSettings() {
     assert(defaults.fire_merge == 0.0f && defaults.fire_depth == 0);
     assert(ApplyText(s, "fire_merge=1.5 fire_depth=1") == 2 && Near(s.fire_merge, 1.5f) && s.fire_depth == 1);
     // Two-part fires (67): off by default, clamped.
-    assert(defaults.fire_base == 0.0f);
+    assert(defaults.fire_base == 0.0f && defaults.fire_base_anchor);
+    assert(ApplyText(s, "fire_base_anchor=0") == 1 && !s.fire_base_anchor);
     assert(ApplyText(s, "fire_base=0.7 fire_base_smooth=1 fire_spark=0.4") == 3);
     assert(Near(s.fire_base, 0.7f) && Near(s.fire_base_smooth, 0.995f) && Near(s.fire_spark, 0.4f));
     // The RTAO's own keys are not the experiments': rtlighting.txt ignores them.

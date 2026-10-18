@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_rt_emission.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <vk_mem_alloc.h>
 #include "bbgpu/shaders/rt_fire_debug_comp.h"
@@ -9,6 +10,7 @@
 #include "render/runtime.h"
 #include "render/scheduler.h"
 #include "render/vk_rt_pipeline.h"
+#include "render/vk_rt_lights.h"
 #include "render/vk_rtao.h"
 #include "textures/texture_cache.h"
 #include "upscale/vk_camera_motion.h"
@@ -46,8 +48,12 @@ struct FireLightConstants {
     float hold;
     float merge;
     u32 depth_mode;
+    u32 anchor_count; // the game's fire lights below (bases snap to them)
+    std::array<u32, 2> pad;
+    std::array<std::array<float, 4>, 6> anchors; // world position, w its radius
 };
-static_assert(sizeof(FireLightConstants) == 148);
+static_assert(sizeof(FireLightConstants) == 256);
+constexpr u32 MaxAnchors = 6;
 struct FireDebugConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -91,9 +97,10 @@ u64 Key(VideoCore::ImageId id) {
 
 RtEmission::RtEmission(const Instance& instance, Scheduler& scheduler, VideoCore::TextureCache& texture_cache,
                        Runtime& runtime, CameraMotion& camera_motion, const RayTracedAO& rtao,
-                       const RtLightingSettings::Settings& settings)
+                       const RtLights& game_lights, const RtLightingSettings::Settings& settings)
     : instance{instance}, scheduler{scheduler}, texture_cache{texture_cache}, runtime{runtime},
-      camera_motion{camera_motion}, rtao{rtao}, settings{settings}, views{instance, scheduler} {}
+      camera_motion{camera_motion}, rtao{rtao}, game_lights{game_lights}, settings{settings},
+      views{instance, scheduler} {}
 
 RtEmission::~RtEmission() = default;
 
@@ -288,7 +295,7 @@ void RtEmission::RecordFireLights() {
     lights_out = prev == 1 ? 2 : 1;
     Barrier(scheduler, vk::Image(lights_image), lights_written ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined,
             vk::AccessFlagBits2::eShaderRead, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
-    const FireLightConstants constants{
+    FireLightConstants constants{
         .inv_view = camera_motion.InvView(),
         .proj = proj,
         .full_size = {float(depth.info.size.width), float(depth.info.size.height)},
@@ -309,6 +316,31 @@ void RtEmission::RecordFireLights() {
         .merge = settings.fire_merge,
         .depth_mode = settings.fire_depth,
     };
+    if (constants.bases && settings.fire_base_anchor) {
+        // The game's warm point lights nearest the camera (its own fire lights: orange, not the
+        // grey fill lights), last frame's list.
+        const auto inv_view = camera_motion.InvView();
+        const std::array<float, 3> camera{inv_view[3], inv_view[7], inv_view[11]};
+        std::array<std::pair<float, const RtLightRecords::SceneLight*>, 64> warm{};
+        u32 n = 0;
+        for (const auto& light : game_lights.FrameLights()) {
+            const auto& c = light.color;
+            if (light.spot || !(c[0] > 1.3f * c[2] && c[0] >= c[1] && c[1] >= c[2]) || n == warm.size()) {
+                continue;
+            }
+            float d2 = 0.0f;
+            for (int i = 0; i < 3; ++i) {
+                d2 += (light.position[i] - camera[i]) * (light.position[i] - camera[i]);
+            }
+            warm[n++] = {d2, &light};
+        }
+        std::sort(warm.begin(), warm.begin() + n, [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (u32 i = 0; i < std::min(n, MaxAnchors); ++i) {
+            const auto& l = *warm[i].second;
+            constants.anchors[i] = {l.position[0], l.position[1], l.position[2], l.radius};
+        }
+        constants.anchor_count = std::min(n, MaxAnchors);
+    }
     // The bases carry on from last frame's when there were any and no cut came between.
     const bool bases_continued = continued && bases_frame + 1 == frame;
     if (constants.bases) {

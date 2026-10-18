@@ -30,11 +30,12 @@ class Scheduler;
 class Runtime;
 class CameraMotion;
 class RayTracedAO;
+class RtLights;
 
 class RtEmission {
 public:
     RtEmission(const Instance& instance, Scheduler& scheduler, VideoCore::TextureCache& texture_cache,
-               Runtime& runtime, CameraMotion& camera_motion, const RayTracedAO& rtao,
+               Runtime& runtime, CameraMotion& camera_motion, const RayTracedAO& rtao, const RtLights& lights,
                const RtLightingSettings::Settings& settings);
     ~RtEmission();
 
@@ -88,6 +89,7 @@ private:
     Runtime& runtime;
     CameraMotion& camera_motion;
     const RayTracedAO& rtao;
+    const RtLights& game_lights; // the game's light list (59): the fires' bases anchored to its fire lights
     const RtLightingSettings::Settings& settings;
     RtViewCache views;
     u32 frame = 0;
