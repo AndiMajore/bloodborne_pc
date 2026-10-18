@@ -52,8 +52,18 @@ if [[ ${BB_SAVE_LOG:-} == 1 ]]; then
     # this script replaced the launcher, and closing that pipe unmounted the store under it
     # ("python3: Software caused connection abort").
     exec {log_fd}>"$logs/$stamp.log"
+    # BB_CRASH_WATCH (default 1 while the exit resets are investigated): the output also goes to
+    # the systemd journal, and tools/crash_watch.sh logs the GPU's state there once a second. The
+    # PC has reset itself after the game was quit; a file's last ~30 s are lost in that (btrfs
+    # commits every 30 s), the journal's crit lines are on disk at once. After a reset:
+    # journalctl -b -1 -t bbport -t bbport-watch
+    journal_fd=""
+    if [[ ${BB_CRASH_WATCH:-1} == 1 ]] && command -v systemd-cat >/dev/null; then
+        exec {journal_fd}> >(systemd-cat -t bbport -p info)
+        bash "$PWD/tools/crash_watch.sh" $$ >/dev/null 2>&1 &
+    fi
     # Bash builtins only (the AppImage's PATH has no tee).
-    exec > >(while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; printf '%s\n' "$line" >&$log_fd; done) 2>&1
+    exec > >(while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; printf '%s\n' "$line" >&$log_fd; [[ -n $journal_fd ]] && printf '%s\n' "$line" >&$journal_fd; done) 2>&1
 fi
 # Shader packs enabled in the launcher (Experimental shaders): named here so the log shows them.
 if [[ -n ${BB_SHADER_PACKS:-} ]]; then
