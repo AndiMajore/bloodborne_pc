@@ -166,7 +166,7 @@ struct Settings {
     float emission_sat = 0.35f;  // only light this saturated counts in full (fire, embers; not grey smoke); 0: all
     u32 emission_blur = 8;       // the emission's Gaussian radius in quarter-size texels (a glowing volume); 0: none
     float emission = 0.0f;       // experimental: the transparents' light (fires) for the RT lighting effects, x this (0: off; fire_light replaces it: smoke over a far surface made it glow)
-    float fire_light = 0.5f;     // experimental: the fires as point lights with shadow rays in the RT SSGI, x this (0: off)
+    float fire_light = 0.0f;     // experimental: the fires as point lights with shadow rays in the RT SSGI, x this (0: off)
     float fire_shadow = 0.0f;    // 0..1: the fires' unshadowed light taken away again (the game's own fire light, darkened where blocked)
     float fire_range = 12.0f;    // metres a fire light reaches
     float fire_size = 0.75f;     // metres: a fire light's radius (its cylinder's); lit from and traced to anywhere in it (soft shadows, the stake does not hide all of it)
@@ -177,12 +177,12 @@ struct Settings {
     float fire_smooth_pos = 0.5f; // 0..0.98: the share of last frame's place (higher: steadier, but shadows trail when moving)
     float fire_pull = 0.3f;      // metres a fire light sits in front of the surface behind the flame
     float fire_min = 0.3f;       // a tile's brightest emission texel must reach this to make a light (lower: fire-lit smoke makes lights on what is behind it)
-    bool sun_shadow = true;      // experimental: the sun's shadow by ray tracing (the game's where a ray finds nothing near)
+    bool sun_shadow = false;     // experimental (64): the sun's shadow by ray tracing (the game's where a ray finds nothing near)
     float sun_spread = 0.01f;    // radians the sun rays spread over (a soft edge)
     u32 sun_erode = 4;           // pixels: the game's shadow is shrunk by this where it is used
     float sun_far = 200.0f;
     u32 sun_debug = 0;
-    bool spot_shadow = true;     // experimental: the shadowed spot's 512x512 map replaced by a ray-traced one
+    bool spot_shadow = false;    // experimental (64): the shadowed spot's 512x512 map replaced by a ray-traced one
     u32 spot_res = 1024;         // its size (the 20 deg spot at the Central Yharnam lamp: under a centimetre a texel; 2048 cost ~0.6 ms)
     u32 spot_blur = 3;           // texels of Gaussian on its moments: soft edges (0: hard; lower looked too harsh to Andreas; spot_soft keeps overlaps dark)
     float spot_soft = 0.2f;      // metres: the blurred map's largest depth spread (overlapping casters' bright seams; 0: no cap)
