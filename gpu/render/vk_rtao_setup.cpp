@@ -129,7 +129,8 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
                                        trace_binding(2, DT::eSampledImage), trace_binding(3, DT::eSampledImage),
                                        trace_binding(4, DT::eStorageImage),
                                        trace_binding(5, DT::eAccelerationStructureKHR),
-                                       trace_binding(6, DT::eUniformBuffer), trace_binding(7, DT::eSampledImage)};
+                                       trace_binding(6, DT::eUniformBuffer), trace_binding(7, DT::eSampledImage),
+                                       trace_binding(8, DT::eStorageImage)}; // shared rays' records (69)
     const std::array apply_bindings = {binding(0, DT::eSampledImage), binding(1, DT::eSampledImage),
                                        binding(2, DT::eStorageImage)};
     make_layouts(expand_bindings, sizeof(ExpandConstants), expand_desc_layout, expand_layout);

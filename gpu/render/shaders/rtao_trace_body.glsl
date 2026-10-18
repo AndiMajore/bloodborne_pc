@@ -11,6 +11,11 @@ layout(binding = 2) uniform texture2D motion_tex;  // full res, pixels, previous
 layout(binding = 3) uniform texture2D prev_tex;    // half res, previous output
 layout(binding = 4, rg16f) uniform writeonly image2D out_img; // half res: ao, view z
 layout(binding = 5) uniform accelerationStructureEXT scene;
+// Shared rays (ticket 69, records=1): per ray one texel, layer r: x, y the hit's view position and
+// t as halves (packHalf2x16(x, y), packHalf2x16(z, t); t -1: no hit), z the instance custom index
+// (bit 31) and the geometry index, w the primitive index (the surface cache's key). The RT bounce
+// (ssgi_gather_rt.comp) shades them instead of tracing.
+layout(binding = 8, rgba32ui) uniform writeonly uimage2DArray record_img;
 
 #include "rtao_trace_constants.glsl"
 layout(binding = 7) uniform texture2D blue_noise; // 64x64, four independent channels
@@ -72,6 +77,36 @@ vec3 OffsetRay(vec3 p, vec3 n) {
                 abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
 }
 
+// Shared rays: no hit for every ray of this texel (the sky, beyond ao_far, the debug views).
+void ClearRecords(ivec2 hp) {
+    if (records == 0u) {
+        return;
+    }
+    for (uint r = 0u; r < rays; ++r) {
+        imageStore(record_img, ivec3(hp, int(r)), uvec4(0u, packHalf2x16(vec2(0.0, -1.0)), 0u, 0u));
+    }
+}
+// Shared rays: the closest hit within t_max (the bounce wants it, not any hit), recorded; its
+// distance, or -1. Non-opaque geometry is left out as the bounce leaves it out (foliage=0 here).
+float RecordRay(ivec2 hp, uint r, vec3 origin, vec3 dir, float t_min, float t_max) {
+    rayQueryEXT q;
+    rayQueryInitializeEXT(q, scene, gl_RayFlagsCullNoOpaqueEXT, 0xFF, origin, t_min, dir, t_max);
+    while (rayQueryProceedEXT(q)) {
+    }
+    if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        imageStore(record_img, ivec3(hp, int(r)), uvec4(0u, packHalf2x16(vec2(0.0, -1.0)), 0u, 0u));
+        return -1.0;
+    }
+    const float t = rayQueryGetIntersectionTEXT(q, true);
+    const vec3 H = origin + dir * t;
+    const uint custom = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
+    imageStore(record_img, ivec3(hp, int(r)),
+               uvec4(packHalf2x16(H.xy), packHalf2x16(vec2(H.z, t)),
+                     (custom << 31u) | uint(rayQueryGetIntersectionGeometryIndexEXT(q, true)),
+                     uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true))));
+    return t;
+}
+
 // The occlusion ray: the hit distance, or -1 on a miss. Each variant (ray query in compute, or a
 // ray-tracing pipeline) defines it after including this file.
 float OcclusionHit(vec3 origin, vec3 dir, float t_min, float t_max);
@@ -86,6 +121,7 @@ void TracePixel(ivec2 hp) {
     const float depth = texelFetch(depth_tex, fp, 0).r;
     if (depth >= 1.0) {
         imageStore(out_img, hp, vec4(1.0, 1e9, 0.0, 0.0));
+        ClearRecords(hp);
         return;
     }
     const vec3 P = ViewPos(vec2(fp) + 0.5, depth);
@@ -94,6 +130,7 @@ void TracePixel(ivec2 hp) {
     const float dist = length(P);
     if (ao_far > 0.0 && dist > ao_far) {
         imageStore(out_img, hp, vec4(1.0, P.z, 0.0, 0.0));
+        ClearRecords(hp);
         return;
     }
     vec3 N;
@@ -109,6 +146,7 @@ void TracePixel(ivec2 hp) {
     }
     if (any(isnan(N)) || any(isnan(P)) || any(isinf(P))) { // no normal (sky, UI): nothing to trace
         imageStore(out_img, hp, vec4(1.0, 1e9, 0.0, 0.0));
+        ClearRecords(hp);
         return;
     }
     if (mode == 3u) { // how much the stored normal faces the camera: ~1 expected on visible surfaces
@@ -179,7 +217,17 @@ void TracePixel(ivec2 hp) {
         const float cos_theta = sqrt(1.0 - u);
         const float sin_theta = sqrt(u);
         const vec3 dir = T * (cos(phi) * sin_theta) + B * (sin(phi) * sin_theta) + N * cos_theta;
-        if (falloff == 1u) {
+        if (records != 0u) {
+            // Shared rays: one closest-hit ray serves the AO and the bounce; the AO counts it as
+            // its own rays would have (a hit within the random length; or the near-hit weight).
+            const float t = RecordRay(hp, r, origin, dir, t_min, max(radius, record_radius));
+            if (falloff == 1u) {
+                const float len = radius * max(fract(n2 + float(r) * 0.6180340), 0.02);
+                occlusion += t >= 0.0 && t < len ? 1.0 : 0.0;
+            } else if (t >= 0.0 && t < radius) {
+                occlusion += 1.0 - clamp(t / radius, 0.0, 1.0) * 0.5;
+            }
+        } else if (falloff == 1u) {
             // A random ray length in [0, r]: a hit at distance t occludes with probability 1 - t/r,
             // and the first hit is all that is needed (TerminateOnFirstHit stays exact).
             const float len = radius * max(fract(n2 + float(r) * 0.6180340), 0.02);

@@ -43,6 +43,9 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
     const auto& mask_view = in.mask_view;
     const auto& motion = in.motion;
     const auto& raw_rw = in.raw_rw;
+    const auto& record_view = in.record_view;
+    const auto& record_image = in.record_image;
+    const auto& record_layers = in.record_layers;
     const auto& w = in.w;
     const auto& h = in.h;
     const auto& write = in.write;
@@ -369,11 +372,27 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
     scheduler.RecordCrumb(
         {.name = "rtao trace"},
         [=, tlas = tlas, trace_pipeline = *trace_pipeline, trace_layout = *trace_layout,
-         rt = settings.use_rt_pipeline && rt_trace_pipeline ? *rt_trace_pipeline : vk::Pipeline{},
+         // Shared rays: the ray-query variant (their closest hits: 0.92 vs 1.06 ms at the stakes).
+         rt = settings.use_rt_pipeline && rt_trace_pipeline && !record_image ? *rt_trace_pipeline : vk::Pipeline{},
          sbt_rgen = sbt_rgen, sbt_miss = sbt_miss, sbt_hit = sbt_hit, noise = *noise_view,
          ao_image = vk::Image(v2 ? raw_image : ao_images[write])](vk::CommandBuffer cmdbuf) {
             const auto d = info(depth_view), n = info(normal_view), m = info(motion), p = info(ao_read),
-                       o = info(v2 ? raw_rw : ao_write);
+                       o = info(v2 ? raw_rw : ao_write), rec = info(record_view);
+            // Shared rays: every texel of the records is written by the trace (last frame's
+            // content is not needed); the RT bounce reads them later in the frame.
+            const vk::ImageMemoryBarrier2 records_in{
+                .srcStageMask = Compute,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderRead,
+                .dstStageMask = TraceStages,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                .oldLayout = vk::ImageLayout::eUndefined,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .image = record_image,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, record_layers},
+            };
+            if (record_image) {
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &records_in});
+            }
             const vk::WriteDescriptorSetAccelerationStructureKHR as_write{
                 .accelerationStructureCount = 1, .pAccelerationStructures = &tlas};
             const vk::DescriptorBufferInfo constants_info{constants_handle, constants_offset, sizeof(trace)};
@@ -395,7 +414,9 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
                                        .descriptorType = vk::DescriptorType::eUniformBuffer,
                                        .pBufferInfo = &constants_info},
                 vk::WriteDescriptorSet{.dstBinding = 7, .descriptorCount = 1,
-                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &bn}};
+                                       .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &bn},
+                vk::WriteDescriptorSet{.dstBinding = 8, .descriptorCount = 1,
+                                       .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &rec}};
             if (rt) {
                 cmdbuf.bindPipeline(vk::PipelineBindPoint::eRayTracingKHR, rt);
                 cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eRayTracingKHR, trace_layout, 0, writes);
@@ -417,6 +438,19 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
                 .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
             };
             cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ao_barrier});
+            if (record_image) { // for the RT bounce's gather, later in the frame
+                const vk::ImageMemoryBarrier2 records_out{
+                    .srcStageMask = TraceStages,
+                    .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                    .dstStageMask = Compute,
+                    .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+                    .oldLayout = vk::ImageLayout::eGeneral,
+                    .newLayout = vk::ImageLayout::eGeneral,
+                    .image = record_image,
+                    .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, record_layers},
+                };
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &records_out});
+            }
         });
 
     // 4a. Denoiser 2: temporal accumulation into the history and the AO image.
@@ -668,6 +702,23 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
         .noise = settings.blue_noise ? 1u : 0u,
         .foliage = in.opaque_triangles < in.total_triangles ? settings.foliage : 0.0f,
     };
+    // Shared rays (69): the RT bounce asked for this frame's rays. Not with foliage (the bounce
+    // leaves the non-opaque geometry out, the AO counts it) nor a debug view; the request is
+    // taken here, so a frame whose bounce did not ask traces for the AO alone.
+    const u32 request_rays = std::exchange(record_request_rays, 0u);
+    in.record_image = vk::Image{};
+    in.record_layers = 0;
+    if (request_rays > 0 && in.trace.foliage == 0.0f && settings.debug == 0 &&
+        EnsureRecords((w + 1) / 2, (h + 1) / 2, std::max(in.trace.rays, request_rays))) {
+        in.trace.rays = std::max(in.trace.rays, request_rays);
+        in.trace.records = 1;
+        in.trace.record_radius = record_request_radius;
+        in.record_image = vk::Image(record_image);
+        in.record_layers = record_layers;
+        record_rays = in.trace.rays;
+        records_frame = frame;
+    }
+    in.record_view = in.record_image ? *record_view : StandInRecords();
     const auto& trace = in.trace;
     in.temporal = TemporalConstants{
         .half_size = {float((w + 1) / 2), float((h + 1) / 2)},

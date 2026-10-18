@@ -87,6 +87,25 @@ typo, or a key that belongs in another of these files.
     `spot_near` (0.3 m).
   - light list: `lights_dump` (a new value logs the next frame's list; every 600 frames a summary).
 
+## Shared rays (ticket 69, first step; `shared_rays=1` in ssgi.txt, off by default)
+
+The RTAO's trace and the RT bounce's gather traced the same cosine rays from the same half-res
+points. With `shared_rays=1` (and `rt=1`) the bounce asks the RTAO each frame for its rays: the
+trace (then always the ray-query variant) casts max(AO rays, bounce rays) closest-hit rays to
+max(AO radius, bounce radius) from the AO's origin (depth normal, snap), counts the AO from them as
+before, and records each hit in an rgba32ui array (a layer per ray: the hit's view position and t
+as halves, the instance, geometry and primitive for the surface cache; 28 MiB at 2 rays). The
+gather shades the records (seen: the lit colour; hidden: the surface cache) and traces only the
+fire lights' shadow rays. Not with foliage or an RTAO debug view; a frame without the RTAO's pass
+traces as before (`SSGI: shared rays: the RTAO's records in N of 600 gathers`).
+
+Measured at the stakes bench (Andreas's settings, 2 rays each): rtao trace + ssgi 2.54 ms ->
+2.20 ms (the trace 0.48 -> 0.90, the gather 2.06 -> 1.30); GPU busy 13.49 -> 13.44-13.47. Less
+than the audit's 1.0-1.3 ms: the AO's any-hit rays were cheap, and the closest hit to 2 m costs
+about as much in the trace as in the gather. The second step (one denoiser for both, one motion
+pass) is still open. The image differs slightly: the bounce's rays start from the AO's depth
+normal and snapped origin instead of the G-buffer normal.
+
 ## Presets and the frame-time governor (ticket 71)
 
 The launcher's "Ray-tracing preset" sets the switches and `rtlighting.txt`'s shadows as a ladder

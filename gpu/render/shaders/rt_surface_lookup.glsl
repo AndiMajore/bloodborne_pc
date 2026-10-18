@@ -6,6 +6,23 @@
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer SurfaceParts { uvec2 p[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer SurfaceCache { uvec2 c[]; };
 
+// The same from a hit's ids (the AO trace's records of shared rays, ticket 69).
+bool SurfaceRadianceIds(uint custom_index, uint geometry, uint primitive, uint64_t cache_address,
+                        uint64_t parts_address, uint part_count, out vec3 radiance) {
+    radiance = vec3(0.0);
+    if (cache_address == 0ul || custom_index != 1u || geometry >= part_count) {
+        return false;
+    }
+    const uint tri = SurfaceParts(parts_address).p[geometry].x + primitive;
+    const uvec2 v = SurfaceCache(cache_address).c[tri];
+    const vec2 ba = unpackHalf2x16(v.y);
+    if (ba.y <= 0.0) {
+        return false;
+    }
+    radiance = vec3(unpackHalf2x16(v.x), ba.x);
+    return true;
+}
+
 bool SurfaceRadiance(rayQueryEXT q, uint64_t cache_address, uint64_t parts_address, uint part_count,
                      out vec3 radiance) {
     radiance = vec3(0.0);

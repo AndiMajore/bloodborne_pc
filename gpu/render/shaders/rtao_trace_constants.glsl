@@ -27,6 +27,8 @@ layout(binding = 6, std140) uniform Constants {
     uint noise;       // 1: the blue-noise texture, shifted per frame by the golden ratio
     float foliage;    // > 0: alpha-tested draws (the BLAS's non-opaque geometry) stop a ray with
                       // this probability per hit: a grass card occludes at about its coverage
+    uint records;     // 1: shared rays (ticket 69): closest hits to record_radius, written per ray
+    float record_radius; // the RT bounce's radius (the rays reach max(radius, record_radius))
 };
 // Foliage (alpha-tested draws, no texture to test against): a hit stops the ray with probability
 // `foliage`, drawn anew per pixel, frame, ray and triangle; over the temporal accumulation a card

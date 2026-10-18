@@ -646,6 +646,76 @@ void RayTracedAO::TrimCache() {
     }
 }
 
+namespace {
+// An rgba32ui 2D array image (storage, general layout after its first barrier).
+void MakeRecordImage(const Instance& instance, VideoCore::HostImage& image, vk::UniqueImageView& view, u32 w,
+                     u32 h, u32 layers) {
+    const auto device = instance.GetDevice();
+    view.reset();
+    image = VideoCore::HostImage(device, instance.GetAllocator());
+    image.Create(vk::ImageCreateInfo{
+        .imageType = vk::ImageType::e2D,
+        .format = vk::Format::eR32G32B32A32Uint,
+        .extent = {w, h, 1},
+        .mipLevels = 1,
+        .arrayLayers = layers,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eStorage,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    });
+    view = Check(device.createImageViewUnique({
+        .image = vk::Image(image),
+        .viewType = vk::ImageViewType::e2DArray,
+        .format = vk::Format::eR32G32B32A32Uint,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, layers},
+    }));
+}
+} // namespace
+
+vk::ImageView RayTracedAO::StandInRecords() const noexcept {
+    if (!standin_record_view) {
+        MakeRecordImage(instance, standin_record_image, standin_record_view, 1, 1, 1);
+        SetObjectName(instance.GetDevice(), vk::Image(standin_record_image), "rtao records (stand-in)");
+        scheduler.EndRendering();
+        scheduler.Record([image = vk::Image(standin_record_image)](vk::CommandBuffer cmdbuf) {
+            const vk::ImageMemoryBarrier2 b{
+                .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+                .oldLayout = vk::ImageLayout::eUndefined,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .image = image,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            };
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    }
+    return *standin_record_view;
+}
+
+bool RayTracedAO::EnsureRecords(u32 w, u32 h, u32 layers) {
+    if (record_view && record_w == w && record_h == h && record_layers == layers) {
+        return true;
+    }
+    if (record_view) { // the old one goes once the GPU is past the commands recorded so far
+        struct Old {
+            VideoCore::HostImage image;
+            vk::UniqueImageView view;
+        };
+        auto old = std::make_unique<Old>(Old{std::move(record_image), std::move(record_view)});
+        scheduler.DeferOperation([old = std::move(old)]() mutable { old.reset(); });
+    }
+    MakeRecordImage(instance, record_image, record_view, w, h, layers);
+    SetObjectName(instance.GetDevice(), vk::Image(record_image), "rtao records (shared rays)");
+    record_w = w;
+    record_h = h;
+    record_layers = layers;
+    std::printf("RTAO: shared rays: records %ux%u, %u layers (%u MiB)\n", w, h, layers,
+                u32((u64(w) * h * layers * 16) >> 20));
+    return true;
+}
+
 bool RayTracedAO::EnsureResources(u32 w, u32 h) {
     if (width == w && height == h && ao_images[0]) {
         return true;

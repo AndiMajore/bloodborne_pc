@@ -87,6 +87,27 @@ public:
     [[nodiscard]] vk::AccelerationStructureKHR FrameTlas() const noexcept {
         return tlas_frame == frame && Active() ? tlas : vk::AccelerationStructureKHR{};
     }
+    /// bbport (ticket 69, shared rays): the RT bounce asks, before this frame's trace, for its rays
+    /// (count and radius). The trace then traces max(its rays, these) closest-hit rays to
+    /// max(radius, this) and records each hit (ssgi_gather_rt.comp shades them instead of
+    /// tracing). Asked anew every frame; not with foliage or a debug view.
+    void RequestRecords(u32 rays, float radius) const noexcept {
+        record_request_rays = rays;
+        record_request_radius = radius;
+    }
+    struct Records {
+        vk::ImageView view;  // rgba32ui, half res, a layer per ray
+        u32 rays = 0;        // 0: none this frame
+        u32 width = 0, height = 0;
+    };
+    /// This frame's records (after the trace was recorded), else none.
+    [[nodiscard]] Records FrameRecords() const noexcept {
+        return records_frame == frame && Active() && record_view
+                   ? Records{*record_view, record_rays, record_w, record_h}
+                   : Records{};
+    }
+    /// A valid view for the records' binding when there are none (1x1, 1 layer).
+    [[nodiscard]] vk::ImageView StandInRecords() const noexcept;
     /// bbport (experimental, surface=1): radiance per static pool triangle, filled from the lit
     /// screen where a triangle was seen. A ray hit on the static instance (custom index 1) reads
     /// cache[parts[geometry].x + primitive] (two u32: half rg, half b + weight; weight 0 = never
@@ -384,6 +405,16 @@ private:
     vk::DeviceSize scratch_alignment = 256;
     // Images
     std::array<VideoCore::HostImage, 2> ao_images;
+    // Shared rays (69): the records image and its stand-in; the bounce's request for this frame.
+    VideoCore::HostImage record_image;
+    vk::UniqueImageView record_view;
+    mutable VideoCore::HostImage standin_record_image; // made on first use (the bounce's binding)
+    mutable vk::UniqueImageView standin_record_view;
+    u32 record_w = 0, record_h = 0, record_layers = 0, record_rays = 0;
+    mutable u32 record_request_rays = 0; // the bounce's request (a const view of the RTAO asks)
+    mutable float record_request_radius = 0.0f;
+    u32 records_frame = ~0u;
+    bool EnsureRecords(u32 w, u32 h, u32 layers);
     std::array<vk::UniqueImageView, 2> ao_views;
     VideoCore::HostImage motion_image;
     vk::UniqueImageView motion_view;

@@ -66,7 +66,8 @@ struct GatherRtConstants {
     float spark_size;
     u32 fire_rays;
     float large_base_size, large_base_height, large_spark_size;
-    std::array<float, 2> pad;
+    u32 record_rays; // > 0: shared rays (69), the RTAO trace's records shaded instead of traced
+    float pad;
 };
 static_assert(sizeof(GatherRtConstants) == 192);
 struct ApplyConstants {
@@ -235,7 +236,7 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
                                            .descriptorType = vk::DescriptorType::eAccelerationStructureKHR,
                                            .descriptorCount = 1,
                                            .stageFlags = vk::ShaderStageFlagBits::eCompute},
-            sampled(7), sampled(8)};
+            sampled(7), sampled(8), storage(9)};
         make_layouts(rt_bindings, sizeof(GatherRtConstants), gather_rt_desc_layout, gather_rt_layout);
         gather_rt_pipeline = make_pipeline(SSGI_GATHER_RT_COMP, *gather_rt_layout);
         // The colour denoiser (rt_denoise=1), for the ray-traced gather only.
@@ -277,6 +278,10 @@ void ScreenSpaceGI::OnFrameStart() {
     // The fire lights are made only for the ray-traced gather (the march does not read them).
     if (lighting) {
         lighting->SetFireReader(enabled && RtOn() && gather_rt_pipeline && rtao);
+    }
+    // Shared rays (69): the RTAO's trace records this frame's rays for the gather.
+    if (enabled && shared_rays && RtOn() && gather_rt_pipeline && rtao) {
+        rtao->RequestRecords(std::min(rays, RtGovernor::Current().gi_rays), radius);
     }
 }
 
@@ -326,6 +331,7 @@ void ScreenSpaceGI::PollSettings() {
         else if (key == "denoise_luma") denoise_luma = std::max(value, 0.01f);
         else if (key == "denoise_plane") denoise_plane = std::max(value, 0.001f);
         else if (key == "denoise_normal") denoise_normal = std::max(value, 0.0f);
+        else if (key == "shared_rays") shared_rays = value != 0.0f;
         else unknown += key + ' ';
     }
     std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, "
@@ -619,6 +625,19 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         denoise.atrous_layout = *atrous_layout;
     }
     denoise_valid = denoise.on;
+    // Shared rays (69): this frame's records of the RTAO's trace, when they cover this gather.
+    const auto records = rtao && shared_rays && tlas ? rtao->FrameRecords() : RayTracedAO::Records{};
+    const bool use_records = records.rays > 0 && records.width == u32(gather.half_size[0]) &&
+                             records.height == u32(gather.half_size[1]);
+    const vk::ImageView records_view = use_records ? records.view : rtao && tlas ? rtao->StandInRecords() : vk::ImageView{};
+    if (shared_rays && tlas) {
+        ++(use_records ? shared_passes : shared_misses);
+        if ((shared_passes + shared_misses) % 600 == 0) {
+            std::printf("SSGI: shared rays: the RTAO's records in %u of 600 gathers (%u traced its own)\n",
+                        shared_passes, shared_misses);
+            shared_passes = shared_misses = 0;
+        }
+    }
     const GatherRtConstants gather_rt{
         .view = gather.view,
         .proj = gather.proj,
@@ -647,6 +666,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .large_base_size = emission.large_base_size,
         .large_base_height = emission.large_base_height,
         .large_spark_size = emission.large_spark_size,
+        .record_rays = use_records ? records.rays : 0u,
     };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];
@@ -655,7 +675,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     scheduler.RecordCrumb(
         {.name = "ssgi"},
         [gather, gather_rt, tlas, apply, denoise, depth_view, normal_view, color_view, albedo_view, motion, emission_view,
-         lights_view, gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
+         lights_view, records_view, gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
          gather_pipeline = *gather_pipeline, gather_layout = *gather_layout,
          gather_rt_pipeline = *gather_rt_pipeline, gather_rt_layout = *gather_rt_layout,
          apply_pipeline = *apply_pipeline, apply_layout = *apply_layout,
@@ -686,10 +706,12 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
                         .accelerationStructureCount = 1,
                         .pAccelerationStructures = &tlas,
                     };
-                    std::array<vk::WriteDescriptorSet, 9> rt_writes{};
+                    const auto rec = info(records_view);
+                    std::array<vk::WriteDescriptorSet, 10> rt_writes{};
                     std::copy(writes.begin(), writes.begin() + 6, rt_writes.begin());
                     rt_writes[7] = write_of(7, sampled, &e);
                     rt_writes[8] = write_of(8, sampled, &l);
+                    rt_writes[9] = write_of(9, storage, &rec);
                     rt_writes[6] = vk::WriteDescriptorSet{
                         .pNext = &as_info,
                         .dstBinding = 6,

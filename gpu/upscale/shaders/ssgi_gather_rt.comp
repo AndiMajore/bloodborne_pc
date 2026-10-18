@@ -28,6 +28,7 @@ layout(binding = 4) uniform texture2D prev_gi_tex; // half res, previous output
 layout(binding = 5, rgba16f) uniform writeonly image2D gi_img; // half res: rgb gi, a view z
 layout(binding = 6) uniform accelerationStructureEXT scene;   // the RTAO's TLAS (view space)
 layout(binding = 7) uniform texture2D emission_tex; // quarter res, the transparents' light (last frame)
+layout(binding = 9, rgba32ui) uniform readonly uimage2DArray record_img; // shared rays (69): the AO trace's hits, a layer per ray
 layout(binding = 8) uniform texture2D lights_tex;   // the fire lights' list: rows 3 (world position, w 1 a spark, 2 a base, 3 and 4 a large fire's) and 4 (power), its length in row 5
 
 layout(push_constant) uniform Constants {
@@ -56,7 +57,8 @@ layout(push_constant) uniform Constants {
     float spark_size;   // metres: a spark's sphere's radius
     uint fire_rays;     // shadow rays to the fires per pixel (at most rays)
     float large_base_size, large_base_height, large_spark_size; // large fires (the pyres)
-    float pad;
+    uint record_rays; // > 0: shared rays (ticket 69): the AO trace traced this many rays from this
+                      // texel and recorded their hits (record_img); they are shaded, not traced
 };
 
 #include "../../render/shaders/rt_surface_lookup.glsl"
@@ -228,7 +230,41 @@ void main() {
 
     vec3 gi = vec3(0.0);
     float seen = 0.0, hidden = 0.0, cached = 0.0;
-    for (uint r = 0u; r < rays; ++r) {
+    // Shared rays: the AO trace's closest hits (its origin and normal: the depth normal and the
+    // snap), the same shading as below.
+    for (uint r = 0u; r < record_rays; ++r) {
+        const uvec4 a = imageLoad(record_img, ivec3(hp, int(r)));
+        const vec2 zt = unpackHalf2x16(a.y);
+        const float t = zt.y;
+        if (!(t >= 0.0) || t > radius) {
+            continue; // no hit within the bounce's radius
+        }
+        const float falloff = clamp(1.0 - t / radius, 0.0, 1.0);
+        const vec3 H = vec3(unpackHalf2x16(a.x), zt.x);
+        const vec2 sp = ScreenPos(H);
+        bool visible = H.z * P.z > 0.0 && all(greaterThanEqual(sp, vec2(0.0))) &&
+                       all(lessThan(sp, full_size));
+        if (visible) {
+            const float sz = ViewZ(texelFetch(depth_tex, ivec2(sp), 0).r);
+            visible = abs(sz - H.z) <= max(0.1, 0.03 * abs(H.z));
+        }
+        if (visible) {
+            seen += 1.0;
+            gi += (Capped(texelFetch(color_tex, ivec2(sp), 0).rgb) +
+                   EmissionAt(ivec2(sp)) * emission) * falloff;
+            continue;
+        }
+        vec3 cached_radiance;
+        if (SurfaceRadianceIds(a.z >> 31u, a.z & 0x7fffffffu, a.w, surface_cache, surface_parts, surface_parts_count,
+                               cached_radiance)) {
+            cached += 1.0;
+            gi += Capped(cached_radiance) * falloff;
+        } else {
+            hidden += 1.0;
+        }
+    }
+    const uint traced = record_rays > 0u ? 0u : rays;
+    for (uint r = 0u; r < traced; ++r) {
         const float u = fract(n0 + float(r) / float(rays));
         const float v = fract(n1 + float(r) * 0.7548776662);
         const float phi = 2.0 * PI * v;
@@ -266,7 +302,8 @@ void main() {
             hidden += 1.0;
         }
     }
-    gi /= float(rays);
+    const float total_rays = float(record_rays > 0u ? record_rays : rays);
+    gi /= total_rays;
     vec3 fire = vec3(0.0);
     if (fire_count > 0u && fire_light > 0.0) {
         fire = FireLights(N, origin, fp) * (fire_light / PI);
@@ -276,7 +313,7 @@ void main() {
         gi = fire;
     }
     if (debug == 2u) {
-        gi = vec3(hidden, seen, cached) / float(rays);
+        gi = vec3(hidden, seen, cached) / total_rays;
     }
     if (debug == 3u) { // the emission image alone (the transparents' light, last frame)
         gi = texelFetch(emission_tex, fp / 4, 0).rgb * emission;

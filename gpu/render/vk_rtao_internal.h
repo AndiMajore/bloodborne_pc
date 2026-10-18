@@ -61,6 +61,8 @@ struct TraceConstants {
     u32 period;
     u32 noise; // 1: blue-noise texture, 0: interleaved gradient noise
     float foliage;
+    u32 records;         // 1: shared rays (69): closest hits written per ray for the RT bounce
+    float record_radius; // the bounce's radius: the rays reach max(radius, record_radius)
 };
 struct TemporalConstants {
     std::array<float, 2> half_size;
@@ -83,7 +85,7 @@ struct ApplyConstants {
     u32 edge_fill; // 1: an edge without samples of its own takes the neighbourhood's AO, not none
 };
 static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
-static_assert(sizeof(TraceConstants) == 148 && offsetof(TraceConstants, foliage) == 144);
+static_assert(sizeof(TraceConstants) == 156 && offsetof(TraceConstants, foliage) == 144);
 struct BlurConstants {
     std::array<float, 2> half_size;
     std::array<s32, 2> dir;
@@ -150,6 +152,9 @@ struct FrameDraws {
 /// buffers and offsets of this frame's ring slots, counts, and the stages' constants.
 struct PassInputs {
     vk::ImageView ao_read, ao_write, blur_rw, depth_view, hist_read, hist_write, normal_view, mask_view, motion, raw_rw;
+    vk::ImageView record_view; // shared rays (69): the records, or the 1x1 stand-in
+    vk::Image record_image;    // null: no records this frame
+    u32 record_layers = 0;
     u32 w, h, write, dispatch_triangles, num_chunks, num_geometries, num_instances, total_triangles;
     u32 opaque_triangles; // the rest of total_triangles: the foliage, non-opaque
     bool do_dump, do_readback, split_fetch_now, v2;

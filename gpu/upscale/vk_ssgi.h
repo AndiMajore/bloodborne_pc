@@ -80,6 +80,8 @@ private:
     float rt_clip = 1.5f; // rt: history clipped to this frame's 3x3 mean +- rt_clip sigma
     // rt_denoise=1: the colour denoiser instead of the gather's own history (default since 2026-10-18):
     // temporal accumulation on the motion vectors, then edge-avoiding a-trous passes.
+    bool shared_rays = false;     // shared_rays=1 (ticket 69): the RTAO's trace records the rays, the gather shades them
+    u32 shared_passes = 0, shared_misses = 0;
     bool rt_denoise = true;       // on by default since 2026-10-18 (Andreas: it removes the fire light's checkerboard)
     float denoise_frames = 16.0f; // the history's length cap
     float denoise_clip = 2.0f;    // history clipped to the raw 3x3 mean +- that many sigma (0: off)
