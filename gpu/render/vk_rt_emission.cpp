@@ -44,9 +44,10 @@ struct FireLightConstants {
     float base_merge;
     float switch_ratio;
     float hold;
-    u32 pad;
+    float merge;
+    u32 depth_mode;
 };
-static_assert(sizeof(FireLightConstants) == 144);
+static_assert(sizeof(FireLightConstants) == 148);
 struct FireDebugConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -305,6 +306,8 @@ void RtEmission::RecordFireLights() {
         .base_merge = settings.fire_base_merge,
         .switch_ratio = settings.fire_switch,
         .hold = float(settings.fire_hold),
+        .merge = settings.fire_merge,
+        .depth_mode = settings.fire_depth,
     };
     // The bases carry on from last frame's when there were any and no cut came between.
     const bool bases_continued = continued && bases_frame + 1 == frame;

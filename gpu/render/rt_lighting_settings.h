@@ -32,6 +32,8 @@ struct Settings {
     // than the flame there (0: it follows the peak every frame) ...
     float fire_switch = 0.0f;
     uint32_t fire_hold = 0;       // ... and for this many frames after it moved
+    float fire_merge = 0.0f;      // metres (horizontally): lights nearer than this merged into the strongest (0: off)
+    uint32_t fire_depth = 0;      // 0: the nearest depth under the tile's bright flame; 1: the nearest well-supported depth around the peak
     bool fire_debug = false;      // the cylinders drawn into the scene
     // Two-part fires (67): per fire a steady base (the tile lights near each other merged, their
     // summed power averaged over seconds) as a tall slim cylinder, the tile lights as spheres on top.

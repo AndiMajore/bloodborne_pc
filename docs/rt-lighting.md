@@ -56,7 +56,12 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
     drawn into the scene, the light's point a yellow dot), `fire_switch` (0; e.g. 0.5: a light
     stays where it is while its place is in its tile, unless the tile's new brightest texel is that
     much brighter than the flame there, or the flame there went dark) and `fire_hold` (0; frames a
-    light stays after it moved): against the flicker of a light chasing the brightest texel.
+    light stays after it moved): against the flicker of a light chasing the brightest texel;
+    `fire_merge` (0; e.g. 1.5 m: lights nearer than this horizontally become the strongest of
+    them, with their summed power: a tall flame over two tiles made two lights, one popping in
+    and out) and `fire_depth` (0; 1: a light's depth the nearest one that a fifth of the bright
+    texels around its peak share, instead of the nearest under any bright texel of its tile, which
+    jumped with the flicker; not their median: through thin flames that is often the background).
   - two-part fires (67; off): `fire_base` (0; e.g. 0.7: each fire's steady base, the lights within
     `fire_base_merge` (1.5 m, horizontally) merged, their summed power and place averaged
     (`fire_base_smooth` 0.98 a frame), x this, as a slim upright cylinder `fire_base_size` (0.3 m)

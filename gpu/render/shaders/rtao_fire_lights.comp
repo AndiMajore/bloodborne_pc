@@ -18,6 +18,14 @@
 // dark. Only the place on screen is kept: the depth is found again each frame (a light frozen in
 // the world ends up behind its stake, all its shadow rays blocked). A third row: the frames since
 // the light last moved.
+// Merged lights (merge > 0): a tall flame over two tiles made two lights, the upper one popping in
+// and out with the flame's tips. A light within `merge` metres (horizontally) of a stronger one of
+// this frame is dropped and its power added to the stronger.
+// Depth (depth_mode 1): from the bright texels within 2 quarter-size texels of the peak, the
+// nearest depth that enough of them share (a fifth, at least 3, within 10 %), not the nearest under
+// any bright texel of the tile: a plant in front of one flame tongue (a few texels) pulled the
+// light forward and a flicker pushed it back. Not the median either: the background seen through
+// the gaps between thin flame tongues is often most of them.
 // Mode 2 (fire_base, ticket 67), one invocation: the fires' steady bases, after the lights in the
 // same rows (columns count..count+bases). Each base gathers this frame's lights within `base_merge`
 // metres of it (horizontally: a tall flame's tiles are one fire), its place and their summed power
@@ -54,7 +62,8 @@ layout(push_constant) uniform Constants {
     float base_merge;
     float switch_ratio; // sticky lights: a new peak this much brighter than the flame at the light's place (0: off)
     float hold;         // sticky lights: frames a light stays after it moved
-    uint pad;
+    float merge;        // metres: lights nearer than this (horizontally) merged into the strongest (0: off)
+    uint depth_mode;    // 0: the nearest depth under the tile's bright flame; 1: the median around the peak
 };
 
 const uint MaxBases = 32u;
@@ -118,14 +127,36 @@ float FlameAt(ivec2 t) {
     return l;
 }
 
+float Horizontal(vec3 a, vec3 b) {
+    return length(a.xz - b.xz); // the world's up is y
+}
+
 void Match() {
     const uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationIndex;
     if (i >= count) {
         return;
     }
     const ivec2 index = ivec2(i, 0);
-    const vec4 raw_position = imageLoad(raw_img, index);
-    const vec4 raw_power = imageLoad(raw_img, index + ivec2(0, 1));
+    vec4 raw_position = imageLoad(raw_img, index);
+    vec4 raw_power = imageLoad(raw_img, index + ivec2(0, 1));
+    if (merge > 0.0 && raw_position.w > 0.0) {
+        const float mine = Luma(raw_power.rgb);
+        vec3 added = vec3(0.0);
+        for (uint j = 0u; j < count; ++j) {
+            const vec4 r = imageLoad(raw_img, ivec2(j, 0));
+            if (j == i || r.w <= 0.0 || Horizontal(r.xyz, raw_position.xyz) >= merge) {
+                continue;
+            }
+            const vec3 q = imageLoad(raw_img, ivec2(j, 1)).rgb;
+            const float theirs = Luma(q);
+            if (theirs > mine || (theirs == mine && j < i)) {
+                raw_position = vec4(0.0); // part of a stronger light: as if this tile had none
+                break;
+            }
+            added += q;
+        }
+        raw_power.rgb += raw_position.w > 0.0 ? added : vec3(0.0);
+    }
     vec4 position = vec4(0.0), power = vec4(0.0);
     float held = 0.0; // frames since the light last moved
     if (raw_position.w > 0.0) {
@@ -169,10 +200,6 @@ void Match() {
     imageStore(lights_img, index, position);
     imageStore(lights_img, index + ivec2(0, 1), power);
     imageStore(lights_img, index + ivec2(0, 2), vec4(held, 0.0, 0.0, 0.0));
-}
-
-float Horizontal(vec3 a, vec3 b) {
-    return length(a.xz - b.xz); // the world's up is y
 }
 
 void Bases() {
@@ -355,7 +382,41 @@ void main() {
     if (s_peak[0] >= 0.5 * min_peak) {
         // At the peak on screen, at the nearest depth under the flame.
         const ivec2 fp = FullPixel(q);
-        const float depth = s_near[0];
+        float depth = s_near[0];
+        if (depth_mode == 1u) {
+            // The bright texels' depths around the peak, insertion-sorted (nearest first).
+            const float bright = 0.25 * s_peak[0];
+            float d[25];
+            int n = 0;
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const ivec2 p = q + ivec2(dx, dy);
+                    if (any(lessThan(p, ivec2(0))) || any(greaterThanEqual(p, quarter_size)) ||
+                        Luma(texelFetch(emit_tex, p, 0).rgb) < bright) {
+                        continue;
+                    }
+                    const float z = texelFetch(depth_tex, FullPixel(p), 0).r;
+                    int k = n++;
+                    for (; k > 0 && d[k - 1] > z; --k) {
+                        d[k] = d[k - 1];
+                    }
+                    d[k] = z;
+                }
+            }
+            // The nearest depth with enough support: the median of its group.
+            const int need = max(3, n / 5);
+            for (int k = 0; k < n && d[k] < 1.0; ++k) {
+                const float zk = ViewZ(d[k]);
+                int m = 1;
+                while (k + m < n && d[k + m] < 1.0 && abs(ViewZ(d[k + m]) - zk) <= 0.1 * abs(zk) + 0.1) {
+                    ++m;
+                }
+                if (m >= need) {
+                    depth = d[k + m / 2];
+                    break;
+                }
+            }
+        }
         if (depth < 1.0) {
             vec3 v = ViewPos(vec2(fp) + 0.5, depth);
             const float len = length(v);
