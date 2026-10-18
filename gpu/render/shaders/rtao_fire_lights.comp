@@ -67,7 +67,7 @@ layout(push_constant) uniform Constants {
     float base_strength;  // the list: x a base's power
     uint anchor_count;    // mode 2: the game's own fire lights (its light list), nearest the camera first
     float spark_strength; // the list: x a spark's power
-    uint pad;
+    float base_lift;      // the list: metres a base is moved up (the world's up is y)
     vec4 anchors[6];    // world position, w the light's radius
 };
 
@@ -357,7 +357,7 @@ void Bases() {
     }
     for (uint b = 0u; b < n && base_strength > 0.0; ++b) {
         if (alive[b] && Luma(power[b]) > 0.0) {
-            imageStore(lights_img, ivec2(listed, 3), vec4(position[b], 2.0));
+            imageStore(lights_img, ivec2(listed, 3), vec4(position[b] + vec3(0.0, base_lift, 0.0), 2.0));
             imageStore(lights_img, ivec2(listed, 4), vec4(power[b] * base_strength, 0.0));
             ++listed;
         }

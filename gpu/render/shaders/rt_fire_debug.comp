@@ -22,6 +22,8 @@ layout(push_constant) uniform Constants {
     uint base_count; // base slots after the sparks
     float base_radius;
     float base_height;
+    float base_lift;   // metres a base is moved up (as in the gather's list)
+    float pad0, pad1, pad2;
 };
 
 // The ray's entry into a sphere (centre c, radius r): (distance, 1 at the centre .. 0 at the rim).
@@ -98,7 +100,7 @@ void main() {
         const vec4 h = vec4(a.xyz, 1.0);
         const vec3 L = vec3(dot(view[0], h), dot(view[1], h), dot(view[2], h));
         const bool base = i >= count;
-        const vec2 hit = base ? Cylinder(D, L - axis * (0.4 * base_height), axis, base_height, base_radius)
+        const vec2 hit = base ? Cylinder(D, L + axis * (base_lift - 0.4 * base_height), axis, base_height, base_radius)
                               : Sphere(D, L, up_spark.w);
         if (hit.x > 0.0) {
             const float rim = 1.0 - hit.y; // bright at the silhouette

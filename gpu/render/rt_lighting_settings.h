@@ -34,7 +34,8 @@ struct Settings {
     uint32_t fire_hold = 15;      // ... and for this many frames after it moved
     float fire_merge = 1.0f;      // metres (horizontally): lights nearer than this merged into the strongest (0: off)
     bool fire_debug = false;      // the bases (cyan cylinders) and the sparks (orange spheres) drawn into the scene
-    float fire_base = 0.7f;         // x a base's averaged power
+    float fire_base = 0.7f;         // x a base's averaged power (its brightness)
+    float fire_base_lift = 0.0f;    // metres: the base moved up (negative: down) from the game's fire light it is anchored to
     float fire_spark = 0.5f;        // x a spark's power
     float fire_base_size = 0.5f;    // metres: the base cylinder's radius
     float fire_base_height = 3.0f;  // metres: its height, 40 % below the fire's place

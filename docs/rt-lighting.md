@@ -57,8 +57,9 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
     half of it), `fire_switch` (0.5) and `fire_hold` (15 frames: a spark stays at its texel unless
     the tile's new brightest is that much brighter, and for that long after it moved), `fire_merge`
     (1 m: sparks nearer than this horizontally become the strongest of them).
-    The bases: `fire_base` (0.7: x the averaged power), `fire_base_size` (0.5 m radius),
-    `fire_base_height` (3 m, 40 % below the fire's place), `fire_base_smooth` (0.98 a frame),
+    The bases: `fire_base` (0.7: x the averaged power: the brightness), `fire_base_size` (0.5 m
+    radius), `fire_base_height` (3 m, 40 % below the fire's place), `fire_base_lift` (0 m: the base
+    moved up, negative down, from the game's fire light it is anchored to), `fire_base_smooth` (0.98 a frame),
     `fire_base_fade` (0.985 a frame off screen), `fire_base_merge` (1.5 m: sparks within this
     sideways join a base even when their depth is off along the line of sight).
   - shadows: `sun_shadow` (0/1), `sun_spread` (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),

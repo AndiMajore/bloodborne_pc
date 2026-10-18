@@ -154,6 +154,7 @@ static void LightingSettings() {
     // The fire model's defaults are the ones chosen at the stakes (2026-10-18); fire_light switches it on.
     assert(Near(defaults.fire_switch, 0.5f) && defaults.fire_hold == 15 && Near(defaults.fire_merge, 1.0f));
     assert(Near(defaults.fire_base, 0.7f) && Near(defaults.fire_spark, 0.5f) && Near(defaults.fire_base_size, 0.5f));
+    assert(defaults.fire_base_lift == 0.0f && ApplyText(s, "fire_base_lift=-9") == 1 && Near(s.fire_base_lift, -5.0f));
     assert(defaults.fire_rays == 1 && ApplyText(s, "fire_rays=20") == 1 && s.fire_rays == 8);
     assert(ApplyText(s, "fire_switch=0.5 fire_hold=12 fire_merge=0") == 3 && Near(s.fire_switch, 0.5f) &&
            s.fire_hold == 12 && s.fire_merge == 0.0f);

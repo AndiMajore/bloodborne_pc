@@ -51,7 +51,7 @@ struct FireLightConstants {
     float base_strength;  // the gather's list: x a base's power
     u32 anchor_count;     // the game's fire lights below (bases snap to them)
     float spark_strength; // the gather's list: x a spark's power
-    u32 pad;
+    float base_lift;      // the gather's list: metres a base is moved up
     std::array<std::array<float, 4>, 6> anchors; // world position, w its radius
 };
 static_assert(sizeof(FireLightConstants) == 256);
@@ -66,8 +66,10 @@ struct FireDebugConstants {
     u32 base_count;
     float base_radius;
     float base_height;
+    float base_lift;
+    std::array<float, 3> pad;
 };
-static_assert(sizeof(FireDebugConstants) == 112);
+static_assert(sizeof(FireDebugConstants) == 128);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
 constexpr u32 FireBases = 32;      // base slots after the lights (rtao_fire_lights.comp MaxBases)
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
@@ -317,6 +319,7 @@ void RtEmission::RecordFireLights() {
         .merge = settings.fire_merge,
         .base_strength = settings.fire_base,
         .spark_strength = settings.fire_spark,
+        .base_lift = settings.fire_base_lift,
     };
     {
         // The game's warm point lights nearest the camera (its own fire lights: orange, not the
@@ -444,6 +447,7 @@ void RtEmission::RecordFireDebug(VideoCore::ImageId color_id) {
         .base_count = FireBases,
         .base_radius = settings.fire_base_size,
         .base_height = settings.fire_base_height,
+        .base_lift = settings.fire_base_lift,
     };
     scheduler.RecordCrumb({.name = "rt fire debug"},
                           [constants, color_view, depth_view, lights = *lights_views[lights_out], w, h,
