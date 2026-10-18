@@ -25,6 +25,7 @@ class Runtime;
 class CameraMotion;
 class SceneTargets;
 class RayTracedAO;
+class RtLighting;
 
 class ScreenSpaceGI {
 public:
@@ -46,6 +47,10 @@ public:
     /// bbport (experimental): the ray-traced AO whose scene the RT gather traces (rt=1).
     void SetRayTracedAO(const RayTracedAO* rtao_) {
         rtao = rtao_;
+    }
+    /// bbport (experimental): the transparents' light and the fire lights (rtlighting.txt).
+    void SetLighting(const RtLighting* lighting_) {
+        lighting = lighting_;
     }
     /// <user>/ssgi.txt (BB_SSGI_FILE): "key=value" lines (strength, radius, history, directions,
     /// steps, debug, enabled) re-read within a second of a change: tuning while the game runs.
@@ -71,6 +76,7 @@ private:
     float rt_max = 2.0f;  // rt: a ray's radiance capped to this (lamps and candles as fireflies)
     float rt_clip = 1.5f; // rt: history clipped to this frame's 3x3 mean +- rt_clip sigma
     const RayTracedAO* rtao = nullptr;
+    const RtLighting* lighting = nullptr;
     float strength = 1.0f;
     float radius = 2.0f;
     u32 directions = 4, steps = 6;

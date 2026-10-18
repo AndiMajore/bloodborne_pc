@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "upscale/vk_ssgi.h"
+#include "render/vk_rt_lighting.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -423,7 +424,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
 
     // The transparents' light (fires) from the RTAO, last frame's; without it the colour is bound
     // in its place and weighted 0.
-    const auto emission = rtao ? rtao->FrameEmission() : RayTracedAO::Emission{};
+    const auto emission = lighting ? lighting->FrameEmission() : RtLighting::Emission{};
     const vk::ImageView emission_view = emission.view ? emission.view : color_view;
     const vk::ImageView lights_view = emission.lights ? emission.lights : emission_view;
     const GatherConstants gather{

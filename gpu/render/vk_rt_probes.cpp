@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_rt_probes.h"
+#include "render/vk_rt_lighting.h"
 
 #include <algorithm>
 #include <cmath>
@@ -59,9 +60,9 @@ constexpr u32 ProbeBytes = 64; // vec4 r, g, b + ivec4 cell
 
 RtProbes::RtProbes(const Instance& instance_, Scheduler& scheduler_,
                    VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
-                   CameraMotion& camera_motion_, RayTracedAO& rtao_)
+                   CameraMotion& camera_motion_, RayTracedAO& rtao_, const RtLighting& lighting_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_},
-      camera_motion{camera_motion_}, rtao{rtao_} {
+      camera_motion{camera_motion_}, rtao{rtao_}, lighting{lighting_} {
     const char* env = std::getenv("BB_RT_PROBES");
     enabled = env && env[0] == '1' && rtao.Enabled() && instance.IsRayQuerySupported() &&
               instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize >=
@@ -292,7 +293,7 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
         origin[i] = s32(std::floor(cam[i] / spacing)) - Dims[i] / 2;
     }
     const auto surface = rtao.FrameSurface();
-    const auto emission = rtao.FrameEmission(); // without it the colour is bound in its place, x 0
+    const auto emission = lighting.FrameEmission(); // without it the colour is bound in its place, x 0
     const vk::ImageView emission_view = emission.view ? emission.view : color_view;
     const u32 w = depth.info.size.width, h = depth.info.size.height;
     const UpdateConstants update{

@@ -407,11 +407,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
             // bbport (RT lighting, spot_shadow=): the shadowed spot's map, ray traced larger, in
             // the light passes in place of the game's (vk_rtao_spot.cpp).
-            if (rtao && light_quad_draw && !is_storage) {
-                if (stage.pgm_hash == RayTracedAO::SpotLightPs && binding_index == 5) {
-                    rtao->OnSpotMapImage(image.info.guest_address, image.info.pixel_format);
+            if (light_quad_draw && !is_storage) {
+                if (stage.pgm_hash == RtLightRecords::SpotLightPs && binding_index == 5) {
+                    rt_lighting->OnSpotMapImage(image.info.guest_address, image.info.pixel_format);
                 }
-                if (const vk::ImageView map = rtao->SpotMapView(image.info.guest_address)) {
+                if (const vk::ImageView map = rt_lighting->SpotMapView(image.info.guest_address)) {
                     image_infos.emplace_back(VK_NULL_HANDLE, map, vk::ImageLayout::eGeneral);
                     set_ok = false;
                     continue;
@@ -601,7 +601,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
                                                             entry.range.extent.levels)
                          : image.scene_proxy && proxies_on) ||
             (upscaler->Enabled() && upscaler->RedirectsSampled(entry.id)) ||
-            (rtao && light_quad_draw && rtao->SpotMapView(image.info.guest_address))) {
+            (light_quad_draw && rt_lighting->SpotMapView(image.info.guest_address))) {
             ++texture_set_why[2];
             ++texture_set_misses;
             set.generation = ~0ull;

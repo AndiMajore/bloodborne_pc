@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_rt_reflect.h"
+#include "render/vk_rt_lighting.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -51,9 +52,10 @@ struct CopyConstants {
 
 RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
                              VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
-                             CameraMotion& camera_motion_, const RayTracedAO& rtao_)
+                             CameraMotion& camera_motion_, const RayTracedAO& rtao_,
+                             const RtLighting& lighting_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_},
-      camera_motion{camera_motion_}, rtao{rtao_} {
+      camera_motion{camera_motion_}, rtao{rtao_}, lighting{lighting_} {
     const char* env = std::getenv("BB_RT_REFLECT");
     enabled = env && env[0] == '1' && rtao.Enabled() && instance.IsRayQuerySupported() &&
               instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize >=
@@ -412,7 +414,7 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
     const u32 sw = ssr.info.size.width, sh = ssr.info.size.height;
     const auto surface = rtao.FrameSurface();
     // Last frame's, as the lit copy; without it the copy is bound in its place, x 0.
-    const auto emission = rtao.FrameEmission();
+    const auto emission = lighting.FrameEmission();
     const vk::ImageView emission_view = emission.view ? emission.view : *copy_view;
     const TraceConstants constants{
         .view = camera_motion.View(),

@@ -192,6 +192,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         }
         if (rtao->Enabled() && cb_descs[0].first) {
             rtao->OnGBufferPass(db_desc.first, cb_descs[0].first);
+            rt_lighting->OnGBufferPass(db_desc.first, cb_descs[0].first);
         }
         if (reflect->Enabled() && cb_descs[0].first) {
             reflect->OnGBufferPass(db_desc.first, cb_descs[0].first, cb_descs[1].first);
@@ -205,7 +206,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                                 ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
                                 : 0;
         rtao->OnColorTarget(cb_descs[0].first, ps_hash);
-        rtao->OnSunDraw(cb_descs[0].first, ps_hash);
         if (reflect->Enabled()) {
             reflect->OnColorTarget(cb_descs[0].first, ps_hash);
         }
@@ -231,7 +231,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 rtao->OnOpaqueScene(cb_descs[0].first); // the surface cache's slice (surface=1)
                 ssgi->OnOpaqueScene(cb_descs[0].first);
                 probes->OnOpaqueScene(cb_descs[0].first);
-                rtao->OnOpaqueSceneLit(cb_descs[0].first); // the emission's opaque base: bounce included
+                rt_lighting->OnOpaqueSceneLit(cb_descs[0].first); // the emission's opaque base: bounce included
                 reflect->OnOpaqueScene(cb_descs[0].first); // after SSGI and the probes: their bounce included
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
@@ -239,20 +239,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 // (Not an SSGI trigger: the lighting composites into intermediate RGBA16F
                 // targets come first and would be hit before they draw.)
                 upscaler->OnSceneComposite();
-                rtao->OnSceneComposite(cb_descs[0].first); // the transparents' light (emission_at=0)
+                rt_lighting->OnSceneComposite(cb_descs[0].first); // the transparents' light (emission_at=0)
             }
         }
     }
-    // bbport: after the opaque scene, each draw for the emission's other trigger (emission_at=1: the
-    // first draw that leaves the scene colour) and its trace (emission_trace=1).
-    if (rtao->Enabled() && rtao->EmissionPending()) {
+    // bbport (RT lighting, only when an effect wants draws): each draw before it is recorded (the
+    // shadows' mask and light draws; the emission's end of the transparents and its trace).
+    if (rt_lighting->WantsDraws()) {
         const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
                                 ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
                                 : 0;
-        rtao->OnDrawAfterOpaque(cb_descs[0].first, db_desc.first && db_desc.first == camera_motion->Depth(),
-                                regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass,
-                                regs.depth_control.depth_write_enable, regs.num_indices,
-                                regs.num_instances.NumInstances(), ps_hash);
+        rt_lighting->OnDraw(cb_descs[0].first, ps_hash, db_desc.first && db_desc.first == camera_motion->Depth(),
+                            regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass,
+                            regs.depth_control.depth_write_enable, regs.num_indices,
+                            regs.num_instances.NumInstances());
     }
 }
 

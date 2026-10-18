@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <cstdlib>
 #include <vector>
 
 namespace Rtao {
@@ -161,37 +163,43 @@ struct Settings {
     float foliage = 0.0f; // > 0: alpha-tested draws occlude with this probability per hit (0: left out)
     bool surface = false;        // experimental: the surface cache (radiance per static pool triangle)
     u32 surface_budget = 131072; // static triangles looked at per frame
-    u32 emission_at = 1;         // 0: the first full-screen pass with the scene depth after the transparents, 1: the first draw after the transparents (another target or no scene depth)
-    float emission_trace = 0.0f; // a new value: one frame's draws after the opaque scene are logged
-    float emission_sat = 0.35f;  // only light this saturated counts in full (fire, embers; not grey smoke); 0: all
-    u32 emission_blur = 8;       // the emission's Gaussian radius in quarter-size texels (a glowing volume); 0: none
-    float emission = 0.0f;       // experimental: the transparents' light (fires) for the RT lighting effects, x this (0: off; fire_light replaces it: smoke over a far surface made it glow)
-    float fire_light = 0.0f;     // experimental: the fires as point lights with shadow rays in the RT SSGI, x this (0: off)
-    float fire_shadow = 0.0f;    // 0..1: the fires' unshadowed light taken away again (the game's own fire light, darkened where blocked)
-    float fire_range = 12.0f;    // metres a fire light reaches
-    float fire_size = 0.75f;     // metres: a fire light's radius (its cylinder's); lit from and traced to anywhere in it (soft shadows, the stake does not hide all of it)
-    bool fire_debug = false;     // the fire lights' cylinders drawn into the scene (orange; the light's point yellow)
-    float fire_height = 1.0f;    // metres: the fire light's cylinder (a flame), a quarter below its point
-    float fire_wrap = 0.4f;      // 0..1: the fire light's cosine wrapped round (thin swaying leaves stop strobing)
-    float fire_smooth = 0.9f;    // 0..0.98: the share of last frame's fire light's power (flicker)
-    float fire_smooth_pos = 0.5f; // 0..0.98: the share of last frame's place (higher: steadier, but shadows trail when moving)
-    float fire_pull = 0.3f;      // metres a fire light sits in front of the surface behind the flame
-    float fire_min = 0.3f;       // a tile's brightest emission texel must reach this to make a light (lower: fire-lit smoke makes lights on what is behind it)
-    bool sun_shadow = false;     // experimental (64): the sun's shadow by ray tracing (the game's where a ray finds nothing near)
-    float sun_spread = 0.01f;    // radians the sun rays spread over (a soft edge)
-    u32 sun_erode = 4;           // pixels: the game's shadow is shrunk by this where it is used
-    float sun_far = 200.0f;
-    u32 sun_debug = 0;
-    bool spot_shadow = false;    // experimental (64): the shadowed spot's 512x512 map replaced by a ray-traced one
-    u32 spot_res = 1024;         // its size (the 20 deg spot at the Central Yharnam lamp: under a centimetre a texel; 2048 cost ~0.6 ms)
-    u32 spot_blur = 3;           // texels of Gaussian on its moments: soft edges (0: hard; lower looked too harsh to Andreas; spot_soft keeps overlaps dark)
-    float spot_soft = 0.2f;      // metres: the blurred map's largest depth spread (overlapping casters' bright seams; 0: no cap)
-    float spot_near = 0.3f;      // metres from the light its rays start (the lamp's own housing)
-           // 1: the rays alone (no fallback to the game's shadow); 2: the direction reversed      // metres a sun ray reaches
-    float lights_dump = 0.0f;    // a new value: the next frame's light list is logged in full
     float dump_request = 0.0f;
     float recreate_request = 0.0f; // a new value: the images are made again (tests a resize)
 };
+
+/// The live files' text: key=value tokens separated by any white space (several per line too), `#`
+/// comments to the end of the line; `apply(key, number)` per token whose value parses, true when
+/// it took the key. Returns how many were applied.
+template <class ApplyFn>
+uint32_t ForEachSetting(std::string_view text, ApplyFn&& apply) {
+    uint32_t applied = 0;
+    size_t pos = 0;
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    while (pos < text.size()) {
+        while (pos < text.size() && space(text[pos])) ++pos;
+        size_t end = pos;
+        while (end < text.size() && !space(text[end])) ++end;
+        const std::string_view token = text.substr(pos, end - pos);
+        pos = end;
+        if (token.empty() || token[0] == '#') {
+            if (!token.empty()) {
+                while (pos < text.size() && text[pos] != '\n') ++pos; // a comment runs to the line's end
+            }
+            continue;
+        }
+        const size_t eq = token.find('=');
+        if (eq == std::string_view::npos || eq == 0) {
+            continue;
+        }
+        const std::string value(token.substr(eq + 1));
+        char* parse_end = nullptr;
+        const float number = std::strtof(value.c_str(), &parse_end);
+        if (parse_end != value.c_str() && apply(token.substr(0, eq), number)) {
+            ++applied;
+        }
+    }
+    return applied;
+}
 
 /// One key=value; false for an unknown key. Values are clamped to their ranges.
 bool Apply(Settings& settings, std::string_view key, float value);

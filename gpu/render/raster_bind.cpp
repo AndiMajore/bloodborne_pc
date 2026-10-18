@@ -311,11 +311,12 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     bool uses_dma = false;
+    // bbport (RT lighting, only when an effect wants the light passes): a light-pass tile draw.
     light_quad_draw = false;
-    if (rtao && !pipeline->IsCompute()) {
+    if (rt_lighting->WantsLightDraws() && !pipeline->IsCompute()) {
         for (const auto* stage : pipeline->GetStages()) {
             light_quad_draw |= stage && stage->sw_stage == Shader::SwStage::Vertex &&
-                               stage->pgm_hash == RayTracedAO::LightQuadVs;
+                               stage->pgm_hash == RtLightRecords::LightQuadVs;
         }
     }
 
@@ -839,8 +840,9 @@ void Rasterizer::BindGuestBuffer(const Shader::BufferResource& desc, const Gcn::
         buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
         return;
     }
-    if (rtao && stage.sw_stage == Shader::SwStage::Fragment && memory->IsValidGpuMapping(address, 0)) {
-        rtao->OnShaderConstants(stage.pgm_hash, slot, address, memory->ClampRangeSize(address, vsharp.GetSize()));
+    if (rt_lighting->WantsShaderConstants() && stage.sw_stage == Shader::SwStage::Fragment &&
+        memory->IsValidGpuMapping(address, 0)) {
+        rt_lighting->OnShaderConstants(stage.pgm_hash, address, memory->ClampRangeSize(address, vsharp.GetSize()));
     }
     if (Shader::IsPagedBuffer(VideoCore::BufferCache::LayerPagedActive(), vsharp)) {
         // BB_LAYER_MEMORY: nearly all memory as one buffer. The shader reaches it through the
@@ -895,17 +897,17 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
     for (u32 index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
         if (const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, index) : nullptr) {
-            if (rtao && stage.sw_stage == Shader::SwStage::Fragment && !desc.IsSpecial() &&
-                memory->IsValidGpuMapping(ring->address, 0)) {
-                rtao->OnShaderConstants(stage.pgm_hash, index, ring->address,
-                                        memory->ClampRangeSize(ring->address, ring->size));
+            if (rt_lighting->WantsShaderConstants() && stage.sw_stage == Shader::SwStage::Fragment &&
+                !desc.IsSpecial() && memory->IsValidGpuMapping(ring->address, 0)) {
+                rt_lighting->OnShaderConstants(stage.pgm_hash, ring->address,
+                                               memory->ClampRangeSize(ring->address, ring->size));
             }
             if (index == 0) {
                 ring_size0 = ring->size;
             } else if (index == 1 && light_quad_draw && stage.sw_stage == Shader::SwStage::Fragment &&
-                       ring_size0 == RayTracedAO::LightFrameBlockSize && !desc.IsSpecial() &&
+                       ring_size0 == RtLightRecords::LightFrameBlockSize && !desc.IsSpecial() &&
                        memory->IsValidGpuMapping(ring->address, 0)) {
-                rtao->OnLightBuffer(ring->address, memory->ClampRangeSize(ring->address, ring->size),
+                rt_lighting->OnLightBuffer(ring->address, memory->ClampRangeSize(ring->address, ring->size),
                                     stage.pgm_hash);
             }
             // Copied into the constant ring by the GPU command thread (read-only).

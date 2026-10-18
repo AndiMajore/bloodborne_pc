@@ -48,7 +48,6 @@ void RayTracedAO::OnFrameStart() {
         resources_ready = true;
     }
     static u32 reports = 0;
-    FinishLightFrame();
     WriteDump();
     ReportReadback();
     ReportExtents();

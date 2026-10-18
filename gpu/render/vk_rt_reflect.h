@@ -30,12 +30,13 @@ class Scheduler;
 class Runtime;
 class CameraMotion;
 class RayTracedAO;
+class RtLighting;
 
 class RtReflections {
 public:
     explicit RtReflections(const Instance& instance, Scheduler& scheduler,
                            VideoCore::TextureCache& texture_cache, Runtime& runtime,
-                           CameraMotion& camera_motion, const RayTracedAO& rtao);
+                           CameraMotion& camera_motion, const RayTracedAO& rtao, const RtLighting& lighting);
     ~RtReflections();
 
     [[nodiscard]] bool Enabled() const noexcept {
@@ -67,6 +68,7 @@ private:
     Runtime& runtime;
     CameraMotion& camera_motion;
     const RayTracedAO& rtao;
+    const RtLighting& lighting; // the transparents' light (FrameEmission)
 
     bool enabled = false;
     bool active = true;     // enabled=0 in the file: off live

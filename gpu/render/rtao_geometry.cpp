@@ -286,33 +286,6 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "foliage") s.foliage = std::clamp(value, 0.0f, 1.0f);
     else if (key == "surface") flag(s.surface);
     else if (key == "surface_budget") s.surface_budget = std::clamp(u32(std::max(value, 0.0f)), 1024u, 4000000u);
-    else if (key == "emission") s.emission = std::clamp(value, 0.0f, 16.0f);
-    else if (key == "emission_at") s.emission_at = std::clamp(u32(std::max(value, 0.0f)), 0u, 1u);
-    else if (key == "emission_trace") s.emission_trace = value;
-    else if (key == "emission_sat") s.emission_sat = std::clamp(value, 0.0f, 1.0f);
-    else if (key == "emission_blur") s.emission_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
-    else if (key == "sun_shadow") flag(s.sun_shadow);
-    else if (key == "sun_spread") s.sun_spread = std::clamp(value, 0.0f, 0.2f);
-    else if (key == "sun_erode") s.sun_erode = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
-    else if (key == "sun_debug") s.sun_debug = std::clamp(u32(std::max(value, 0.0f)), 0u, 7u);
-    else if (key == "spot_shadow") flag(s.spot_shadow);
-    else if (key == "spot_res") s.spot_res = std::clamp(u32(std::max(value, 0.0f)), 256u, 8192u);
-    else if (key == "spot_blur") s.spot_blur = std::clamp(u32(std::max(value, 0.0f)), 0u, 32u);
-    else if (key == "spot_soft") s.spot_soft = std::clamp(value, 0.0f, 100.0f);
-    else if (key == "spot_near") s.spot_near = std::clamp(value, 0.0f, 10.0f);
-    else if (key == "sun_far") s.sun_far = std::clamp(value, 1.0f, 2000.0f);
-    else if (key == "lights_dump") s.lights_dump = value;
-    else if (key == "fire_light") s.fire_light = std::clamp(value, 0.0f, 64.0f);
-    else if (key == "fire_shadow") s.fire_shadow = std::clamp(value, 0.0f, 1.0f);
-    else if (key == "fire_range") s.fire_range = std::clamp(value, 0.5f, 100.0f);
-    else if (key == "fire_size") s.fire_size = std::clamp(value, 0.0f, 5.0f);
-    else if (key == "fire_debug") flag(s.fire_debug);
-    else if (key == "fire_height") s.fire_height = std::clamp(value, 0.0f, 10.0f);
-    else if (key == "fire_wrap") s.fire_wrap = std::clamp(value, 0.0f, 1.0f);
-    else if (key == "fire_smooth") s.fire_smooth = std::clamp(value, 0.0f, 0.98f);
-    else if (key == "fire_smooth_pos") s.fire_smooth_pos = std::clamp(value, 0.0f, 0.98f);
-    else if (key == "fire_pull") s.fire_pull = std::clamp(value, 0.0f, 5.0f);
-    else if (key == "fire_min") s.fire_min = std::clamp(value, 0.0f, 100.0f);
     else if (key == "decals") flag(s.include_nowrite);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);
@@ -323,39 +296,14 @@ bool Apply(Settings& s, std::string_view key, float value) {
 }
 
 u32 ApplyText(Settings& settings, std::string_view text, bool& history_reset) {
-    u32 applied = 0;
-    size_t pos = 0;
-    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-    while (pos < text.size()) {
-        while (pos < text.size() && space(text[pos])) ++pos;
-        size_t end = pos;
-        while (end < text.size() && !space(text[end])) ++end;
-        const std::string_view token = text.substr(pos, end - pos);
-        pos = end;
-        if (token.empty() || token[0] == '#') {
-            // A comment runs to the end of its line.
-            if (!token.empty()) {
-                while (pos < text.size() && text[pos] != '\n') ++pos;
-            }
-            continue;
-        }
-        const size_t eq = token.find('=');
-        if (eq == std::string_view::npos || eq == 0) {
-            continue;
-        }
-        const std::string value(token.substr(eq + 1));
-        char* parse_end = nullptr;
-        const float number = std::strtof(value.c_str(), &parse_end);
-        if (parse_end == value.c_str()) {
-            continue;
-        }
+    return ForEachSetting(text, [&](std::string_view key, float number) {
         const u32 denoise_before = settings.denoise;
-        if (Apply(settings, token.substr(0, eq), number)) {
-            ++applied;
-            history_reset |= settings.denoise != denoise_before;
+        if (!Apply(settings, key, number)) {
+            return false;
         }
-    }
-    return applied;
+        history_reset |= settings.denoise != denoise_before;
+        return true;
+    });
 }
 
 } // namespace Rtao
