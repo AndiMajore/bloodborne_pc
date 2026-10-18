@@ -10,6 +10,8 @@
 #include "common/path_util.h"
 
 #include "bbgpu/shaders/ssgi_apply_comp.h"
+#include "bbgpu/shaders/ssgi_denoise_atrous_comp.h"
+#include "bbgpu/shaders/ssgi_denoise_temporal_comp.h"
 #include "bbgpu/shaders/ssgi_gather_comp.h"
 #include "bbgpu/shaders/ssgi_gather_rt_comp.h"
 #include "render/vk_rtao.h"
@@ -70,6 +72,67 @@ struct ApplyConstants {
     u32 debug;
     float adaptive;
 };
+struct TemporalConstants {
+    std::array<float, 12> to_prev;
+    std::array<float, 4> proj;
+    std::array<float, 2> full_size;
+    std::array<float, 2> half_size;
+    std::array<float, 2> jitter;
+    float max_frames;
+    float clip;
+    u32 history_ok;
+};
+static_assert(sizeof(TemporalConstants) == 100);
+struct AtrousConstants {
+    std::array<float, 12> view;
+    std::array<float, 4> proj;
+    std::array<float, 2> full_size;
+    std::array<float, 2> half_size;
+    std::array<float, 2> jitter;
+    s32 step;
+    u32 mode; // 1: the first pass, 2: the last
+    float phi_luma;
+    float phi_plane;
+    float phi_normal;
+};
+static_assert(sizeof(AtrousConstants) == 108);
+// a * b for 3x4 affine rows (b's fourth row 0 0 0 1).
+std::array<float, 12> Compose(const std::array<float, 12>& a, const std::array<float, 12>& b) {
+    std::array<float, 12> m{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            float v = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                v += a[r * 4 + k] * b[k * 4 + c];
+            }
+            m[r * 4 + c] = v + (c == 3 ? a[r * 4 + 3] : 0.0f);
+        }
+    }
+    return m;
+}
+void MakeImage(const Instance& instance, VideoCore::HostImage& image, vk::UniqueImageView& view,
+               vk::Format format, u32 width, u32 height) {
+    const auto device = instance.GetDevice();
+    view.reset();
+    image = VideoCore::HostImage(device, instance.GetAllocator());
+    image.Create(vk::ImageCreateInfo{
+        .imageType = vk::ImageType::e2D,
+        .format = format,
+        .extent = {width, height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    });
+    view = Check(device.createImageViewUnique({
+        .image = vk::Image(image),
+        .viewType = vk::ImageViewType::e2D,
+        .format = format,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    }));
+}
 float EnvFloat(const char* name, float fallback) {
     const char* value = std::getenv(name);
     return value ? std::strtof(value, nullptr) : fallback;
@@ -170,6 +233,14 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
             sampled(7), sampled(8)};
         make_layouts(rt_bindings, sizeof(GatherRtConstants), gather_rt_desc_layout, gather_rt_layout);
         gather_rt_pipeline = make_pipeline(SSGI_GATHER_RT_COMP, *gather_rt_layout);
+        // The colour denoiser (rt_denoise=1), for the ray-traced gather only.
+        const std::array temporal_bindings = {sampled(0), sampled(1), sampled(2), sampled(3),
+                                              sampled(4), sampled(5), storage(6), storage(7)};
+        const std::array atrous_bindings = {sampled(0), sampled(1), storage(2)};
+        make_layouts(temporal_bindings, sizeof(TemporalConstants), temporal_desc_layout, temporal_layout);
+        make_layouts(atrous_bindings, sizeof(AtrousConstants), atrous_desc_layout, atrous_layout);
+        temporal_pipeline = make_pipeline(SSGI_DENOISE_TEMPORAL_COMP, *temporal_layout);
+        atrous_pipeline = make_pipeline(SSGI_DENOISE_ATROUS_COMP, *atrous_layout);
         std::printf("SSGI: ray-traced gather available (rt=1 in ssgi.txt, experimental)\n");
     }
 }
@@ -235,11 +306,22 @@ void ScreenSpaceGI::PollSettings() {
         else if (key == "rt_max") rt_max = std::max(value, 0.01f);
         else if (key == "enabled") enabled = value != 0.0f;
         else if (key == "adaptive") adaptive = std::max(value, 0.0f);
+        else if (key == "rt_denoise") rt_denoise = value != 0.0f;
+        else if (key == "denoise_frames") denoise_frames = std::clamp(value, 1.0f, 255.0f);
+        else if (key == "denoise_clip") denoise_clip = std::max(value, 0.0f);
+        else if (key == "denoise_passes") denoise_passes = std::clamp(u32(std::max(value, 1.0f)), 1u, 5u);
+        else if (key == "denoise_luma") denoise_luma = std::max(value, 0.01f);
+        else if (key == "denoise_plane") denoise_plane = std::max(value, 0.001f);
+        else if (key == "denoise_normal") denoise_normal = std::max(value, 0.0f);
     }
     std::printf("SSGI: settings: enabled %d, strength %.2f, radius %.2f, %u x %u, history %.2f, "
                 "adaptive %.2f, debug %u, rt %d (%u rays, clip %.2f, max %.2f)\n",
                 enabled ? 1 : 0, strength, radius, directions, steps, history, adaptive, debug,
                 rt ? 1 : 0, rays, rt_clip, rt_max);
+    if (rt_denoise) {
+        std::printf("SSGI: rt denoiser on: %.0f frames, clip %.2f, %u passes (luma %.2f, plane %.3f, normal %.0f)\n",
+                    denoise_frames, denoise_clip, denoise_passes, denoise_luma, denoise_plane, denoise_normal);
+    }
 }
 
 void ScreenSpaceGI::OnOpaqueScene(VideoCore::ImageId color) {
@@ -262,29 +344,9 @@ bool ScreenSpaceGI::EnsureResources(u32 w, u32 h) {
     if (width == w && height == h && gi_images[0]) {
         return true;
     }
-    const auto device = instance.GetDevice();
-    const auto allocator = instance.GetAllocator();
     const auto make_image = [&](VideoCore::HostImage& image, vk::UniqueImageView& view,
                                 vk::Format format, u32 iw, u32 ih) {
-        view.reset();
-        image = VideoCore::HostImage(device, allocator);
-        image.Create(vk::ImageCreateInfo{
-            .imageType = vk::ImageType::e2D,
-            .format = format,
-            .extent = {iw, ih, 1},
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
-            .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
-            .initialLayout = vk::ImageLayout::eUndefined,
-        });
-        view = Check(device.createImageViewUnique({
-            .image = vk::Image(image),
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
+        MakeImage(instance, image, view, format, iw, ih);
     };
     scheduler.Finish(); // the old images may be in flight
     for (u32 i = 0; i < 2; ++i) {
@@ -297,6 +359,24 @@ bool ScreenSpaceGI::EnsureResources(u32 w, u32 h) {
     history_valid = false;
     gi_index = 0;
     return true;
+}
+
+void ScreenSpaceGI::EnsureDenoiseResources() {
+    if (denoise_width == width && denoise_height == height && acc_images[0]) {
+        return;
+    }
+    scheduler.Finish();
+    const u32 hw = (width + 1) / 2, hh = (height + 1) / 2;
+    for (u32 i = 0; i < 2; ++i) {
+        MakeImage(instance, acc_images[i], acc_views[i], vk::Format::eR16G16B16A16Sfloat, hw, hh);
+        MakeImage(instance, mom_images[i], mom_views[i], vk::Format::eR32G32B32A32Uint, hw, hh);
+        MakeImage(instance, atrous_images[i], atrous_views[i], vk::Format::eR16G16B16A16Sfloat, hw, hh);
+    }
+    denoise_width = width;
+    denoise_height = height;
+    denoise_valid = false;
+    denoise_index = 0;
+    std::printf("SSGI: rt denoiser images %ux%u\n", hw, hh);
 }
 
 vk::ImageView ScreenSpaceGI::CachedView(const VideoCore::Image& image, vk::Format format,
@@ -358,6 +438,9 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     }
     if (!EnsureResources(w, h)) {
         return;
+    }
+    if (rt && rt_denoise && temporal_pipeline) {
+        EnsureDenoiseResources();
     }
     static u32 passes = 0;
     if (passes++ % 600 == 0) {
@@ -461,6 +544,64 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         }
     }
     const auto surface = tlas ? rtao->FrameSurface() : RayTracedAO::SurfaceCache{};
+    // The colour denoiser: the gather writes this frame's rays alone, the denoiser accumulates
+    // and filters them into the same image. A frame without it ends its history.
+    struct Denoise {
+        bool on = false;
+        u32 passes = 0;
+        TemporalConstants temporal{};
+        AtrousConstants atrous{};
+        vk::ImageView acc_read, acc_write, mom_read, mom_write;
+        std::array<vk::ImageView, 2> scratch{};
+        vk::Pipeline temporal_pipeline, atrous_pipeline;
+        vk::PipelineLayout temporal_layout, atrous_layout;
+    } denoise;
+    denoise.on = tlas && rt_denoise && temporal_pipeline && acc_images[0] && denoise_width == w &&
+                 denoise_height == h;
+    if (denoise.on) {
+        const u32 dr = denoise_index, dw = denoise_index ^ 1;
+        denoise_index = dw;
+        for (auto* image : {&acc_images[dw], &mom_images[dw], &atrous_images[0], &atrous_images[1]}) {
+            barrier(vk::Image(*image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone, rw);
+        }
+        for (auto* image : {&acc_images[dr], &mom_images[dr]}) {
+            barrier(vk::Image(*image), denoise_valid ? vk::ImageLayout::eGeneral : vk::ImageLayout::eUndefined,
+                    rw, vk::AccessFlagBits2::eShaderRead);
+        }
+        denoise.passes = denoise_passes;
+        denoise.temporal = {
+            .to_prev = Compose(camera_motion.PrevView(), camera_motion.InvView()),
+            .proj = gather.proj,
+            .full_size = gather.full_size,
+            .half_size = gather.half_size,
+            .jitter = camera_motion.Jitter(),
+            .max_frames = denoise_frames,
+            .clip = denoise_clip,
+            .history_ok = denoise_valid && camera_motion.HistoryValid() ? 1u : 0u,
+        };
+        denoise.atrous = {
+            .view = gather.view,
+            .proj = gather.proj,
+            .full_size = gather.full_size,
+            .half_size = gather.half_size,
+            .jitter = camera_motion.Jitter(),
+            .step = 1,
+            .mode = 0,
+            .phi_luma = denoise_luma,
+            .phi_plane = denoise_plane,
+            .phi_normal = denoise_normal,
+        };
+        denoise.acc_read = *acc_views[dr];
+        denoise.acc_write = *acc_views[dw];
+        denoise.mom_read = *mom_views[dr];
+        denoise.mom_write = *mom_views[dw];
+        denoise.scratch = {*atrous_views[0], *atrous_views[1]};
+        denoise.temporal_pipeline = *temporal_pipeline;
+        denoise.atrous_pipeline = *atrous_pipeline;
+        denoise.temporal_layout = *temporal_layout;
+        denoise.atrous_layout = *atrous_layout;
+    }
+    denoise_valid = denoise.on;
     const GatherRtConstants gather_rt{
         .view = gather.view,
         .proj = gather.proj,
@@ -468,7 +609,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .half_size = gather.half_size,
         .jitter = camera_motion.Jitter(),
         .radius = radius,
-        .history = gather.history,
+        .history = denoise.on ? 0.0f : gather.history,
         .frame = frame,
         .rays = rays,
         .debug = debug,
@@ -491,7 +632,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     const vk::ImageView motion = *motion_view;
     scheduler.RecordCrumb(
         {.name = "ssgi"},
-        [gather, gather_rt, tlas, apply, depth_view, normal_view, color_view, albedo_view, motion, emission_view,
+        [gather, gather_rt, tlas, apply, denoise, depth_view, normal_view, color_view, albedo_view, motion, emission_view,
          lights_view, gi_read, gi_write, gi_image = vk::Image(gi_images[write]), w, h,
          gather_pipeline = *gather_pipeline, gather_layout = *gather_layout,
          gather_rt_pipeline = *gather_rt_pipeline, gather_rt_layout = *gather_rt_layout,
@@ -538,6 +679,47 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
                     cmdbuf.pushConstants(gather_rt_layout, vk::ShaderStageFlagBits::eCompute, 0,
                                          sizeof(gather_rt), &gather_rt);
                     cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+                    if (denoise.on) {
+                        const vk::MemoryBarrier2 mb{
+                            .srcStageMask = compute,
+                            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                            .dstStageMask = compute,
+                            .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+                        };
+                        const auto settle = [&] {
+                            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &mb});
+                        };
+                        settle();
+                        const auto r = info(gi_write), pa = info(denoise.acc_read), pm = info(denoise.mom_read),
+                                   wa = info(denoise.acc_write), wm = info(denoise.mom_write);
+                        const std::array t_writes = {write_of(0, sampled, &r), write_of(1, sampled, &d),
+                                                     write_of(2, sampled, &n), write_of(3, sampled, &m),
+                                                     write_of(4, sampled, &pa), write_of(5, sampled, &pm),
+                                                     write_of(6, storage, &wa), write_of(7, storage, &wm)};
+                        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, denoise.temporal_pipeline);
+                        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, denoise.temporal_layout, 0,
+                                                    t_writes);
+                        cmdbuf.pushConstants(denoise.temporal_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                             sizeof(denoise.temporal), &denoise.temporal);
+                        cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+                        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, denoise.atrous_pipeline);
+                        for (u32 i = 0; i < denoise.passes; ++i) {
+                            settle();
+                            const bool last = i + 1 == denoise.passes;
+                            const auto in = info(i == 0 ? denoise.acc_write : denoise.scratch[(i - 1) & 1]);
+                            const auto out = info(last ? gi_write : denoise.scratch[i & 1]);
+                            const std::array a_writes = {write_of(0, sampled, &in), write_of(1, sampled, &wm),
+                                                         write_of(2, storage, &out)};
+                            auto constants = denoise.atrous;
+                            constants.step = 1 << i;
+                            constants.mode = (i == 0 ? 1u : 0u) | (last ? 2u : 0u);
+                            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, denoise.atrous_layout, 0,
+                                                        a_writes);
+                            cmdbuf.pushConstants(denoise.atrous_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                                 sizeof(constants), &constants);
+                            cmdbuf.dispatch(((w + 1) / 2 + 7) / 8, ((h + 1) / 2 + 7) / 8, 1);
+                        }
+                    }
                 } else {
                     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, gather_pipeline);
                     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, gather_layout, 0,

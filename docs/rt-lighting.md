@@ -31,6 +31,12 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
   3x3 mean +- that many sigma), `rt_max` (2: a ray's radiance cap), `debug` (1 the bounce alone;
   2 hit classes: green seen, blue surface cache, red hidden; 3 the emission image; 4 the fire
   lights alone, blue what `fire_shadow` takes away).
+  The colour denoiser (tickets 36, 37, 42; off): `rt_denoise` (0/1: instead of the gather's own
+  clipped history, the rays of the frame accumulated on the motion vectors where depth and normal
+  agree, up to `denoise_frames` (16), the history clipped to the raw 3x3 mean +- `denoise_clip`
+  sigma (2; 0 off), then `denoise_passes` (3) edge-avoiding a-trous passes weighted by the plane
+  distance (`denoise_plane` 0.02 of the depth), the normals (`denoise_normal` 32) and the
+  luminance in standard deviations of its variance (`denoise_luma` 4)).
 - `user/rtreflect.txt` (reflections): `enabled`, `mode` (1 fill SSR's misses, 2 ours wherever
   valid), `replace_ssr` (1: the game's SSR draw left out, ~1.5 ms), `soften` (1: the material's
   lobe; 0 a mirror; 2-3 blurrier), `far` (40 m), `strength` (0-1), `debug` (1 ours alone; 2
@@ -78,8 +84,8 @@ everything on with Andreas's settings 16.35-16.50 ms, at the vblank. The game's 
 
 - Characters (the per-frame BLAS) are never in the surface cache: a hidden hit on one stays dark.
 - Surfaces the camera never saw stay dark; the cache bakes view-dependent highlights.
-- No colour denoiser yet (tickets 36, 37, 42): the RT SSGI relies on a history clip and a cap, the
-  reflections on the game's SSR blur levels; judge the effects after the shared rgb denoiser.
+- The colour denoiser (`rt_denoise`, 36/37/42) is a first version for the RT SSGI only and off; the
+  reflections still rely on the game's SSR blur levels. Not yet judged in motion.
 - Reach limited to the static BLAS's (the AO's distance + margin): far occluders of the sun are the
   game's (cascaded) shadow.
 - The SSR target's semantics were read from the game's shader (not shipped): colour x weight with

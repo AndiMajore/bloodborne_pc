@@ -58,6 +58,7 @@ public:
 
 private:
     bool EnsureResources(u32 width, u32 height);
+    void EnsureDenoiseResources();
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect);
     void Record(VideoCore::ImageId color);
@@ -75,6 +76,13 @@ private:
     u32 rays = 2;       // per half-res pixel (rt)
     float rt_max = 2.0f;  // rt: a ray's radiance capped to this (lamps and candles as fireflies)
     float rt_clip = 1.5f; // rt: history clipped to this frame's 3x3 mean +- rt_clip sigma
+    // rt_denoise=1: the colour denoiser instead of the gather's own history (experimental, off):
+    // temporal accumulation on the motion vectors, then edge-avoiding a-trous passes.
+    bool rt_denoise = false;
+    float denoise_frames = 16.0f; // the history's length cap
+    float denoise_clip = 2.0f;    // history clipped to the raw 3x3 mean +- that many sigma (0: off)
+    u32 denoise_passes = 3;       // a-trous passes (steps 1, 2, 4, ...)
+    float denoise_luma = 4.0f, denoise_plane = 0.02f, denoise_normal = 32.0f;
     const RayTracedAO* rtao = nullptr;
     const RtLighting* lighting = nullptr;
     float strength = 1.0f;
@@ -100,6 +108,16 @@ private:
     vk::UniquePipelineLayout gather_rt_layout;
     vk::UniquePipeline gather_rt_pipeline;               // null without ray queries
     u32 rt_passes = 0, rt_fallbacks = 0;                 // (per report)
+    vk::UniqueDescriptorSetLayout temporal_desc_layout, atrous_desc_layout;
+    vk::UniquePipelineLayout temporal_layout, atrous_layout;
+    vk::UniquePipeline temporal_pipeline, atrous_pipeline;
+    // The denoiser's images (made at its first use): accumulated rgb + frames and moments + view z
+    // + normal ping-pong between frames; two scratch images for the a-trous passes.
+    std::array<VideoCore::HostImage, 2> acc_images, mom_images, atrous_images;
+    std::array<vk::UniqueImageView, 2> acc_views, mom_views, atrous_views;
+    u32 denoise_width = 0, denoise_height = 0;
+    bool denoise_valid = false;
+    u32 denoise_index = 0;
     std::array<VideoCore::HostImage, 2> gi_images;
     std::array<vk::UniqueImageView, 2> gi_views;
     VideoCore::HostImage motion_image;

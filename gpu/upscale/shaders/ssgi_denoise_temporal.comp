@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: the RT bounce light's colour denoiser (rt_denoise=1 in ssgi.txt, experimental; tickets
+// 36, 37, 42), its temporal half. The gather's raw rays of this frame (no history of their own)
+// are accumulated with last frame's result where it was the same surface: the previous texel
+// read through the motion vectors (camera and objects), bilinear over the four texels around it,
+// each kept only when its view depth matches this point's moved into last frame's view and its
+// normal agrees. Per texel the frames accumulated (up to max_frames: 1/n of the new frame) and the
+// luminance's first two moments, from which the spatial pass (ssgi_denoise_atrous.comp) takes the
+// variance. The history is clipped to this frame's 3x3 raw neighbourhood (mean +- clip sigma) so
+// light that moved away does not trail; clip 0 leaves it unclipped.
+#version 460
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D raw_tex;     // half res: this frame's gi (rgb), view z (a, 1e9: sky)
+layout(binding = 1) uniform texture2D depth_tex;   // full res, D32 0..1
+layout(binding = 2) uniform texture2D normal_tex;  // full res, world normal * 0.5 + 0.5
+layout(binding = 3) uniform texture2D motion_tex;  // full res, pixels, previous - current
+layout(binding = 4) uniform texture2D prev_acc_tex;   // half res: last frame's rgb, frames (a)
+layout(binding = 5) uniform utexture2D prev_mom_tex;  // half res: last frame's moments, view z, normal
+layout(binding = 6, rgba16f) uniform writeonly image2D acc_img;
+layout(binding = 7, rgba32ui) uniform writeonly uimage2D mom_img;
+
+layout(push_constant) uniform Constants {
+    vec4 to_prev[3];  // this frame's view -> last frame's view, 3x4 rows
+    vec4 proj;        // x scale, y scale, z scale, z offset
+    vec2 full_size;
+    vec2 half_size;
+    vec2 jitter;
+    float max_frames; // the history's length cap (1/max_frames: the new frame's least share)
+    float clip;       // history clipped to the raw 3x3 mean +- clip sigma (0: not clipped)
+    uint history_ok;  // 0: no history (the first frame, a resize, the switch just turned on)
+};
+
+float ViewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+vec3 ViewPos(vec2 pixel, float depth) {
+    const vec2 uv = (pixel - jitter) / full_size;
+    const vec2 ndc = uv * 2.0 - 1.0;
+    const float z = ViewZ(depth);
+    return vec3(ndc.x * z / proj.x, ndc.y * z / proj.y, z);
+}
+float Luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+vec2 OctWrap(vec2 v) {
+    return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+uint PackNormal(vec3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    const vec2 e = n.z >= 0.0 ? n.xy : OctWrap(n.xy);
+    return packSnorm2x16(e);
+}
+vec3 UnpackNormal(uint p) {
+    const vec2 e = unpackSnorm2x16(p);
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = OctWrap(n.xy);
+    }
+    return normalize(n);
+}
+
+void main() {
+    const ivec2 hp = ivec2(gl_GlobalInvocationID.xy);
+    if (hp.x >= int(half_size.x) || hp.y >= int(half_size.y)) {
+        return;
+    }
+    const vec4 raw = texelFetch(raw_tex, hp, 0);
+    if (raw.a > 1e8) { // the sky: nothing to keep
+        imageStore(acc_img, hp, vec4(0.0));
+        imageStore(mom_img, hp, uvec4(0u, 0u, floatBitsToUint(1e9), 0u));
+        return;
+    }
+    const ivec2 fp = hp * 2 + 1;
+    const vec3 P = ViewPos(vec2(fp) + 0.5, texelFetch(depth_tex, fp, 0).r);
+    const vec3 N = normalize(texelFetch(normal_tex, fp, 0).xyz * 2.0 - 1.0);
+    // This point in last frame's view: the depth the history must have had (camera motion only;
+    // an object's own motion stays within the tolerance between two frames).
+    const float prev_z = dot(to_prev[2].xyz, P) + to_prev[2].w;
+
+    vec3 hist = vec3(0.0);
+    vec2 hist_mom = vec2(0.0);
+    float hist_frames = 0.0, weight = 0.0;
+    if (history_ok != 0u) {
+        const vec2 prev_fp = vec2(fp) + 0.5 + texelFetch(motion_tex, fp, 0).rg;
+        const vec2 prev_h = prev_fp / 2.0 - 0.5;
+        const ivec2 base = ivec2(floor(prev_h));
+        const vec2 f = prev_h - vec2(base);
+        for (int i = 0; i < 4; ++i) {
+            const ivec2 o = ivec2(i & 1, i >> 1);
+            const ivec2 q = base + o;
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(half_size)))) {
+                continue;
+            }
+            const uvec4 m = texelFetch(prev_mom_tex, q, 0);
+            const float qz = uintBitsToFloat(m.z);
+            if (qz > 1e8 || abs(qz - prev_z) > 0.05 * abs(prev_z) || dot(UnpackNormal(m.w), N) < 0.9) {
+                continue;
+            }
+            const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+            const vec4 a = texelFetch(prev_acc_tex, q, 0);
+            hist += a.rgb * w;
+            hist_frames += a.a * w;
+            hist_mom += vec2(uintBitsToFloat(m.x), uintBitsToFloat(m.y)) * w;
+            weight += w;
+        }
+    }
+
+    const float lum = Luma(raw.rgb);
+    vec3 result = raw.rgb;
+    vec2 mom = vec2(lum, lum * lum);
+    float frames = 1.0;
+    if (weight > 0.01) {
+        hist /= weight;
+        hist_mom /= weight;
+        hist_frames /= weight;
+        if (clip > 0.0) {
+            // This frame's raw neighbourhood on the same surface (view z within 5%).
+            vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+            float n = 0.0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const ivec2 q = clamp(hp + ivec2(dx, dy), ivec2(0), ivec2(half_size) - 1);
+                    const vec4 t = texelFetch(raw_tex, q, 0);
+                    if (abs(t.a - P.z) > 0.05 * abs(P.z)) {
+                        continue;
+                    }
+                    m1 += t.rgb;
+                    m2 += t.rgb * t.rgb;
+                    n += 1.0;
+                }
+            }
+            m1 /= max(n, 1.0);
+            const vec3 sigma = sqrt(max(m2 / max(n, 1.0) - m1 * m1, vec3(0.0)));
+            const vec3 box = clip * sigma + 0.02 * (m1 + vec3(0.05));
+            const vec3 clipped = clamp(hist, m1 - box, m1 + box);
+            // Clipped hard: the light changed here, start over from fewer frames.
+            const float moved = Luma(abs(clipped - hist)) / max(Luma(hist), 1e-3);
+            hist_frames = mix(hist_frames, 1.0, clamp(moved * 2.0, 0.0, 1.0));
+            hist = clipped;
+        }
+        frames = min(hist_frames + 1.0, max_frames);
+        const float alpha = 1.0 / frames;
+        result = mix(hist, raw.rgb, alpha);
+        mom = mix(hist_mom, mom, max(alpha, 0.2));
+    }
+    imageStore(acc_img, hp, vec4(result, frames));
+    imageStore(mom_img, hp, uvec4(floatBitsToUint(mom.x), floatBitsToUint(mom.y), floatBitsToUint(P.z), PackNormal(N)));
+}
