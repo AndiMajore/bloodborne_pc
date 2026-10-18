@@ -686,8 +686,13 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     // copy list read on the CPU (vk_shader_hle.cpp) kept them in place too.
     buffer_cache.force_writes_in_place =
         Game::BufferCopyShader() != 0 && cs.pgm_hash == Game::BufferCopyShader();
+    if (buffer_cache.force_writes_in_place) {
+        // Only its real destinations count as written in place (ticket 53).
+        CopyShaderDestinations(cs, cs_program, buffer_cache.copy_destinations);
+    }
     const bool bound = BindResources(pipeline);
     buffer_cache.force_writes_in_place = false;
+    buffer_cache.copy_destinations.clear();
     if (!bound) {
         return;
     }

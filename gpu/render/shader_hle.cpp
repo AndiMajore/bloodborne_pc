@@ -141,6 +141,37 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
     return true;
 }
 
+namespace {
+struct CopyShaderControl {
+    u32 dst_idx;
+    u32 src_idx;
+    u32 end;
+};
+static_assert(sizeof(CopyShaderControl) == 12);
+} // namespace
+
+void CopyShaderDestinations(const Shader::Info& info, const Gcn::ComputeProgram& cs_program,
+                            std::vector<std::pair<VAddr, VAddr>>& out) {
+    out.clear();
+    if (info.buffers.size() < 3) {
+        return;
+    }
+    const auto ctl_sharp = info.buffers[0].GetSharp(info);
+    const auto dst_sharp = info.buffers[2].GetSharp(info);
+    const u64 stride = dst_sharp.GetStride();
+    const u64 count = cs_program.dim_x;
+    if (ctl_sharp.GetStride() != sizeof(CopyShaderControl) || stride == 0 || count == 0 ||
+        u64(ctl_sharp.GetSize()) < count * sizeof(CopyShaderControl) || ctl_sharp.base_address == 0) {
+        return;
+    }
+    const auto* ctl = reinterpret_cast<const CopyShaderControl*>(ctl_sharp.base_address);
+    out.reserve(count);
+    for (u64 i = 0; i < count; ++i) {
+        const VAddr start = dst_sharp.base_address + u64(ctl[i].dst_idx) * stride;
+        out.emplace_back(start, start + (u64(ctl[i].end) + 1) * stride);
+    }
+}
+
 /// The copy shader's three formatted buffers: control records, source and destination.
 static bool ExecuteCopyShaderHLE(const Shader::Info& info, const Gcn::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer) {
@@ -153,12 +184,6 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const Gcn::ComputePro
     const auto buf_stride = src_buf_sharp.GetStride();
     ASSERT(buf_stride == dst_buf_sharp.GetStride());
 
-    struct CopyShaderControl {
-        u32 dst_idx;
-        u32 src_idx;
-        u32 end;
-    };
-    static_assert(sizeof(CopyShaderControl) == 12);
     ASSERT(ctl_buf_sharp.GetStride() == sizeof(CopyShaderControl));
     const auto ctl_buf = reinterpret_cast<const CopyShaderControl*>(ctl_buf_sharp.base_address);
 
@@ -282,8 +307,10 @@ bool ExecuteShaderHLE(const Shader::Info& info, const Gcn::Regs& regs,
         // Rasterizer::DispatchRecord): our translator reads what it copies there on the CPU.
         auto& buffer_cache = rasterizer.GetBufferCache();
         buffer_cache.force_writes_in_place = true;
+        CopyShaderDestinations(info, cs_program, buffer_cache.copy_destinations);
         const bool done = ExecuteCopyShaderHLE(info, cs_program, rasterizer);
         buffer_cache.force_writes_in_place = false;
+        buffer_cache.copy_destinations.clear();
         return done;
     }
     return false;

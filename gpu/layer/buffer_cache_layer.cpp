@@ -376,7 +376,39 @@ std::optional<std::pair<const Buffer*, u64>> BufferCache::LayerBind(VAddr addres
         // paged instead (LayerPagedRecord). Written: its blocks in VRAM go back in place (the
         // GPU's data there copied back first). Read: only the GPU's data is copied back; the
         // blocks stay in VRAM for the bindings that lie whole in their mirror.
-        if (is_written) {
+        static const bool precise_copy = [] {
+            const char* env = std::getenv("BB_COPY_DEST_PRECISE");
+            return !(env && env[0] == '0');
+        }();
+        if (is_written && force_writes_in_place && precise_copy && !copy_destinations.empty()) {
+            // The copy shader (ticket 53): only the blocks it writes go back in place and count
+            // as written there; the others keep their VRAM copies (it neither reads nor writes
+            // them through this binding, so their bytes in place are not looked at).
+            std::vector<std::pair<u64, u64>> runs;
+            for (const auto& [a, b] : copy_destinations) {
+                const u64 ra = std::max(first, u64(a) >> block_shift);
+                const u64 rb = std::min(end, ((u64(b) - 1) >> block_shift) + 1);
+                if (b > a && ra < rb) {
+                    runs.emplace_back(ra, rb);
+                }
+            }
+            std::sort(runs.begin(), runs.end());
+            for (size_t i = 0; i < runs.size();) {
+                u64 ra = runs[i].first, rb = runs[i].second;
+                for (++i; i < runs.size() && runs[i].first <= rb; ++i) {
+                    rb = std::max(rb, runs[i].second);
+                }
+                if (!Layer().AnyValid(ra, rb)) {
+                    continue; // nothing of it in VRAM: in place already
+                }
+                LayerDemote(ra, rb, true, resolution.kind == Kind::Mirror ? 0 : 1);
+                if (layer_write_bounces.Overlaps(ra, rb)) {
+                    dynamic_blocks.Add({ra, rb});
+                } else {
+                    layer_write_bounces.Add({ra, rb});
+                }
+            }
+        } else if (is_written) {
             LayerDemote(first, end, true, resolution.kind == Kind::Mirror ? 0 : 1);
             // The GPU writes this range in place: its blocks stay in place (moving them back
             // would only bring them here again; the arena mixed them). All in one mirror: from

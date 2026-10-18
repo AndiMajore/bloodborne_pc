@@ -144,6 +144,13 @@ public:
     }
     /// bbport: GPU writes of the bindings resolved now stay in the game's memory (no VRAM copy).
     bool force_writes_in_place = false;
+    /// bbport (ticket 53): with force_writes_in_place, the bytes the copy shader really writes
+    /// ([start, end), from its copy list read on the CPU). A written binding over blocks in VRAM
+    /// then sends only these blocks back in place and marks only them dynamic; the rest of its
+    /// wide range (descriptors of 25-59 MB around writes of a few KB) keeps its VRAM copies, among
+    /// them other shaders' outputs (cs 8b355b5a: 0.27 -> 1.65 ms on 0.6). Empty: unknown, the
+    /// whole range as before. BB_COPY_DEST_PRECISE=0: always the whole range.
+    std::vector<std::pair<VAddr, VAddr>> copy_destinations;
 
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
