@@ -366,6 +366,7 @@ private:
     static constexpr u32 MaxSurfaceParts = 32768;
     u32 surface_part_count = 0, surface_total = 0, surface_cursor = 0;
     bool surface_cleared = false;
+    u32 surface_frame = ~0u; // the frame whose slice was recorded: one a frame (the hook fires per transparent draw)
     vk::UniqueDescriptorSetLayout surface_desc_layout;
     vk::UniquePipelineLayout surface_layout;
     vk::UniquePipeline surface_pipeline;

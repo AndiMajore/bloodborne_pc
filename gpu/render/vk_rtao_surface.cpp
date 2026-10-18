@@ -118,9 +118,10 @@ void RayTracedAO::OnOpaqueScene(VideoCore::ImageId color_id) {
     if (settings.surface && !surface_cache.buffer && resources_ready) {
         CreateSurfaceCache();
     }
-    if (!settings.surface || !surface_cache.buffer || tlas_frame != frame || !depth_id) {
+    if (!settings.surface || !surface_cache.buffer || tlas_frame != frame || !depth_id || surface_frame == frame) {
         return;
     }
+    surface_frame = frame;
     if (!surface_cleared) { // fresh buffers hold garbage: never seen everywhere
         surface_cleared = true;
         scheduler.EndRendering();
