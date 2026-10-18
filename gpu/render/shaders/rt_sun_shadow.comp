@@ -122,12 +122,18 @@ void main() {
         } else if ((debug & 1u) != 0u) {
             s = 1.0;
         } else {
-            // No occluder near: the game's, eroded (the brightest of a 3x3 at `erode` pixels).
+            // No occluder near: the game's, eroded (the brightest of a 3x3 at `erode` pixels) over
+            // this surface only: a neighbour across a silhouette (another view depth) is another
+            // surface's shadow, a lit fence would light the far wall seen between its bars.
             const int e = int(erode);
-            s = 0.0;
+            s = GameShadow(p);
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
-                    s = max(s, GameShadow(p + ivec2(dx, dy) * e));
+                    const ivec2 q = clamp(p + ivec2(dx, dy) * e, ivec2(0), ivec2(full_size) - 1);
+                    const float zq = ViewZ(texelFetch(depth_tex, q, 0).r);
+                    if (abs(zq - P.z) <= 0.05 * abs(P.z)) {
+                        s = max(s, GameShadow(q));
+                    }
                 }
             }
         }
