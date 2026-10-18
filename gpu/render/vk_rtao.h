@@ -106,6 +106,13 @@ public:
                    ? Records{*record_view, record_rays, record_w, record_h}
                    : Records{};
     }
+    /// This frame's motion vectors (full res, RG16F, General, readable in compute) when the
+    /// trace ran this frame at this size: the SSGI binds them instead of a second pass (code audit
+    /// 2.1); else null.
+    [[nodiscard]] vk::ImageView FrameMotion(u32 w, u32 h) const noexcept {
+        return tlas_frame == frame && Active() && motion_view && width == w && height == h ? *motion_view
+                                                                                           : vk::ImageView{};
+    }
     /// A valid view for the records' binding when there are none (1x1, 1 layer).
     [[nodiscard]] vk::ImageView StandInRecords() const noexcept;
     /// bbport (experimental, surface=1): radiance per static pool triangle, filled from the lit

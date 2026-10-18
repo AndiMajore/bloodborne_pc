@@ -515,8 +515,13 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
             cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
         });
     };
-    barrier(vk::Image(motion_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
-            vk::AccessFlagBits2::eShaderWrite);
+    // The RTAO's motion vectors of this frame when it ran (same depth, same camera): no second
+    // full-res pass (code audit 2.1); else our own.
+    const vk::ImageView rtao_motion = rtao ? rtao->FrameMotion(w, h) : vk::ImageView{};
+    if (!rtao_motion) {
+        barrier(vk::Image(motion_image), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
+                vk::AccessFlagBits2::eShaderWrite);
+    }
     barrier(vk::Image(gi_images[write]), vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
             vk::AccessFlagBits2::eShaderWrite);
     barrier(vk::Image(gi_images[read]),
@@ -524,9 +529,11 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
             vk::AccessFlagBits2::eShaderRead);
 
     // Motion vectors for the history (also commits the frame's camera).
-    camera_motion.RecordMotion(depth_view, *motion_view, w, h);
-    barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
-            vk::AccessFlagBits2::eShaderRead);
+    if (!rtao_motion) {
+        camera_motion.RecordMotion(depth_view, *motion_view, w, h);
+        barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
+                vk::AccessFlagBits2::eShaderRead);
+    }
 
     // The transparents' light (fires) from the RTAO, last frame's; without it the colour is bound
     // in its place and weighted 0.
@@ -670,7 +677,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];
-    const vk::ImageView motion = *motion_view;
+    const vk::ImageView motion = rtao_motion ? rtao_motion : *motion_view;
     const ProfileScope profile{0x55601ull, "ssgi"};
     scheduler.RecordCrumb(
         {.name = "ssgi"},
