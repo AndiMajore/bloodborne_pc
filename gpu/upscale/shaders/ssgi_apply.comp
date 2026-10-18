@@ -38,6 +38,9 @@ void main() {
     const vec2 hpf = (vec2(fp) + 0.5) / 2.0 - 0.5;
     const ivec2 h0 = ivec2(floor(hpf));
     const vec2 f = hpf - vec2(h0);
+    // None of them on this pixel's surface (a thin near thing between the half-res samples: a
+    // fence spike, an ornament's edge against a far wall): the bounce fades out instead of being
+    // normalised up to the far surface's. Normalised, it drew a bright outline round such edges.
     vec3 gi = vec3(0.0);
     float wsum = 0.0;
     for (int j = 0; j < 2; ++j) {
@@ -45,13 +48,14 @@ void main() {
             const ivec2 hp = clamp(h0 + ivec2(i, j), ivec2(0), ivec2(half_size) - 1);
             const vec4 g = texelFetch(gi_tex, hp, 0);
             const float wb = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
-            const float wd = exp(-abs(g.a - z) / (0.05 * z));
-            const float w = wb * wd + 1e-5;
+            const float wd = exp(-abs(g.a - z) / (0.05 * abs(z)));
+            const float w = wb * wd;
             gi += g.rgb * w;
             wsum += w;
         }
     }
-    gi /= wsum;
+    // A matching texel weighs at least 1/16 (the far corner); below that the bounce scales down.
+    gi /= max(wsum, 0.0625);
     const vec4 color = imageLoad(color_img, fp);
     const vec3 albedo = texelFetch(albedo_tex, fp, 0).rgb;
     // Where the surface is already bright the bounce piles on and reads as a filter (a
