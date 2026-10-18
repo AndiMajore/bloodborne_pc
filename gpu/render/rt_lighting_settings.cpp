@@ -25,6 +25,8 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "fire_pull") s.fire_pull = std::clamp(value, 0.0f, 5.0f);
     else if (key == "fire_min") s.fire_min = std::clamp(value, 0.0f, 100.0f);
     else if (key == "fire_debug") flag(s.fire_debug);
+    else if (key == "fire_switch") s.fire_switch = std::clamp(value, 0.0f, 10.0f);
+    else if (key == "fire_hold") s.fire_hold = uint32_t(std::clamp(value, 0.0f, 600.0f));
     else if (key == "fire_base") s.fire_base = std::clamp(value, 0.0f, 4.0f);
     else if (key == "fire_spark") s.fire_spark = std::clamp(value, 0.0f, 4.0f);
     else if (key == "fire_base_size") s.fire_base_size = std::clamp(value, 0.0f, 5.0f);

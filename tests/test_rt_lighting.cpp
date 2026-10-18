@@ -151,6 +151,9 @@ static void LightingSettings() {
     assert(Near(s.fire_light, 0.35f) && s.spot_shadow && !s.sun_shadow && s.EmissionWanted());
     assert(Near(s.fire_smooth, 0.98f)); // clamped
     assert(ApplyText(s, "# spot_res=4096\nspot_res=100 spot_blur=x") == 1 && s.spot_res == 256);
+    // Sticky lights: off by default.
+    assert(defaults.fire_switch == 0.0f && defaults.fire_hold == 0);
+    assert(ApplyText(s, "fire_switch=0.5 fire_hold=12") == 2 && Near(s.fire_switch, 0.5f) && s.fire_hold == 12);
     // Two-part fires (67): off by default, clamped.
     assert(defaults.fire_base == 0.0f);
     assert(ApplyText(s, "fire_base=0.7 fire_base_smooth=1 fire_spark=0.4") == 3);

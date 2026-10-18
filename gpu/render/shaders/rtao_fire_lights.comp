@@ -11,6 +11,13 @@
 // place: flames flicker, the brightest texel wanders), faded in when new, faded out when gone and
 // no light of this frame took it over. Per light two texels: the world position (w 1: a light,
 // 0: none) and the power (w: the distance from the camera).
+// Sticky lights (switch_ratio / hold > 0): the brightest texel wanders with the flicker and the
+// light (and its shadows) jumped with it. Mode 0 keeps the texel of the tile's last light (when it
+// still lies in the tile) as the peak unless this frame's brightest is switch_ratio brighter than
+// the flame there, and for `hold` frames after a jump; it moves at once when the flame there went
+// dark. Only the place on screen is kept: the depth is found again each frame (a light frozen in
+// the world ends up behind its stake, all its shadow rays blocked). A third row: the frames since
+// the light last moved.
 // Mode 2 (fire_base, ticket 67), one invocation: the fires' steady bases, after the lights in the
 // same rows (columns count..count+bases). Each base gathers this frame's lights within `base_merge`
 // metres of it (horizontally: a tall flame's tiles are one fire), its place and their summed power
@@ -45,6 +52,8 @@ layout(push_constant) uniform Constants {
     float base_smooth;
     float base_fade;
     float base_merge;
+    float switch_ratio; // sticky lights: a new peak this much brighter than the flame at the light's place (0: off)
+    float hold;         // sticky lights: frames a light stays after it moved
     uint pad;
 };
 
@@ -81,6 +90,34 @@ float Reach(float camera_distance) {
     return max(1.0, 0.2 * camera_distance);
 }
 
+// The light's last place on this frame's screen: its quarter-size texel (x < 0: behind the camera).
+ivec2 QuarterTexel(vec3 world) {
+    // view = R^T (world - t), inv_view's rows being (R | t).
+    const vec3 d = world - vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
+    const vec3 v = vec3(inv_view[0].x * d.x + inv_view[1].x * d.y + inv_view[2].x * d.z,
+                        inv_view[0].y * d.x + inv_view[1].y * d.y + inv_view[2].y * d.z,
+                        inv_view[0].z * d.x + inv_view[1].z * d.y + inv_view[2].z * d.z);
+    if (abs(v.z) < 1e-3 || sign(v.z) != sign(ViewZ(0.5))) { // a visible point's z has a visible depth's sign
+        return ivec2(-1);
+    }
+    const vec2 ndc = vec2(v.x * proj.x / v.z, v.y * proj.y / v.z);
+    const vec2 pixel = (ndc * 0.5 + 0.5) * full_size + jitter;
+    return ivec2(floor(pixel / 4.0));
+}
+// The flame's brightness around a quarter-size texel (its 3x3's brightest).
+float FlameAt(ivec2 t) {
+    float l = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const ivec2 q = t + ivec2(dx, dy);
+            if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, quarter_size))) {
+                l = max(l, Luma(texelFetch(emit_tex, q, 0).rgb));
+            }
+        }
+    }
+    return l;
+}
+
 void Match() {
     const uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationIndex;
     if (i >= count) {
@@ -90,6 +127,7 @@ void Match() {
     const vec4 raw_position = imageLoad(raw_img, index);
     const vec4 raw_power = imageLoad(raw_img, index + ivec2(0, 1));
     vec4 position = vec4(0.0), power = vec4(0.0);
+    float held = 0.0; // frames since the light last moved
     if (raw_position.w > 0.0) {
         // The nearest of last frame's lights within reach.
         float best = Reach(raw_power.w);
@@ -106,6 +144,7 @@ void Match() {
             const vec4 p = imageLoad(prev_img, ivec2(match, 0));
             const vec4 q = imageLoad(prev_img, ivec2(match, 1));
             position = vec4(mix(raw_position.xyz, p.xyz, pos_smoothing), 1.0);
+            held = imageLoad(raw_img, index + ivec2(0, 2)).x;
             power = vec4(mix(raw_power.rgb, q.rgb, smoothing), raw_power.w);
         } else if (raw_position.w == 1.0) { // new (only above the full threshold): fades in
             position = vec4(raw_position.xyz, 1.0);
@@ -124,10 +163,12 @@ void Match() {
         if (!taken && Luma(q.rgb) * smoothing > 1e-4) {
             position = p;
             power = vec4(q.rgb * smoothing, q.w);
+            held = imageLoad(prev_img, index + ivec2(0, 2)).x;
         }
     }
     imageStore(lights_img, index, position);
     imageStore(lights_img, index + ivec2(0, 1), power);
+    imageStore(lights_img, index + ivec2(0, 2), vec4(held, 0.0, 0.0, 0.0));
 }
 
 float Horizontal(vec3 a, vec3 b) {
@@ -296,8 +337,22 @@ void main() {
     // Hysteresis: a light that is there goes out only below half the threshold (a small, far fire
     // hovers around it and would blink): w 0.5 continues a light only (mode 1).
     vec4 position = vec4(0.0), power = vec4(0.0);
+    ivec2 q = ivec2(s_pos[0] & 0xFFFFu, s_pos[0] >> 16);
+    float held = 0.0;
+    if ((switch_ratio > 0.0 || hold > 0.0) && smoothing > 0.0 && s_peak[0] >= 0.5 * min_peak) {
+        // smoothing > 0: last frame's lights are this one's predecessors (no cut).
+        const vec4 p = imageLoad(prev_img, index);
+        const ivec2 t = p.w == 1.0 ? QuarterTexel(p.xyz) : ivec2(-1);
+        if (all(greaterThanEqual(t, tile * Tile)) && all(lessThan(t, min(tile * Tile + Tile, quarter_size)))) {
+            const float here = FlameAt(t);
+            const float since = imageLoad(prev_img, index + ivec2(0, 2)).x + 1.0;
+            if (here >= 0.5 * min_peak && (since < hold || s_peak[0] <= here * (1.0 + switch_ratio))) {
+                q = t;
+                held = min(since, 1000.0);
+            }
+        }
+    }
     if (s_peak[0] >= 0.5 * min_peak) {
-        const ivec2 q = ivec2(s_pos[0] & 0xFFFFu, s_pos[0] >> 16);
         // At the peak on screen, at the nearest depth under the flame.
         const ivec2 fp = FullPixel(q);
         const float depth = s_near[0];
@@ -315,4 +370,5 @@ void main() {
     }
     imageStore(raw_img, index, position);
     imageStore(raw_img, index + ivec2(0, 1), power);
+    imageStore(raw_img, index + ivec2(0, 2), vec4(held, 0.0, 0.0, 0.0));
 }

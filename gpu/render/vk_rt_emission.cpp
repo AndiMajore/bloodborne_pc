@@ -42,9 +42,11 @@ struct FireLightConstants {
     float base_smooth;
     float base_fade;
     float base_merge;
+    float switch_ratio;
+    float hold;
     u32 pad;
 };
-static_assert(sizeof(FireLightConstants) == 136);
+static_assert(sizeof(FireLightConstants) == 144);
 struct FireDebugConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -176,7 +178,7 @@ bool RtEmission::Ensure(u32 w, u32 h) {
     tiles_x = (w + FireLightTile - 1) / FireLightTile;
     tiles_y = (h + FireLightTile - 1) / FireLightTile;
     lights_count = tiles_x * tiles_y;
-    make(lights_image, lights_views.data(), lights_count + FireBases, 2, vk::Format::eR32G32B32A32Sfloat, 3);
+    make(lights_image, lights_views.data(), lights_count + FireBases, 3, vk::Format::eR32G32B32A32Sfloat, 3);
     emit_w = w;
     emit_h = h;
     emit_written = false;
@@ -301,6 +303,8 @@ void RtEmission::RecordFireLights() {
         .base_smooth = settings.fire_base_smooth,
         .base_fade = settings.fire_base_fade,
         .base_merge = settings.fire_base_merge,
+        .switch_ratio = settings.fire_switch,
+        .hold = float(settings.fire_hold),
     };
     // The bases carry on from last frame's when there were any and no cut came between.
     const bool bases_continued = continued && bases_frame + 1 == frame;

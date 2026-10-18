@@ -46,9 +46,9 @@ void RtLighting::PollSettings() {
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     RtLightingSettings::ApplyText(settings, text);
     std::printf("RT lighting: settings from %s: emission %.2f, fire light %.2f (size %.2f m, height %.2f m, wrap %.2f, "
-                "smooth %.2f, base %.2f, spark %.2f), sun shadow %d, spot shadow %d (%u, blur %u, soft %.2f m)\n",
+                "smooth %.2f, switch %.2f, hold %u, base %.2f, spark %.2f), sun shadow %d, spot shadow %d (%u, blur %u, soft %.2f m)\n",
                 settings_path.c_str(), settings.emission, settings.fire_light, settings.fire_size,
-                settings.fire_height, settings.fire_wrap, settings.fire_smooth, settings.fire_base, settings.fire_spark, settings.sun_shadow ? 1 : 0,
+                settings.fire_height, settings.fire_wrap, settings.fire_smooth, settings.fire_switch, settings.fire_hold, settings.fire_base, settings.fire_spark, settings.sun_shadow ? 1 : 0,
                 settings.spot_shadow ? 1 : 0, settings.spot_res, settings.spot_blur, settings.spot_soft);
 }
 
