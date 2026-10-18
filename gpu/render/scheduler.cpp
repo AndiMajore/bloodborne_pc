@@ -20,6 +20,7 @@
 #include "bbport_toggles.h"
 #include "bbport_wait_trace.h"
 #include "common/thread.h"
+#include "render/vk_gpu_busy.h"
 #include "render/vk_gpu_profiler.h"
 #include "vulkan/instance.h"
 
@@ -944,6 +945,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
             });
         }
     }
+    if (auto* busy = GpuBusy::Get()) {
+        busy->End(*this, tick); // the governor's utilisation (ticket 71)
+    }
     SyncRecording();
     // Guest memory copies into staging this submission reads (copy threads).
     WaitHostCopies();
@@ -970,6 +974,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     // No semaphore query here (an ioctl per submission): PopPendingOperations asks when an
     // operation waits, the GPU signal thread on every fence.
     AllocateWorkerCommandBuffers();
+    if (auto* busy = GpuBusy::Get()) {
+        busy->Begin(*this);
+    }
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         profiler->Mark(0x5B318ull, [] { // as in SubmitAsync
             return std::string{"(submission start: copies and barriers before its first mark)"};
@@ -1001,6 +1008,9 @@ void Scheduler::SubmitAsync(SubmitInfo& info) {
         }
     }
     resume_rendering = false;
+    if (auto* busy = GpuBusy::Get()) {
+        busy->End(*this, tick); // the governor's utilisation (ticket 71)
+    }
     // Every segment's command buffer is ended by its recording thread (the pool is its own);
     // MaybeSplit ended the earlier ones. A direct segment is this thread's.
     if (direct_segment) {
@@ -1037,6 +1047,9 @@ void Scheduler::SubmitAsync(SubmitInfo& info) {
     });
     KickRecording(true);
     AllocateWorkerCommandBuffers();
+    if (auto* busy = GpuBusy::Get()) {
+        busy->Begin(*this);
+    }
     // BB_GPU_PROFILE: the next submission's first command, so that the gap above holds only the
     // GPU's time between submissions; what comes before its first mark is the work recorded
     // outside passes and dispatches (copies, uploads, barriers).

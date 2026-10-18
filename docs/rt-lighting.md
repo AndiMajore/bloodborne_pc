@@ -75,6 +75,7 @@ typo, or a key that belongs in another of these files.
     count as its. `fire_debug` draws them green (base) and red (sparks). The log says every 600
     frames how many anchors are a large fire's and the brightest anchor light (to tune the
     threshold).
+  - the governor: `governor` (0/1), `governor_budget` (15.5 ms);
   - shadows: `sun_shadow` (0/1), `sun_half` (0; 1: the sun's rays at half resolution, one pixel of
     each 2x2 turning over 4 frames, upsampled by depth: about half the 0.54 ms), `sun_spread`
     (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),
@@ -85,6 +86,26 @@ typo, or a key that belongs in another of these files.
     `spot_shadow` (0/1), `spot_res` (1024), `spot_blur` (3 texels), `spot_soft` (0.2 m),
     `spot_near` (0.3 m).
   - light list: `lights_dump` (a new value logs the next frame's list; every 600 frames a summary).
+
+## Presets and the frame-time governor (ticket 71)
+
+The launcher's "Ray-tracing preset" sets the switches and `rtlighting.txt`'s shadows as a ladder
+(frame-time audit 2026-10-18, section 7: the game's own passes take 9-12.7 ms in Central
+Yharnam, so what fits depends on the place): **Lite** (RTAO, the moon's shadow at half
+resolution) holds 60 fps in the heavy parts of Central Yharnam; **Balanced** adds the RT bounce
+(with the fire lights), the reflections and the surface cache, for the lighter areas; **Full**
+adds the moon's shadow at full resolution and the lantern's; **Custom** leaves the switches as
+they are. The probes are not in any preset (a second bounce source).
+
+`governor=1` in `rtlighting.txt` (the launcher's "Adaptive ray-tracing quality") steps the RT
+effects down when the GPU's share of the frame nears `governor_budget` (15.5 ms of 16.67) and
+back up after some seconds with room (`render/vk_rt_governor.h`). The input is the whole frame:
+two timestamps per submission of both schedulers (`render/vk_gpu_busy.h`), the busy share of
+each half second of GPU time. Levels: 1 probes off, the sun at half resolution, 1 fire ray; 2
+the RT bounce 1 ray and the RTAO at most 2; 3 no RT sun shadow, the RTAO 1 ray; 4 the bounce by
+the screen march. Two windows over the budget step down; the wait before a step up starts at
+4 s and doubles when a step up is taken back within 3 s (to 64 s). Logged: `RT governor: level
+a -> b (...)`, and the level and GPU share every 10 s.
 
 ## Measured (RX 9070 XT, RADV, 0.6, FSR 4.1.1 2560x1440 -> 4K)
 

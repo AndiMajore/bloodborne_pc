@@ -22,6 +22,7 @@
 #include "upscale/vk_object_motion.h"
 #include "vulkan/platform.h"
 #include "render/vk_gpu_profiler.h"
+#include "render/vk_rt_governor.h"
 #include "render/runtime.h"
 #include "render/scheduler.h"
 #include "vulkan/shader_module.h"
@@ -653,7 +654,7 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
         .jitter = jitter,
         .radius = settings.radius,
         .history = history_valid ? settings.history : 0.0f,
-        .rays = settings.rays,
+        .rays = std::min(settings.rays, RtGovernor::Current().rtao_rays), // the governor's cap (71)
         .frame = frame,
         .mode = settings.debug,
         .snap_far = settings.snap_far,

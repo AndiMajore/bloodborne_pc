@@ -15,6 +15,7 @@
 #include "bbgpu/shaders/ssgi_gather_comp.h"
 #include "bbgpu/shaders/ssgi_gather_rt_comp.h"
 #include "render/vk_gpu_profiler.h"
+#include "render/vk_rt_governor.h"
 #include "render/vk_rtao.h"
 #include "upscale/vk_camera_motion.h"
 #include "vulkan/instance.h"
@@ -265,13 +266,17 @@ void ScreenSpaceGI::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId n
     albedo_id = albedo;
 }
 
+bool ScreenSpaceGI::RtOn() const noexcept {
+    return rt && RtGovernor::Current().gi_rt;
+}
+
 void ScreenSpaceGI::OnFrameStart() {
     done_this_frame = false;
     ++frame;
     PollSettings();
     // The fire lights are made only for the ray-traced gather (the march does not read them).
     if (lighting) {
-        lighting->SetFireReader(enabled && rt && gather_rt_pipeline && rtao);
+        lighting->SetFireReader(enabled && RtOn() && gather_rt_pipeline && rtao);
     }
 }
 
@@ -451,7 +456,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     if (!EnsureResources(w, h)) {
         return;
     }
-    if (rt && rt_denoise && temporal_pipeline) {
+    if (RtOn() && rt_denoise && temporal_pipeline) {
         EnsureDenoiseResources();
     }
     static u32 passes = 0;
@@ -546,8 +551,8 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
     // The ray-traced gather: when asked for and the RTAO built its scene this frame; otherwise
     // the screen march (counted: a frame without the RTAO's pass falls back).
     const vk::AccelerationStructureKHR tlas =
-        rt && gather_rt_pipeline && rtao ? rtao->FrameTlas() : vk::AccelerationStructureKHR{};
-    if (rt) {
+        RtOn() && gather_rt_pipeline && rtao ? rtao->FrameTlas() : vk::AccelerationStructureKHR{};
+    if (RtOn()) {
         ++(tlas ? rt_passes : rt_fallbacks);
         if ((rt_passes + rt_fallbacks) % 600 == 0) {
             std::printf("SSGI: ray-traced gather in %u of 600 passes (%u fell back to the march)\n",
@@ -623,7 +628,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .radius = radius,
         .history = denoise.on ? 0.0f : gather.history,
         .frame = frame,
-        .rays = rays,
+        .rays = std::min(rays, RtGovernor::Current().gi_rays), // the governor's cap (71)
         .debug = debug,
         .surface_parts_count = surface.part_count,
         .clip = rt_clip,

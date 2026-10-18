@@ -15,6 +15,7 @@
 #include "render/runtime.h"
 #include "render/scheduler.h"
 #include "render/vk_gpu_profiler.h"
+#include "render/vk_rt_governor.h"
 #include "render/vk_rtao.h"
 #include "textures/texture_cache.h"
 #include "upscale/vk_camera_motion.h"
@@ -257,7 +258,8 @@ vk::ImageView RtProbes::CachedView(const VideoCore::Image& image, vk::Format for
 }
 
 void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
-    if (!enabled || !active || done_this_frame || !color_id || !depth_id || !normal_id || !albedo_id) {
+    if (!enabled || !active || !RtGovernor::Current().probes || done_this_frame || !color_id || !depth_id ||
+        !normal_id || !albedo_id) {
         return;
     }
     done_this_frame = true;

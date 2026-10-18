@@ -60,6 +60,8 @@ struct Settings {
     uint32_t sun_erode = 4;       // pixels the game's shadow is shrunk by where it is kept
     bool sun_half = false;        // the rays at half resolution (one pixel of each 2x2), upsampled by depth
     float sun_far = 200.0f;       // metres a sun ray reaches
+    bool governor = false;        // the frame-time governor (vk_rt_governor.h): RT steps down near the budget
+    float governor_budget = 15.5f; // ms of GPU time a frame may take before it steps down (of 16.67)
     uint32_t sun_debug = 0;       // 1 the rays alone, 2 reversed, 4 the mask in full shadow (a write test), 8 cached geometry only, 16 per-frame geometry from the camera
     bool spot_shadow = false;     // the shadowed spot's 512x512 map replaced by a ray-traced one
     uint32_t spot_res = 1024;     // its size

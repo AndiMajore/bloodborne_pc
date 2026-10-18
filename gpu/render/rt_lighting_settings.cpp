@@ -44,6 +44,8 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "sun_spread") s.sun_spread = std::clamp(value, 0.0f, 0.2f);
     else if (key == "sun_erode") s.sun_erode = count(0u, 32u);
     else if (key == "sun_half") flag(s.sun_half);
+    else if (key == "governor") flag(s.governor);
+    else if (key == "governor_budget") s.governor_budget = std::clamp(value, 8.0f, 16.6f);
     else if (key == "sun_far") s.sun_far = std::clamp(value, 1.0f, 2000.0f);
     else if (key == "sun_debug") s.sun_debug = count(0u, 31u);
     else if (key == "spot_shadow") flag(s.spot_shadow);

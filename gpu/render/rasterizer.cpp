@@ -3,6 +3,7 @@
 // draw recording thread (raster_pipe.cpp), and the per-frame bookkeeping.
 
 #include "render/raster_internal.h"
+#include "render/vk_gpu_busy.h"
 
 namespace Vulkan {
 
@@ -57,6 +58,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     memory->SetRasterizer(this);
 
     GpuProfiler::Init(instance, scheduler);
+    GpuBusy::Init(instance);
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);

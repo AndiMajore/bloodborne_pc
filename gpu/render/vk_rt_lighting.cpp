@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_rt_lighting.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <sys/stat.h>
 #include "common/path_util.h"
+#include "render/vk_rt_governor.h"
 #include "render/vk_rtao.h"
 
 namespace Vulkan {
@@ -46,7 +48,8 @@ void RtLighting::PollSettings() {
     std::ifstream file(settings_path);
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     std::string unknown;
-    RtLightingSettings::ApplyText(settings, text, &unknown);
+    RtLightingSettings::ApplyText(file_settings, text, &unknown);
+    settings = file_settings;
     if (!unknown.empty()) {
         std::printf("RT lighting: keys in %s skipped (unknown, or no number): %s\n", settings_path.c_str(), unknown.c_str());
     }
@@ -82,6 +85,13 @@ void RtLighting::OnFrameStart() {
     }
     ++frame;
     PollSettings();
+    // The governor (ticket 71): the file's settings lowered by the level's caps.
+    RtGovernor::Update(file_settings.governor, file_settings.governor_budget);
+    const auto caps = RtGovernor::Current();
+    settings = file_settings;
+    settings.sun_half = settings.sun_half || caps.sun_half;
+    settings.sun_shadow = settings.sun_shadow && caps.sun_shadow;
+    settings.fire_rays = std::min(settings.fire_rays, caps.fire_rays);
     UpdateWants();
     lights_collected = wants_lights;
     shadows->OnFrameStart(frame);

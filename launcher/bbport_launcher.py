@@ -162,6 +162,24 @@ RTAO_PRESETS = {
     "high": {"rays": 4, "radius": 2.0, "strength": 1.0, "distance": 60.0, "foliage": 0.35},
 }
 RT_REFLECT_MODES = [("Только там, где SSR ничего не нашёл", "1"), ("Везде, где луч попал", "2")]
+# The effects on the RTAO's scene as a ladder (frame-time audit 2026-10-18, section 7): what holds
+# 60 fps in the heavy parts of Central Yharnam (lite), in the lighter areas (balanced), everything
+# (full). The switches below and user/rtlighting.txt's sun and spot shadows; the probes stay
+# their own choice (a second bounce source, not with the RT bounce).
+RT_PRESETS = {
+    "lite": {"rt_gi": False, "rt_reflect": False, "rt_surface": False,
+             "light": {"sun_shadow": 1, "sun_half": 1, "spot_shadow": 0}},
+    "balanced": {"rt_gi": True, "rt_reflect": True, "rt_surface": True,
+                 "light": {"sun_shadow": 1, "sun_half": 1, "spot_shadow": 0}},
+    "full": {"rt_gi": True, "rt_reflect": True, "rt_surface": True,
+             "light": {"sun_shadow": 1, "sun_half": 0, "spot_shadow": 1}},
+}
+RT_PRESET_CHOICES = [("Лёгкий", "lite", "RTAO и тени луны лучами; держит 60 к/с и в тяжёлых местах"),
+                     ("Сбалансированный", "balanced", "И отражённый свет, отражения, кэш поверхностей; "
+                      "для более лёгких мест"),
+                     ("Полный", "full", "Всё, тени луны в полном разрешении и тень фонаря; ниже 60 к/с "
+                      "в Центральном Ярнаме"),
+                     ("Своё", "custom", "Переключатели ниже")]
 RTAO_PRESET_CHOICES = [("Низкое", "low", "1 луч, радиус 1 м, до 25 м; около 0,6 мс"),
                        ("Среднее", "medium", "2 луча, радиус 1,5 м, до 40 м; около 1 мс"),
                        ("Высокое", "high", "4 луча, радиус 2 м, до 60 м, листва; около 2,3 мс"),
@@ -200,6 +218,9 @@ DEFAULTS = {
     "rt_reflect_mode": "1",
     "rt_surface": False,
     "rt_probes": False,
+    "rt_preset": "custom",
+    "rt_governor": False,
+    "rt_governor_budget": 15.5,
     "patches_dir": "",
     "language": "1",
     "fullscreen": False,
@@ -411,6 +432,11 @@ def game_environment(s):
         if s.get("rt_probes"):
             env["BB_RT_PROBES"] = "1"
             write_live_settings(settings_user_dir(s) / "rtprobes.txt", {"enabled": 1})
+        # The RT lighting's live file: the preset's shadows, the frame-time governor (ticket 71).
+        light = {"governor": 1 if s.get("rt_governor") else 0,
+                 "governor_budget": float(s.get("rt_governor_budget", 15.5))}
+        light.update(RT_PRESETS.get(s.get("rt_preset"), {}).get("light", {}))
+        write_live_settings(settings_user_dir(s) / "rtlighting.txt", light)
     # The SSGI's ray-traced gather (experimental) traces the RTAO's scene: both must be on.
     if s.get("ssgi"):
         write_live_settings(settings_user_dir(s) / "ssgi.txt",
@@ -924,14 +950,59 @@ class LauncherWindow(Adw.ApplicationWindow):
                                            active=self.settings.get("rt_probes", False))
         rtao.add(self.rt_probes_row)
 
+        self.rt_preset_row = combo_row(tr("Набор эффектов лучами"), None, RT_PRESET_CHOICES,
+                                       self.settings.get("rt_preset", "custom"))
+        rtao.add(self.rt_preset_row)
+        self.rt_governor_row = Adw.SwitchRow(
+            title=tr("Адаптивное качество лучей (эксперимент)"),
+            subtitle=tr("Когда кадр приближается к пределу, эффекты лучами упрощаются ступенями, "
+                        "а при запасе возвращаются"),
+            active=self.settings.get("rt_governor", False))
+        rtao.add(self.rt_governor_row)
+        self.rt_budget_row = Adw.SpinRow.new_with_range(12.0, 16.5, 0.5)
+        self.rt_budget_row.set_title(tr("Предел кадра для GPU, мс"))
+        self.rt_budget_row.set_subtitle(tr("Из 16,7 мс при 60 к/с; меньше — больше запаса"))
+        self.rt_budget_row.set_digits(1)
+        self.rt_budget_row.set_value(float(self.settings.get("rt_governor_budget", 15.5)))
+        rtao.add(self.rt_budget_row)
+        self.rt_preset_applying = False
+        preset_rows = {"rt_gi": self.rt_gi_row, "rt_reflect": self.rt_reflect_row,
+                       "rt_surface": self.rt_surface_row}
+
+        def rt_preset_chosen(*_):
+            preset = RT_PRESETS.get(combo_value(self.rt_preset_row))
+            if preset is None:
+                return
+            self.rt_preset_applying = True
+            for key, row in preset_rows.items():
+                row.set_active(preset[key])
+            if preset["rt_gi"]:
+                self.ssgi_row.set_active(True)  # the RT bounce is the SSGI's gather
+            self.rt_preset_applying = False
+
+        def rt_switch_changed(*_):
+            if self.rt_preset_applying:
+                return
+            current = combo_value(self.rt_preset_row)
+            preset = RT_PRESETS.get(current)
+            if preset and any(row.get_active() != preset[key] for key, row in preset_rows.items()):
+                self.rt_preset_row.set_selected(self.rt_preset_row.values.index("custom"))
+
+        self.rt_preset_row.connect("notify::selected", rt_preset_chosen)
+        for row in preset_rows.values():
+            row.connect("notify::active", rt_switch_changed)
+
         def rt_extra_sensitive(*_):
             on = self.rtao_row.get_active()
-            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_surface_row, self.rt_probes_row):
+            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_surface_row, self.rt_probes_row,
+                        self.rt_preset_row, self.rt_governor_row):
                 row.set_sensitive(on)
             self.rt_reflect_mode_row.set_sensitive(on and self.rt_reflect_row.get_active())
+            self.rt_budget_row.set_sensitive(on and self.rt_governor_row.get_active())
 
         self.rtao_row.connect("notify::active", rt_extra_sensitive)
         self.rt_reflect_row.connect("notify::active", rt_extra_sensitive)
+        self.rt_governor_row.connect("notify::active", rt_extra_sensitive)
         rt_extra_sensitive()
         page.add(rtao)
 
@@ -1443,6 +1514,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["rt_reflect_mode"] = combo_value(self.rt_reflect_mode_row)
         s["rt_surface"] = self.rt_surface_row.get_active()
         s["rt_probes"] = self.rt_probes_row.get_active()
+        s["rt_preset"] = combo_value(self.rt_preset_row)
+        s["rt_governor"] = self.rt_governor_row.get_active()
+        s["rt_governor_budget"] = float(self.rt_budget_row.get_value())
         s["online"] = self.online_row.get_active()
         s["online_bbsc"] = self.bbsc_row.get_active()
         s["online_community"] = self.community_row.get_text().strip()

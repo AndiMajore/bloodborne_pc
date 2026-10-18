@@ -76,6 +76,24 @@ EN = {
     "Только там, где SSR ничего не нашёл": "Only where SSR found nothing",
     "Везде, где луч попал": "Wherever the ray hits",
     "Кэш поверхностей (эксперимент)": "Surface cache (experimental)",
+    "Набор эффектов лучами": "Ray-tracing preset",
+    "Лёгкий": "Lite",
+    "Сбалансированный": "Balanced",
+    "Полный": "Full",
+    "RTAO и тени луны лучами; держит 60 к/с и в тяжёлых местах":
+        "RTAO and ray-traced moon shadows; holds 60 fps in the heavy areas too",
+    "И отражённый свет, отражения, кэш поверхностей; для более лёгких мест":
+        "Adds bounce light, reflections and the surface cache; for the lighter areas",
+    "Всё, тени луны в полном разрешении и тень фонаря; ниже 60 к/с в Центральном Ярнаме":
+        "Everything, moon shadows at full resolution and the lantern's shadow; below 60 fps in "
+        "Central Yharnam",
+    "Переключатели ниже": "The switches below",
+    "Адаптивное качество лучей (эксперимент)": "Adaptive ray-tracing quality (experimental)",
+    "Когда кадр приближается к пределу, эффекты лучами упрощаются ступенями, а при запасе возвращаются":
+        "When the frame nears the limit, the ray-traced effects step down, and come back when "
+        "there is room",
+    "Предел кадра для GPU, мс": "GPU frame limit, ms",
+    "Из 16,7 мс при 60 к/с; меньше — больше запаса": "Of 16.7 ms at 60 fps; lower leaves more headroom",
     "Отражённый свет из проб (эксперимент)": "Bounce light from probes (experimental)",
     "Сетка проб вокруг камеры, лучи по сцене; вместо SSGI, не вместе":
         "A grid of probes around the camera, rays through the scene; instead of SSGI, not with it",

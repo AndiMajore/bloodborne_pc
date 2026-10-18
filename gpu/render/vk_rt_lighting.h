@@ -91,7 +91,8 @@ private:
     void UpdateWants();
 
     const RayTracedAO& rtao;
-    RtLightingSettings::Settings settings;
+    RtLightingSettings::Settings settings;      // in effect: the file's, lowered by the governor's caps
+    RtLightingSettings::Settings file_settings; // as rtlighting.txt has them
     std::unique_ptr<RtLights> lights;
     std::unique_ptr<RtShadows> shadows;
     std::unique_ptr<RtEmission> emission;

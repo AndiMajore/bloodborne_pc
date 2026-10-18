@@ -73,6 +73,8 @@ private:
     bool enabled = false;
     u32 debug = 0;      // 1: the bounce alone; 2 (rt): rays seen (green) / hidden (red)
     bool rt = false;    // rt=1: the gather traces rays against the RTAO's scene (experimental)
+    /// rt, unless the frame-time governor dropped the rays (vk_rt_governor.h, level 4).
+    [[nodiscard]] bool RtOn() const noexcept;
     u32 rays = 2;       // per half-res pixel (rt)
     float rt_max = 2.0f;  // rt: a ray's radiance capped to this (lamps and candles as fireflies)
     float rt_clip = 1.5f; // rt: history clipped to this frame's 3x3 mean +- rt_clip sigma
