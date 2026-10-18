@@ -52,6 +52,14 @@ public:
         float light_size = 0.0f;
         float light_height = 0.0f;
         float light_wrap = 0.0f;
+        // Two-part fires (67): the bases after the lights (columns light_count..+base_count), upright
+        // cylinders; the lights then spheres (spark_size) at spark_strength. base_count 0: off.
+        u32 base_count = 0;
+        float base_strength = 0.0f;
+        float spark_strength = 1.0f;
+        float base_size = 0.0f;
+        float base_height = 0.0f;
+        float spark_size = 0.0f;
     };
     [[nodiscard]] Frame FrameEmission() const noexcept;
 
@@ -107,6 +115,7 @@ private:
     u32 lights_count = 0, tiles_x = 0, tiles_y = 0;
     u32 lights_frame = ~0u - 1;
     bool lights_written = false;
+    u32 bases_frame = ~0u - 1; // the frame the bases were last made in
     vk::UniqueDescriptorSetLayout lights_desc_layout;
     vk::UniquePipelineLayout lights_layout;
     vk::UniquePipeline lights_pipeline;

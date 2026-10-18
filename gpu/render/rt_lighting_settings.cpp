@@ -25,6 +25,14 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "fire_pull") s.fire_pull = std::clamp(value, 0.0f, 5.0f);
     else if (key == "fire_min") s.fire_min = std::clamp(value, 0.0f, 100.0f);
     else if (key == "fire_debug") flag(s.fire_debug);
+    else if (key == "fire_base") s.fire_base = std::clamp(value, 0.0f, 4.0f);
+    else if (key == "fire_spark") s.fire_spark = std::clamp(value, 0.0f, 4.0f);
+    else if (key == "fire_base_size") s.fire_base_size = std::clamp(value, 0.0f, 5.0f);
+    else if (key == "fire_base_height") s.fire_base_height = std::clamp(value, 0.0f, 10.0f);
+    else if (key == "fire_base_smooth") s.fire_base_smooth = std::clamp(value, 0.0f, 0.995f);
+    else if (key == "fire_base_fade") s.fire_base_fade = std::clamp(value, 0.0f, 0.999f);
+    else if (key == "fire_base_merge") s.fire_base_merge = std::clamp(value, 0.1f, 10.0f);
+    else if (key == "fire_spark_size") s.fire_spark_size = std::clamp(value, 0.0f, 5.0f);
     else if (key == "sun_shadow") flag(s.sun_shadow);
     else if (key == "sun_spread") s.sun_spread = std::clamp(value, 0.0f, 0.2f);
     else if (key == "sun_erode") s.sun_erode = count(0u, 32u);

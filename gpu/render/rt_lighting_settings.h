@@ -29,6 +29,16 @@ struct Settings {
     float fire_pull = 0.3f;       // metres a light sits in front of the surface behind the flame
     float fire_min = 0.3f;        // a tile's brightest emission texel must reach this to make a light
     bool fire_debug = false;      // the cylinders drawn into the scene
+    // Two-part fires (67): per fire a steady base (the tile lights near each other merged, their
+    // summed power averaged over seconds) as a tall slim cylinder, the tile lights as spheres on top.
+    float fire_base = 0.0f;         // 0: off (every tile light a cylinder); else x the base's averaged power
+    float fire_spark = 0.5f;        // with fire_base: x the tile lights' (sparks') power
+    float fire_base_size = 0.3f;    // metres: the base cylinder's radius
+    float fire_base_height = 2.5f;  // metres: its height, 40 % below the fire's place
+    float fire_base_smooth = 0.98f; // 0..0.995: the share of last frame's base power and place
+    float fire_base_fade = 0.985f;  // 0..0.999: per frame without its fire on screen (fades over seconds)
+    float fire_base_merge = 1.5f;   // metres (horizontal): tile lights within this are one fire
+    float fire_spark_size = 0.3f;   // metres: a spark sphere's radius
     // Ray-traced shadows (64, vk_rt_shadows.cpp).
     bool sun_shadow = false;      // the sun's shadow by ray tracing into the game's shadow mask
     float sun_spread = 0.01f;     // radians the sun rays spread over

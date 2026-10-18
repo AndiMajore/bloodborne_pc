@@ -151,6 +151,10 @@ static void LightingSettings() {
     assert(Near(s.fire_light, 0.35f) && s.spot_shadow && !s.sun_shadow && s.EmissionWanted());
     assert(Near(s.fire_smooth, 0.98f)); // clamped
     assert(ApplyText(s, "# spot_res=4096\nspot_res=100 spot_blur=x") == 1 && s.spot_res == 256);
+    // Two-part fires (67): off by default, clamped.
+    assert(defaults.fire_base == 0.0f);
+    assert(ApplyText(s, "fire_base=0.7 fire_base_smooth=1 fire_spark=0.4") == 3);
+    assert(Near(s.fire_base, 0.7f) && Near(s.fire_base_smooth, 0.995f) && Near(s.fire_spark, 0.4f));
     // The RTAO's own keys are not the experiments': rtlighting.txt ignores them.
     assert(ApplyText(s, "rays=4 strength=0.5") == 0);
 }

@@ -38,9 +38,13 @@ struct FireLightConstants {
     float pos_smoothing;
     u32 mode;
     u32 count;
+    u32 bases;
+    float base_smooth;
+    float base_fade;
+    float base_merge;
     u32 pad;
 };
-static_assert(sizeof(FireLightConstants) == 120);
+static_assert(sizeof(FireLightConstants) == 136);
 struct FireDebugConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -49,10 +53,15 @@ struct FireDebugConstants {
     std::array<float, 4> up_radius;
     float height;
     u32 count;
+    u32 base_count;
+    float spark_radius; // 0: the lights drawn as cylinders
+    float base_radius;
+    float base_height;
     std::array<float, 2> pad;
 };
-static_assert(sizeof(FireDebugConstants) == 112);
+static_assert(sizeof(FireDebugConstants) == 128);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
+constexpr u32 FireBases = 32;      // base slots after the lights (rtao_fire_lights.comp MaxBases)
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
 
 void Barrier(Scheduler& scheduler, vk::Image image, vk::ImageLayout old_layout, vk::AccessFlags2 src_access,
@@ -92,8 +101,17 @@ RtEmission::Frame RtEmission::FrameEmission() const noexcept {
     if (settings.fire_light <= 0.0f || !lights_views[lights_out] || lights_frame + 1 != frame) {
         return {*emit_view, settings.emission};
     }
-    return {*emit_view, settings.emission, *lights_views[lights_out], lights_count, settings.fire_light,
-            settings.fire_shadow, settings.fire_range, settings.fire_size, settings.fire_height, settings.fire_wrap};
+    Frame out{*emit_view, settings.emission, *lights_views[lights_out], lights_count, settings.fire_light,
+              settings.fire_shadow, settings.fire_range, settings.fire_size, settings.fire_height, settings.fire_wrap};
+    if (settings.fire_base > 0.0f && bases_frame == lights_frame) {
+        out.base_count = FireBases;
+        out.base_strength = settings.fire_base;
+        out.spark_strength = settings.fire_spark;
+        out.base_size = settings.fire_base_size;
+        out.base_height = settings.fire_base_height;
+        out.spark_size = settings.fire_spark_size;
+    }
+    return out;
 }
 
 void RtEmission::OnFrameStart(u32 next_frame) {
@@ -158,13 +176,14 @@ bool RtEmission::Ensure(u32 w, u32 h) {
     tiles_x = (w + FireLightTile - 1) / FireLightTile;
     tiles_y = (h + FireLightTile - 1) / FireLightTile;
     lights_count = tiles_x * tiles_y;
-    make(lights_image, lights_views.data(), lights_count, 2, vk::Format::eR32G32B32A32Sfloat, 3);
+    make(lights_image, lights_views.data(), lights_count + FireBases, 2, vk::Format::eR32G32B32A32Sfloat, 3);
     emit_w = w;
     emit_h = h;
     emit_written = false;
     emit_frame = ~0u - 1;
     lights_written = false;
     lights_frame = ~0u - 1;
+    bases_frame = ~0u - 1;
     std::printf("RT emission: capture %ux%u (the transparents' light for the RT lighting)\n", w, h);
     return true;
 }
@@ -278,11 +297,21 @@ void RtEmission::RecordFireLights() {
         .smoothing = continued ? settings.fire_smooth : 0.0f,
         .pos_smoothing = continued ? settings.fire_smooth_pos : 0.0f,
         .count = lights_count,
+        .bases = settings.fire_base > 0.0f ? FireBases : 0u,
+        .base_smooth = settings.fire_base_smooth,
+        .base_fade = settings.fire_base_fade,
+        .base_merge = settings.fire_base_merge,
     };
+    // The bases carry on from last frame's when there were any and no cut came between.
+    const bool bases_continued = continued && bases_frame + 1 == frame;
+    if (constants.bases) {
+        bases_frame = frame;
+    }
     scheduler.RecordCrumb({.name = "rt fire lights"},
                           [constants, depth_view, emit = *emit_view, raw = *lights_views[0],
                            prev_lights = *lights_views[prev], lights = *lights_views[lights_out], tx = tiles_x,
-                           ty = tiles_y, pipeline = *lights_pipeline, layout = *lights_layout](vk::CommandBuffer cmdbuf) {
+                           ty = tiles_y, bases_continued, pipeline = *lights_pipeline,
+                           layout = *lights_layout](vk::CommandBuffer cmdbuf) {
                               const auto info = [](vk::ImageView v) {
                                   return vk::DescriptorImageInfo{.imageView = v, .imageLayout = vk::ImageLayout::eGeneral};
                               };
@@ -319,6 +348,18 @@ void RtEmission::RecordFireLights() {
                               pc.mode = 1;
                               cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
                               cmdbuf.dispatch((pc.count + 255) / 256, 1, 1);
+                              if (pc.bases) { // mode 2: the bases from this frame's lights
+                                  const vk::MemoryBarrier2 rw{
+                                      .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                      .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                                      .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                                      .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite};
+                                  cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &rw});
+                                  pc.mode = 2;
+                                  pc.smoothing = bases_continued ? 1.0f : 0.0f;
+                                  cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
+                                  cmdbuf.dispatch(1, 1, 1);
+                              }
                           });
     Barrier(scheduler, vk::Image(lights_image), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
             vk::AccessFlagBits2::eShaderRead);
@@ -361,6 +402,10 @@ void RtEmission::RecordFireDebug(VideoCore::ImageId color_id) {
         .up_radius = {view[1], view[5], view[9], settings.fire_size},
         .height = settings.fire_height,
         .count = lights_count,
+        .base_count = settings.fire_base > 0.0f && bases_frame == lights_frame ? FireBases : 0u,
+        .spark_radius = settings.fire_base > 0.0f ? settings.fire_spark_size : 0.0f,
+        .base_radius = settings.fire_base_size,
+        .base_height = settings.fire_base_height,
     };
     scheduler.RecordCrumb({.name = "rt fire debug"},
                           [constants, color_view, depth_view, lights = *lights_views[lights_out], w, h,

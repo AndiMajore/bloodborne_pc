@@ -54,6 +54,12 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
     power), `fire_smooth_pos` (0.5: of the place), `fire_pull` (0.3 m), `fire_min` (0.3: a tile's
     brightest texel needed; a light goes out below half of it), `fire_debug` (1: the cylinders
     drawn into the scene, the light's point a yellow dot).
+  - two-part fires (67; off): `fire_base` (0; e.g. 0.7: each fire's steady base, the lights within
+    `fire_base_merge` (1.5 m, horizontally) merged, their summed power and place averaged
+    (`fire_base_smooth` 0.98 a frame), x this, as a slim upright cylinder `fire_base_size` (0.3 m)
+    by `fire_base_height` (2.5 m, 40 % below); a fire gone from the screen fades by
+    `fire_base_fade` (0.985) a frame), `fire_spark` (0.5: the per-tile lights' power, now spheres of
+    `fire_spark_size` 0.3 m). `fire_debug` draws the bases cyan.
   - shadows: `sun_shadow` (0/1), `sun_spread` (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),
     `sun_debug` (1 rays only, 2 reversed, 4 the mask in full shadow: a write test);
     `spot_shadow` (0/1), `spot_res` (1024), `spot_blur` (3 texels), `spot_soft` (0.2 m),

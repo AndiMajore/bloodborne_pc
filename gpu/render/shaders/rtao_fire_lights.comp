@@ -11,6 +11,12 @@
 // place: flames flicker, the brightest texel wanders), faded in when new, faded out when gone and
 // no light of this frame took it over. Per light two texels: the world position (w 1: a light,
 // 0: none) and the power (w: the distance from the camera).
+// Mode 2 (fire_base, ticket 67), one invocation: the fires' steady bases, after the lights in the
+// same rows (columns count..count+bases). Each base gathers this frame's lights within `base_merge`
+// metres of it (horizontally: a tall flame's tiles are one fire), its place and their summed power
+// averaged over seconds (`base_smooth`); a light near no base starts one (faded in from nothing);
+// a base whose fire is not on screen keeps its light and fades (`base_fade` a frame), so turning
+// away from a fire does not switch its light off at once.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -20,7 +26,7 @@ layout(binding = 0) uniform texture2D emit_tex;  // quarter size, the transparen
 layout(binding = 1) uniform texture2D depth_tex; // full size, D32 0..1
 layout(binding = 2, rgba32f) uniform image2D raw_img;    // tiles x 2: this frame's (w 0.5: only above half the threshold)
 layout(binding = 3, rgba32f) uniform readonly image2D prev_img;   // tiles x 2: last frame's lights
-layout(binding = 4, rgba32f) uniform writeonly image2D lights_img; // tiles x 2: this frame's lights
+layout(binding = 4, rgba32f) uniform image2D lights_img; // tiles x 2: this frame's lights (+ bases)
 
 layout(push_constant) uniform Constants {
     vec4 inv_view[3]; // view -> world, 3x4 rows
@@ -35,8 +41,14 @@ layout(push_constant) uniform Constants {
     float pos_smoothing; // 0..1: the share of last frame's position
     uint mode;       // 0: per tile into raw_img; 1: matched with last frame's into lights_img
     uint count;      // lights
+    uint bases;      // mode 2: base slots after the lights (0: no bases)
+    float base_smooth;
+    float base_fade;
+    float base_merge;
     uint pad;
 };
+
+const uint MaxBases = 32u;
 
 const int Tile = 64; // quarter-size texels; 16x16 invocations, 4x4 texels each
 // fire_light 1: the burning stakes (Central Yharnam) visibly light the grass and fences around them.
@@ -118,9 +130,104 @@ void Match() {
     imageStore(lights_img, index + ivec2(0, 1), power);
 }
 
+float Horizontal(vec3 a, vec3 b) {
+    return length(a.xz - b.xz); // the world's up is y
+}
+
+void Bases() {
+    if (gl_GlobalInvocationID.x != 0u) {
+        return;
+    }
+    const uint n = min(bases, MaxBases);
+    vec3 position[MaxBases], power[MaxBases], sum_position[MaxBases], sum_power[MaxBases];
+    float weight[MaxBases];
+    bool alive[MaxBases], fresh[MaxBases];
+    for (uint b = 0u; b < n; ++b) {
+        const ivec2 at = ivec2(count + b, 0);
+        // smoothing 0: a cut (or the first frame), last frame's bases are not this frame's.
+        const vec4 p = smoothing > 0.0 ? imageLoad(prev_img, at) : vec4(0.0);
+        alive[b] = p.w == 1.0;
+        fresh[b] = false;
+        position[b] = p.xyz;
+        power[b] = alive[b] ? imageLoad(prev_img, at + ivec2(0, 1)).rgb : vec3(0.0);
+        sum_position[b] = vec3(0.0);
+        sum_power[b] = vec3(0.0);
+        weight[b] = 0.0;
+    }
+    for (uint i = 0u; i < count; ++i) {
+        const vec4 p = imageLoad(lights_img, ivec2(i, 0));
+        if (p.w != 1.0) {
+            continue;
+        }
+        const vec3 q = imageLoad(lights_img, ivec2(i, 1)).rgb;
+        const float w = Luma(q);
+        if (w <= 0.0) {
+            continue;
+        }
+        int nearest = -1;
+        float best = base_merge;
+        for (uint b = 0u; b < n; ++b) {
+            const float d = Horizontal(position[b], p.xyz);
+            if (alive[b] && d < best) {
+                best = d;
+                nearest = int(b);
+            }
+        }
+        if (nearest < 0) { // a new fire: the first free slot
+            for (uint b = 0u; b < n && nearest < 0; ++b) {
+                if (!alive[b]) {
+                    nearest = int(b);
+                    alive[b] = fresh[b] = true;
+                    position[b] = p.xyz;
+                    power[b] = vec3(0.0);
+                }
+            }
+            if (nearest < 0) {
+                continue; // more fires than slots
+            }
+        }
+        sum_position[nearest] += p.xyz * w;
+        sum_power[nearest] += q;
+        weight[nearest] += w;
+    }
+    for (uint b = 0u; b < n; ++b) {
+        if (!alive[b]) {
+            continue;
+        }
+        if (weight[b] > 0.0) {
+            position[b] = fresh[b] ? sum_position[b] / weight[b]
+                                   : mix(sum_position[b] / weight[b], position[b], base_smooth);
+            power[b] = mix(sum_power[b], power[b], base_smooth);
+        } else {
+            power[b] *= base_fade;
+        }
+        alive[b] = Luma(power[b]) > 1e-4 || fresh[b];
+    }
+    // Two bases that drifted onto one fire: the weaker joins the stronger.
+    for (uint b = 0u; b < n; ++b) {
+        for (uint c = b + 1u; c < n && alive[b]; ++c) {
+            if (alive[c] && Horizontal(position[b], position[c]) < 0.5 * base_merge) {
+                const bool keep_b = Luma(power[b]) >= Luma(power[c]);
+                const uint keep = keep_b ? b : c, drop = keep_b ? c : b;
+                power[keep] = max(power[keep], power[drop]);
+                alive[drop] = false;
+            }
+        }
+    }
+    for (uint b = 0u; b < n; ++b) {
+        const ivec2 at = ivec2(count + b, 0);
+        imageStore(lights_img, at, alive[b] ? vec4(position[b], 1.0) : vec4(0.0));
+        imageStore(lights_img, at + ivec2(0, 1), alive[b] ? vec4(power[b], 0.0) : vec4(0.0));
+    }
+}
+
 void main() {
     if (mode == 1u) {
         Match();
+        return;
+    }
+    if (mode == 2u) {
+        Bases();
         return;
     }
     const uint i = gl_LocalInvocationIndex;
