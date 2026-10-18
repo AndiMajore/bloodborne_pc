@@ -692,6 +692,7 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
         .power = settings.power,
         .blur = settings.blur ? 1u : 0u,
         .replace = settings.replace_mask ? 1u : 0u,
+        .edge_fill = settings.edge_fill ? 1u : 0u,
     };
     in.ao_read = *ao_views[read];
     in.ao_write = *ao_views[write];

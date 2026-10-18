@@ -263,6 +263,7 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "denoise") s.denoise = std::clamp(u32(std::max(value, 0.0f)), 1u, 2u);
     else if (key == "blur") flag(s.blur);
     else if (key == "replace") flag(s.replace_mask);
+    else if (key == "edge_fill") flag(s.edge_fill);
     else if (key == "normals") flag(s.depth_normals);
     else if (key == "pipeline") flag(s.use_rt_pipeline);
     else if (key == "snap") s.snap_far = std::max(value, 0.0f);

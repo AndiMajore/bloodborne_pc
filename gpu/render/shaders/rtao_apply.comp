@@ -19,7 +19,7 @@ layout(push_constant) uniform Constants {
     float power;      // ao = pow(ao, power)
     uint blur;        // 0: 2x2 bilinear upsample, 1: 4x4 tent (a small denoise)
     uint replace;     // 1: the mask becomes ours alone (the game's AO ignored)
-    uint pad1;
+    uint edge_fill;   // 1: few samples on this surface: the neighbourhood's AO instead of none
 };
 
 float ViewZ(float depth) { return proj.w / min(depth - proj.z, -1e-8); }
@@ -37,7 +37,7 @@ void main() {
     const vec2 hpf = (vec2(fp) + 0.5) / 2.0 - 0.5;
     const ivec2 h0 = ivec2(floor(hpf));
     const vec2 f = hpf - vec2(h0);
-    float ao = 0.0, wsum = 0.0, wmatch = 0.0;
+    float ao = 0.0, wsum = 0.0, wmatch = 0.0, around = 0.0, wbsum = 0.0;
     const int lo = blur != 0u ? -1 : 0, hi = blur != 0u ? 2 : 1;
     const float reach = blur != 0u ? 1.5 : 1.0; // tent radius in half-res texels
     for (int j = lo; j <= hi; ++j) {
@@ -53,11 +53,17 @@ void main() {
             ao += s.r * w;
             wsum += w;
             wmatch += wb * wd;
+            around += s.r * wb;
+            wbsum += wb;
         }
     }
     // Few half-res texels on this surface (thin features: the sword): fade towards unoccluded
     // rather than a guess that flips every frame with the sampling (a hard switch flickered).
-    ao = mix(1.0, ao / wsum, clamp(wmatch / 0.3, 0.0, 1.0));
+    // edge_fill: towards the AO around it instead (unoccluded drew a bright rim round thin
+    // things and silhouettes against a darkened background); a blend of all the texels around,
+    // which moves as slowly as they do.
+    const float fallback = edge_fill != 0u ? around / max(wbsum, 1e-5) : 1.0;
+    ao = mix(fallback, ao / wsum, clamp(wmatch / 0.3, 0.0, 1.0));
     ao = pow(clamp(ao, 0.0, 1.0), power);
     const float game = imageLoad(mask_img, fp).r;
     const float ours = mix(1.0, ao, strength);

@@ -80,7 +80,7 @@ struct ApplyConstants {
     float power;
     u32 blur;
     u32 replace;
-    u32 pad1;
+    u32 edge_fill; // 1: an edge without samples of its own takes the neighbourhood's AO, not none
 };
 static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
 static_assert(sizeof(TraceConstants) == 148 && offsetof(TraceConstants, foliage) == 144);

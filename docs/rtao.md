@@ -147,6 +147,7 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `sigma` | `BB_RTAO_SIGMA` | 1.5 | half-res blur width in texels, 0 off |
 | `blur` | | 1 | 4x4 depth-aware upsample, 0: 2x2 |
 | `replace` | | 0 | 1: ignore the game's AO (or a replaced AO shader's) in the mask |
+| `edge_fill` | | 0 | 1: thin things and silhouette edges without half-res samples of their own take the AO around them instead of none (none left a bright rim round them against a darkened background); to be judged in motion |
 | `far` | | 40 | no AO and no per-frame geometry beyond this distance (fades over the last quarter) |
 | `snap` | | 40 | the surface snap runs up to this distance; keep it at `far` (0 off; without it depth-biased draws such as the protruding bricks of the Hunter's Dream garden wall flicker in motion) |
 | `normals` | | 1 | 1: geometric normal from the depth buffer, 0: the G-buffer's shading normal |

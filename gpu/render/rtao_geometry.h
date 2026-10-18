@@ -147,6 +147,10 @@ struct Settings {
     float strength = 1.0f, power = 2.0f, radius = 1.5f, history = 0.5f, sigma = 1.5f;
     u32 rays = 2, debug = 0, stage = 5, denoise = 2;
     bool blur = true, replace_mask = false, depth_normals = true, use_rt_pipeline = true;
+    // A pixel with few half-res samples on its surface (thin things, silhouette edges): 0 fades
+    // to unoccluded (a bright rim round them where the AO darkens the rest), 1 to the AO of the
+    // half-res texels around it (Andreas, Central Yharnam, 2026-10-18; to be judged in motion).
+    bool edge_fill = false;
     float snap_far = 40.0f, ao_far = 40.0f, origin_offset = 0.0f;
     float max_n = 32.0f, clip_k = 2.0f, clip_floor = 0.1f;
     bool subpixel = false;
