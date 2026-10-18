@@ -55,6 +55,7 @@ public:
         float base_height = 0.0f;
         float spark_size = 0.0f;
         u32 light_rays = 1; // shadow rays per pixel
+        float large_base_size = 0.0f, large_base_height = 0.0f, large_spark_size = 0.0f; // the pyres
     };
     [[nodiscard]] Frame FrameEmission() const noexcept;
 
@@ -106,6 +107,7 @@ private:
     u32 lights_count = 0, tiles_x = 0, tiles_y = 0;
     u32 lights_frame = ~0u - 1;
     bool lights_written = false;
+    u32 anchor_reports = 0;
     vk::UniqueDescriptorSetLayout lights_desc_layout;
     vk::UniquePipelineLayout lights_layout;
     vk::UniquePipeline lights_pipeline;

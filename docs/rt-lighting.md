@@ -64,6 +64,14 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
     moved up, negative down, from the game's fire light it is anchored to), `fire_base_smooth` (0.98 a frame),
     `fire_base_fade` (0.985 a frame off screen), `fire_base_merge` (1.5 m: sparks within this
     sideways join a base even when their depth is off along the line of sight).
+    Large fires (the pyres): a fire whose game light (a warm light within 2.5 m of its anchor) is
+    brighter than `fire_large` (7: the light's colour as luminance; the Central Yharnam stakes
+    ~4.3, the square's pyre ~9.7, lamps ~2; 0 none) takes `fire_large_base` (1.5),
+    `fire_large_base_size` (0.8 m), `fire_large_base_height` (4 m), `fire_large_base_lift` (0),
+    `fire_large_spark` (0.5) and `fire_large_spark_size` (0.8 m) instead; sparks near a large base
+    count as its. `fire_debug` draws them green (base) and red (sparks). The log says every 600
+    frames how many anchors are a large fire's and the brightest anchor light (to tune the
+    threshold).
   - shadows: `sun_shadow` (0/1), `sun_spread` (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),
     `sun_debug` (1 rays only, 2 reversed, 4 the mask in full shadow: a write test);
     `spot_shadow` (0/1), `spot_res` (1024), `spot_blur` (3 texels), `spot_soft` (0.2 m),

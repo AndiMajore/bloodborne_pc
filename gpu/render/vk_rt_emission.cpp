@@ -52,10 +52,15 @@ struct FireLightConstants {
     u32 anchor_count;     // the game's fire lights below (bases snap to them)
     float spark_strength; // the gather's list: x a spark's power
     float base_lift;      // the gather's list: metres a base is moved up
-    std::array<std::array<float, 4>, 6> anchors; // world position, w its radius
+    float large_base_strength, large_spark_strength, large_base_lift; // the list, large fires
+    float pad;
+    std::array<std::array<float, 4>, 5> anchors; // world position, w 1: a large fire's light
 };
 static_assert(sizeof(FireLightConstants) == 256);
-constexpr u32 MaxAnchors = 6;
+constexpr u32 MaxAnchors = 5;
+float Luma(const std::array<float, 3>& c) {
+    return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+}
 struct FireDebugConstants {
     std::array<float, 12> view;
     std::array<float, 4> proj;
@@ -67,9 +72,10 @@ struct FireDebugConstants {
     float base_radius;
     float base_height;
     float base_lift;
+    float large_base_radius, large_base_height, large_spark_radius, large_base_lift;
     std::array<float, 3> pad;
 };
-static_assert(sizeof(FireDebugConstants) == 128);
+static_assert(sizeof(FireDebugConstants) == 144);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
 constexpr u32 FireBases = 32;      // base slots after the lights (rtao_fire_lights.comp MaxBases)
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
@@ -121,7 +127,10 @@ RtEmission::Frame RtEmission::FrameEmission() const noexcept {
             settings.fire_base_size,
             settings.fire_base_height,
             settings.fire_spark_size,
-            settings.fire_rays};
+            settings.fire_rays,
+            settings.fire_large_base_size,
+            settings.fire_large_base_height,
+            settings.fire_large_spark_size};
 }
 
 void RtEmission::OnFrameStart(u32 next_frame) {
@@ -320,6 +329,9 @@ void RtEmission::RecordFireLights() {
         .base_strength = settings.fire_base,
         .spark_strength = settings.fire_spark,
         .base_lift = settings.fire_base_lift,
+        .large_base_strength = settings.fire_large_base,
+        .large_spark_strength = settings.fire_large_spark,
+        .large_base_lift = settings.fire_large_base_lift,
     };
     {
         // The game's warm point lights nearest the camera (its own fire lights: orange, not the
@@ -340,11 +352,31 @@ void RtEmission::RecordFireLights() {
             warm[n++] = {d2, &light};
         }
         std::sort(warm.begin(), warm.begin() + n, [](const auto& a, const auto& b) { return a.first < b.first; });
+        // A large fire's light: a warm light within 2.5 m of it (a pyre has several, one of them
+        // bright) brighter than fire_large.
+        u32 large = 0;
+        float brightest = 0.0f;
         for (u32 i = 0; i < std::min(n, MaxAnchors); ++i) {
             const auto& l = *warm[i].second;
-            constants.anchors[i] = {l.position[0], l.position[1], l.position[2], l.radius};
+            bool big = false;
+            for (u32 j = 0; j < n && settings.fire_large > 0.0f; ++j) {
+                const auto& o = *warm[j].second;
+                float d2 = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    d2 += (o.position[k] - l.position[k]) * (o.position[k] - l.position[k]);
+                }
+                big = big || (d2 < 2.5f * 2.5f && Luma(o.color) >= settings.fire_large);
+            }
+            brightest = std::max(brightest, Luma(l.color));
+            large += big ? 1 : 0;
+            constants.anchors[i] = {l.position[0], l.position[1], l.position[2], big ? 1.0f : 0.0f};
         }
         constants.anchor_count = std::min(n, MaxAnchors);
+        // For tuning fire_large: the anchors' lights now and then.
+        if (++anchor_reports % 600 == 1) {
+            std::printf("RT fire: %u anchors (%u of a large fire, fire_large %.1f), brightest anchor light %.2f\n",
+                        constants.anchor_count, large, settings.fire_large, brightest);
+        }
     }
     const bool bases_continued = continued;
     if (auto* profiler = GpuProfiler::Get()) {
@@ -448,6 +480,10 @@ void RtEmission::RecordFireDebug(VideoCore::ImageId color_id) {
         .base_radius = settings.fire_base_size,
         .base_height = settings.fire_base_height,
         .base_lift = settings.fire_base_lift,
+        .large_base_radius = settings.fire_large_base_size,
+        .large_base_height = settings.fire_large_base_height,
+        .large_spark_radius = settings.fire_large_spark_size,
+        .large_base_lift = settings.fire_large_base_lift,
     };
     scheduler.RecordCrumb({.name = "rt fire debug"},
                           [constants, color_view, depth_view, lights = *lights_views[lights_out], w, h,

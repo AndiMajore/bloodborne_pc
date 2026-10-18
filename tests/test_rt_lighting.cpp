@@ -159,6 +159,9 @@ static void LightingSettings() {
     assert(Near(defaults.fire_base, 1.0f) && Near(defaults.fire_spark, 0.5f) && Near(defaults.fire_base_size, 0.2f));
     assert(Near(defaults.fire_base_height, 2.0f) && Near(defaults.fire_spark_size, 0.5f));
     assert(defaults.fire_base_lift == 0.0f && ApplyText(s, "fire_base_lift=-9") == 1 && Near(s.fire_base_lift, -5.0f));
+    assert(Near(defaults.fire_large, 7.0f) && Near(defaults.fire_large_base_size, 0.8f));
+    assert(ApplyText(s, "fire_large=9.5 fire_large_base_height=12 fire_large_spark_size=0.6") == 3 &&
+           Near(s.fire_large, 9.5f) && Near(s.fire_large_base_height, 10.0f) && Near(s.fire_large_spark_size, 0.6f));
     assert(defaults.fire_rays == 1 && ApplyText(s, "fire_rays=20") == 1 && s.fire_rays == 8);
     assert(ApplyText(s, "fire_switch=0.5 fire_hold=12 fire_merge=0") == 3 && Near(s.fire_switch, 0.5f) &&
            s.fire_hold == 12 && s.fire_merge == 0.0f);

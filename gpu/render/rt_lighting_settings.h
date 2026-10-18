@@ -43,6 +43,16 @@ struct Settings {
     float fire_base_fade = 0.985f;  // 0..0.999: per frame without its fire on screen (fades over seconds)
     float fire_base_merge = 1.5f;   // metres (horizontal): tile lights within this are one fire
     float fire_spark_size = 0.5f;   // metres: a spark sphere's radius
+    // Large fires (the pyres): a fire whose own game light is brighter than fire_large (the
+    // light's colour as luminance: the Central Yharnam stakes ~4.3, the square's pyre ~9.7, lamps
+    // ~2) takes these instead of the base and spark settings above. 0: no large fires.
+    float fire_large = 7.0f;
+    float fire_large_base = 1.5f;          // x a large base's averaged power
+    float fire_large_base_size = 0.8f;     // metres: its cylinder's radius
+    float fire_large_base_height = 4.0f;   // metres: its height, 40 % below the fire's place
+    float fire_large_base_lift = 0.0f;     // metres: moved up (negative: down)
+    float fire_large_spark = 0.5f;         // x a large fire's sparks' power
+    float fire_large_spark_size = 0.8f;    // metres: their spheres' radius
     // Ray-traced shadows (64, vk_rt_shadows.cpp).
     bool sun_shadow = false;      // the sun's shadow by ray tracing into the game's shadow mask
     float sun_spread = 0.01f;     // radians the sun rays spread over

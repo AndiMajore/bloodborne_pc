@@ -26,6 +26,13 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "fire_hold") s.fire_hold = uint32_t(std::clamp(value, 0.0f, 600.0f));
     else if (key == "fire_base") s.fire_base = std::clamp(value, 0.0f, 4.0f);
     else if (key == "fire_base_lift") s.fire_base_lift = std::clamp(value, -5.0f, 5.0f);
+    else if (key == "fire_large") s.fire_large = std::clamp(value, 0.0f, 1000.0f);
+    else if (key == "fire_large_base") s.fire_large_base = std::clamp(value, 0.0f, 4.0f);
+    else if (key == "fire_large_base_size") s.fire_large_base_size = std::clamp(value, 0.0f, 5.0f);
+    else if (key == "fire_large_base_height") s.fire_large_base_height = std::clamp(value, 0.0f, 10.0f);
+    else if (key == "fire_large_base_lift") s.fire_large_base_lift = std::clamp(value, -5.0f, 5.0f);
+    else if (key == "fire_large_spark") s.fire_large_spark = std::clamp(value, 0.0f, 4.0f);
+    else if (key == "fire_large_spark_size") s.fire_large_spark_size = std::clamp(value, 0.0f, 5.0f);
     else if (key == "fire_spark") s.fire_spark = std::clamp(value, 0.0f, 4.0f);
     else if (key == "fire_base_size") s.fire_base_size = std::clamp(value, 0.0f, 5.0f);
     else if (key == "fire_base_height") s.fire_base_height = std::clamp(value, 0.0f, 10.0f);

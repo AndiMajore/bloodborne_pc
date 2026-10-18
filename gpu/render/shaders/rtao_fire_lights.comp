@@ -30,9 +30,13 @@
 // place ten times as much as the others); a light near no base starts one (faded in from nothing);
 // a base whose fire is not on screen fades (`base_fade` a frame). A base lined up with one of the
 // game's own fire lights (`anchors`, its light list) takes that light's place: exact and fixed.
+// Large fires (the pyres): a base anchored to a game light the CPU marks as large (anchor w 1: a
+// warm light of its fire brighter than fire_large) is large from then on (row 1's w of its slot);
+// sparks near a large base (sideways within base_merge) are large too (row 2's y of their slot).
+// Large ones take their own strength, lift and (in the gather) size.
 // Then the list the gather reads: the lit lights (sparks) and bases, compacted, their power scaled
-// (rows 3 and 4: position with w 1 a spark, 2 a base; power), their count in row 5. The gather
-// loops over a handful of lights instead of every tile's and base's slot.
+// (rows 3 and 4: position with w 1 a spark, 2 a base, 3 a large fire's spark, 4 a large base;
+// power), their count in row 5. The gather loops over a handful of lights instead of every slot.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -68,7 +72,9 @@ layout(push_constant) uniform Constants {
     uint anchor_count;    // mode 2: the game's own fire lights (its light list), nearest the camera first
     float spark_strength; // the list: x a spark's power
     float base_lift;      // the list: metres a base is moved up (the world's up is y)
-    vec4 anchors[6];    // world position, w the light's radius
+    float large_base_strength, large_spark_strength, large_base_lift; // the list, large fires
+    float pad;
+    vec4 anchors[5];    // world position, w 1: a large fire's light
 };
 
 const uint MaxBases = 32u;
@@ -226,7 +232,7 @@ void Bases() {
     const uint n = min(bases, MaxBases);
     vec3 position[MaxBases], power[MaxBases], sum_position[MaxBases], sum_power[MaxBases], ray[MaxBases];
     float weight[MaxBases], place_weight[MaxBases], reach[MaxBases];
-    bool alive[MaxBases], fresh[MaxBases];
+    bool alive[MaxBases], fresh[MaxBases], large[MaxBases];
     for (uint b = 0u; b < n; ++b) {
         const ivec2 at = ivec2(count + b, 0);
         // smoothing 0: a cut (or the first frame), last frame's bases are not this frame's.
@@ -234,7 +240,9 @@ void Bases() {
         alive[b] = p.w == 1.0;
         fresh[b] = false;
         position[b] = p.xyz;
-        power[b] = alive[b] ? imageLoad(prev_img, at + ivec2(0, 1)).rgb : vec3(0.0);
+        const vec4 q = alive[b] ? imageLoad(prev_img, at + ivec2(0, 1)) : vec4(0.0);
+        power[b] = q.rgb;
+        large[b] = q.w > 0.5;
         sum_position[b] = vec3(0.0);
         sum_power[b] = vec3(0.0);
         weight[b] = 0.0;
@@ -272,6 +280,7 @@ void Bases() {
                 if (!alive[b]) {
                     nearest = int(b);
                     alive[b] = fresh[b] = true;
+                    large[b] = false;
                     position[b] = p.xyz;
                     power[b] = vec3(0.0);
                     const vec3 to = p.xyz - Camera();
@@ -325,6 +334,7 @@ void Bases() {
         }
         if (anchor >= 0) {
             position[b] = anchors[anchor].xyz;
+            large[b] = anchors[anchor].w > 0.5;
         }
     }
     // Two bases that drifted onto one fire: the weaker joins the stronger.
@@ -335,6 +345,7 @@ void Bases() {
                 const bool keep_b = Luma(power[b]) >= Luma(power[c]);
                 const uint keep = keep_b ? b : c, drop = keep_b ? c : b;
                 power[keep] = max(power[keep], power[drop]);
+                large[keep] = large[keep] || large[drop];
                 alive[drop] = false;
             }
         }
@@ -342,23 +353,35 @@ void Bases() {
     for (uint b = 0u; b < n; ++b) {
         const ivec2 at = ivec2(count + b, 0);
         imageStore(lights_img, at, alive[b] ? vec4(position[b], 1.0) : vec4(0.0));
-        imageStore(lights_img, at + ivec2(0, 1), alive[b] ? vec4(power[b], 0.0) : vec4(0.0));
+        imageStore(lights_img, at + ivec2(0, 1), alive[b] ? vec4(power[b], large[b] ? 1.0 : 0.0) : vec4(0.0));
     }
     // The gather's list: the lit sparks and bases, their power scaled.
     uint listed = 0u;
-    for (uint i = 0u; i < count && spark_strength > 0.0; ++i) {
+    for (uint i = 0u; i < count; ++i) {
         const vec4 p = imageLoad(lights_img, ivec2(i, 0));
-        const vec3 q = imageLoad(lights_img, ivec2(i, 1)).rgb * spark_strength;
-        if (p.w == 1.0 && Luma(q) > 0.0) {
-            imageStore(lights_img, ivec2(listed, 3), vec4(p.xyz, 1.0));
+        if (p.w != 1.0) {
+            continue;
+        }
+        // A large fire's spark: near a large base sideways.
+        bool big = false;
+        for (uint b = 0u; b < n && !big; ++b) {
+            big = alive[b] && large[b] && FromBase(position[b], ray[b], p.xyz).x < base_merge;
+        }
+        const vec4 held = imageLoad(lights_img, ivec2(i, 2));
+        imageStore(lights_img, ivec2(i, 2), vec4(held.x, big ? 1.0 : 0.0, 0.0, 0.0));
+        const vec3 q = imageLoad(lights_img, ivec2(i, 1)).rgb * (big ? large_spark_strength : spark_strength);
+        if (Luma(q) > 0.0) {
+            imageStore(lights_img, ivec2(listed, 3), vec4(p.xyz, big ? 3.0 : 1.0));
             imageStore(lights_img, ivec2(listed, 4), vec4(q, 0.0));
             ++listed;
         }
     }
-    for (uint b = 0u; b < n && base_strength > 0.0; ++b) {
-        if (alive[b] && Luma(power[b]) > 0.0) {
-            imageStore(lights_img, ivec2(listed, 3), vec4(position[b] + vec3(0.0, base_lift, 0.0), 2.0));
-            imageStore(lights_img, ivec2(listed, 4), vec4(power[b] * base_strength, 0.0));
+    for (uint b = 0u; b < n; ++b) {
+        const vec3 q = power[b] * (large[b] ? large_base_strength : base_strength);
+        if (alive[b] && Luma(q) > 0.0) {
+            const float lift = large[b] ? large_base_lift : base_lift;
+            imageStore(lights_img, ivec2(listed, 3), vec4(position[b] + vec3(0.0, lift, 0.0), large[b] ? 4.0 : 2.0));
+            imageStore(lights_img, ivec2(listed, 4), vec4(q, 0.0));
             ++listed;
         }
     }

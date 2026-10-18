@@ -64,9 +64,10 @@ struct GatherRtConstants {
     float base_height;
     float spark_size;
     u32 fire_rays;
-    u32 pad;
+    float large_base_size, large_base_height, large_spark_size;
+    std::array<float, 2> pad;
 };
-static_assert(sizeof(GatherRtConstants) == 176);
+static_assert(sizeof(GatherRtConstants) == 192);
 struct ApplyConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
@@ -634,6 +635,9 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .base_height = emission.base_height,
         .spark_size = emission.spark_size,
         .fire_rays = emission.light_rays,
+        .large_base_size = emission.large_base_size,
+        .large_base_height = emission.large_base_height,
+        .large_spark_size = emission.large_spark_size,
     };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];

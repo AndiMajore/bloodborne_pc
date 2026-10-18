@@ -28,7 +28,7 @@ layout(binding = 4) uniform texture2D prev_gi_tex; // half res, previous output
 layout(binding = 5, rgba16f) uniform writeonly image2D gi_img; // half res: rgb gi, a view z
 layout(binding = 6) uniform accelerationStructureEXT scene;   // the RTAO's TLAS (view space)
 layout(binding = 7) uniform texture2D emission_tex; // quarter res, the transparents' light (last frame)
-layout(binding = 8) uniform texture2D lights_tex;   // the fire lights' list: rows 3 (world position, w 1 a spark, 2 a base) and 4 (power), its length in row 5
+layout(binding = 8) uniform texture2D lights_tex;   // the fire lights' list: rows 3 (world position, w 1 a spark, 2 a base, 3 and 4 a large fire's) and 4 (power), its length in row 5
 
 layout(push_constant) uniform Constants {
     vec4 view[3];     // world -> view, 3x4 rows
@@ -55,6 +55,8 @@ layout(push_constant) uniform Constants {
     float base_height;  // metres: its height, 40 % below the fire's place
     float spark_size;   // metres: a spark's sphere's radius
     uint fire_rays;     // shadow rays to the fires per pixel (at most rays)
+    float large_base_size, large_base_height, large_spark_size; // large fires (the pyres)
+    float pad;
 };
 
 #include "../../render/shaders/rt_surface_lookup.glsl"
@@ -109,7 +111,7 @@ vec3 FireLights(vec3 N, vec3 origin, ivec2 fp) {
     const uint listed = uint(texelFetch(lights_tex, ivec2(0, 5), 0).x);
     float u[MaxPicks], picked_w[MaxPicks];
     vec3 picked_power[MaxPicks], picked_d[MaxPicks];
-    bool picked_base[MaxPicks];
+    float picked_kind[MaxPicks]; // the list's w: 1 a spark, 2 a base, 3 and 4 a large fire's
     for (uint r = 0u; r < MaxPicks; ++r) {
         u[r] = IGN(vec2(fp) + (float(frame % 16u) + float(r) * 16.0) * 3.141593 + 17.0);
         picked_w[r] = 0.0;
@@ -146,7 +148,7 @@ vec3 FireLights(vec3 N, vec3 origin, ivec2 fp) {
                 picked_w[r] = w;
                 picked_power[r] = power;
                 picked_d[r] = d;
-                picked_base[r] = a.w > 1.5;
+                picked_kind[r] = a.w;
             } else {
                 u[r] = (u[r] - p) / (1.0 - p);
             }
@@ -170,13 +172,14 @@ vec3 FireLights(vec3 N, vec3 origin, ivec2 fp) {
                             IGN(vec2(fp) * 1.3 + f * 6.244998 + 3.0));
         const float phi = 2.0 * PI * v.x;
         vec3 to;
-        if (picked_base[r]) { // a point of the base's cylinder
-            to = picked_d[r] + (T * cos(phi) + B * sin(phi)) * (base_size * sqrt(v.y)) +
-                 up * (base_height * (v.z - 0.4));
+        const bool large = picked_kind[r] > 2.5;
+        if (picked_kind[r] == 2.0 || picked_kind[r] == 4.0) { // a point of the base's cylinder
+            const float radius = large ? large_base_size : base_size, height = large ? large_base_height : base_height;
+            to = picked_d[r] + (T * cos(phi) + B * sin(phi)) * (radius * sqrt(v.y)) + up * (height * (v.z - 0.4));
         } else { // a point of the spark's sphere
             const float cos_t = 1.0 - 2.0 * v.y, sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
             to = picked_d[r] + (T * (cos(phi) * sin_t) + B * (sin(phi) * sin_t) + up * cos_t) *
-                                   (spark_size * pow(v.z, 1.0 / 3.0));
+                                   ((large ? large_spark_size : spark_size) * pow(v.z, 1.0 / 3.0));
         }
         const float dist2 = dot(to, to);
         const float inv_dist = inversesqrt(max(dist2, 1e-6));
