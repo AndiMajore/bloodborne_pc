@@ -12,6 +12,9 @@
 // wide far shadows stay). Into vis_img.
 // mode 1: vis_img into the mask's channel of the pixel's region (x: the AO, w stay). sun_debug 4:
 // y and z zero (a test that the mask reaches the light passes).
+// sun_half=1 (mode bit 8): mode 0 traces one pixel of each 2x2 (which one turns over 4 frames, the
+// upscaler's history fills in) into a half-size vis_img; mode 1 takes the 2x2 half texels around
+// the pixel, bilinear, each by how close its traced pixel's depth is (a silhouette does not blend).
 #version 460
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_samplerless_texture_functions : require
@@ -36,7 +39,10 @@ layout(push_constant) uniform Constants {
     float erode;      // pixels
     float tmax;       // metres
     uint frame;
-    uint mode;        // + debug << 4 (sun_debug: 1 the rays alone, no fallback; 2 the direction reversed)
+    uint mode;        // + debug << 4 (sun_debug: 1 the rays alone, no fallback; 2 the direction reversed;
+                      // 8 the cached geometry alone; 16 the per-frame geometry seen from the camera:
+                      // its distance against the depth buffer's, 0.5 the same),
+                      // + 4096: half resolution
 };
 
 float ViewZ(float depth) {
@@ -66,18 +72,59 @@ float GameShadow(ivec2 p) {
     return Decode(m, Region(m));
 }
 
+// sun_half: the full-res pixel a half texel traces this frame.
+ivec2 HalfOffset() {
+    return ivec2(frame & 1u, (frame >> 1u) & 1u);
+}
+ivec2 Traced(ivec2 hp) {
+    return min(hp * 2 + HalfOffset(), ivec2(full_size) - 1);
+}
+// The visibility at a full-res pixel from the half-size image: the 2x2 half texels around it,
+// bilinear, each by its traced pixel's depth against this one's (5 %: another surface counts not).
+float HalfVisibility(ivec2 p, float z) {
+    const ivec2 half_size = (ivec2(full_size) + 1) / 2;
+    const vec2 f = (vec2(p - HalfOffset())) * 0.5;
+    const ivec2 base = ivec2(floor(f));
+    const vec2 t = f - vec2(base);
+    float sum = 0.0, wsum = 0.0, nearest = 1.0, nearest_dz = 1e30;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 o = ivec2(i & 1, i >> 1);
+        const ivec2 q = clamp(base + o, ivec2(0), half_size - 1);
+        const float v = imageLoad(vis_img, q).r;
+        const float dz = abs(ViewZ(texelFetch(depth_tex, Traced(q), 0).r) - z);
+        const float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y) *
+                        max(1.0 - dz / (0.05 * abs(z)), 0.0);
+        sum += v * w;
+        wsum += w;
+        if (dz < nearest_dz) {
+            nearest_dz = dz;
+            nearest = v;
+        }
+    }
+    return wsum > 1e-4 ? sum / wsum : nearest;
+}
+
 void main() {
-    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const bool half_res = (mode & 4096u) != 0u;
+    const uint debug = (mode >> 4) & 31u;
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 out_p = p; // the vis texel written (mode 0)
+    if ((mode & 15u) == 0u && half_res) {
+        if (p.x >= (int(full_size.x) + 1) / 2 || p.y >= (int(full_size.y) + 1) / 2) {
+            return;
+        }
+        p = Traced(p);
+    }
     if (p.x >= int(full_size.x) || p.y >= int(full_size.y)) {
         return;
     }
-    const uint debug = mode >> 4;
     if ((mode & 15u) == 1u) {
         const float depth = texelFetch(depth_tex, p, 0).r;
         if (depth < 1.0) {
             vec4 m = imageLoad(mask_img, p);
             const vec4 region = Region(m);
-            m[int(region.x)] = region.y * imageLoad(vis_img, p).r + region.z;
+            const float vis = half_res ? HalfVisibility(p, ViewZ(depth)) : imageLoad(vis_img, p).r;
+            m[int(region.x)] = region.y * vis + region.z;
             if ((debug & 4u) != 0u) { // the write test: both channels in full shadow
                 m.y = region_a.x == 1.0 ? region_a.z : 0.0;
                 m.z = 0.0;
@@ -88,7 +135,7 @@ void main() {
     }
     const float depth = texelFetch(depth_tex, p, 0).r;
     if (depth >= 1.0) {
-        imageStore(vis_img, p, vec4(1.0));
+        imageStore(vis_img, out_p, vec4(1.0));
         return;
     }
     const vec3 P = ViewPos(vec2(p) + 0.5, depth);
@@ -98,6 +145,20 @@ void main() {
         N = -N;
     }
     float s;
+    if ((debug & 16u) != 0u) {
+        rayQueryEXT cq;
+        rayQueryInitializeEXT(cq, scene, gl_RayFlagsCullNoOpaqueEXT, 0x01u, vec3(0.0), 0.0, normalize(P),
+                              length(P) * 4.0);
+        while (rayQueryProceedEXT(cq)) {
+        }
+        // Where the nearest per-frame hit lies against the depth buffer: 0.5 the same distance,
+        // darker in front of the visible surface, brighter behind it; 1 no per-frame hit.
+        s = rayQueryGetIntersectionTypeEXT(cq, true) != gl_RayQueryCommittedIntersectionNoneEXT
+                ? clamp(0.5 + (rayQueryGetIntersectionTEXT(cq, true) / length(P) - 1.0) * 2.0, 0.0, 0.95)
+                : 1.0;
+        imageStore(vis_img, out_p, vec4(s));
+        return;
+    }
     const vec3 L = (debug & 2u) != 0u ? -sun : sun;
     if (dot(N, L) <= 0.0) {
         s = GameShadow(p); // facing away: the sun's own shading darkens it, as the game had it
@@ -113,7 +174,9 @@ void main() {
         const vec3 dir = normalize(L + (T * cos(a) + B * sin(a)) * r);
         rayQueryEXT q;
         // Foliage (non-opaque) is left out, as for the AO: the game's shadow keeps it.
-        rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullNoOpaqueEXT, 0xFF,
+        // sun_debug 8: the cached (world-space) geometry alone, the per-frame left out.
+        rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullNoOpaqueEXT,
+                              (debug & 8u) != 0u ? 0x02u : 0xFFu,
                               origin, 0.0, dir, tmax);
         while (rayQueryProceedEXT(q)) {
         }
@@ -138,5 +201,5 @@ void main() {
             }
         }
     }
-    imageStore(vis_img, p, vec4(s));
+    imageStore(vis_img, out_p, vec4(s));
 }

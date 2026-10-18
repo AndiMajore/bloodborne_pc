@@ -75,8 +75,13 @@ typo, or a key that belongs in another of these files.
     count as its. `fire_debug` draws them green (base) and red (sparks). The log says every 600
     frames how many anchors are a large fire's and the brightest anchor light (to tune the
     threshold).
-  - shadows: `sun_shadow` (0/1), `sun_spread` (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),
-    `sun_debug` (1 rays only, 2 reversed, 4 the mask in full shadow: a write test);
+  - shadows: `sun_shadow` (0/1), `sun_half` (0; 1: the sun's rays at half resolution, one pixel of
+    each 2x2 turning over 4 frames, upsampled by depth: about half the 0.54 ms), `sun_spread`
+    (0.01 rad), `sun_erode` (4 px), `sun_far` (200 m),
+    `sun_debug` (1 rays only, 2 reversed, 4 the mask in full shadow: a write test; 8 the moon rays
+    hit the cached static geometry only, the per-frame (characters, cloth, not yet cached) left out;
+    16 the per-frame geometry's distance along camera rays against the depth buffer, written as
+    the shadow: 0.5 where it sits on the visible surface, darker in front, brighter behind, 1 none);
     `spot_shadow` (0/1), `spot_res` (1024), `spot_blur` (3 texels), `spot_soft` (0.2 m),
     `spot_near` (0.3 m).
   - light list: `lights_dump` (a new value logs the next frame's list; every 600 frames a summary).

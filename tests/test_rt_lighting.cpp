@@ -173,6 +173,7 @@ static void LightingSettings() {
                         "emission_trace=1") == 0);
     // The RTAO's own keys are not the experiments': rtlighting.txt ignores them.
     assert(ApplyText(s, "rays=4 strength=0.5") == 0);
+    assert(!defaults.sun_half && ApplyText(s, "sun_half=1") == 1 && s.sun_half);
     // The keys skipped are listed for the log: a typo, a key of another file, a value not a number.
     std::string skipped;
     assert(ApplyText(s, "fire_lage_base_height=4 fire_light=0.3 rays=2 spot_blur=x # fire_size=1", &skipped) == 1);

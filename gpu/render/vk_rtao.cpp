@@ -271,7 +271,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     const auto make_instance = [&](vk::DeviceAddress address, bool world) {
         vk::AccelerationStructureInstanceKHR as_instance{
             .instanceCustomIndex = world ? 1u : 0u,
-            .mask = 0xFF,
+            .mask = world ? 0x02u : 0x01u, // 1 per-frame, 2 world-space (cached); 0xFF hits both
             .instanceShaderBindingTableRecordOffset = 0,
             .flags = VkGeometryInstanceFlagsKHR(vk::GeometryInstanceFlagBitsKHR::eTriangleFacingCullDisable),
             .accelerationStructureReference = address,

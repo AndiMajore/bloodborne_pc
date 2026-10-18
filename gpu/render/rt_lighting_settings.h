@@ -58,8 +58,9 @@ struct Settings {
     bool sun_shadow = false;      // the sun's shadow by ray tracing into the game's shadow mask
     float sun_spread = 0.01f;     // radians the sun rays spread over
     uint32_t sun_erode = 4;       // pixels the game's shadow is shrunk by where it is kept
+    bool sun_half = false;        // the rays at half resolution (one pixel of each 2x2), upsampled by depth
     float sun_far = 200.0f;       // metres a sun ray reaches
-    uint32_t sun_debug = 0;       // 1 the rays alone, 2 reversed, 4 the mask in full shadow (a write test)
+    uint32_t sun_debug = 0;       // 1 the rays alone, 2 reversed, 4 the mask in full shadow (a write test), 8 cached geometry only, 16 per-frame geometry from the camera
     bool spot_shadow = false;     // the shadowed spot's 512x512 map replaced by a ray-traced one
     uint32_t spot_res = 1024;     // its size
     uint32_t spot_blur = 3;       // texels of Gaussian on its moments (soft edges)

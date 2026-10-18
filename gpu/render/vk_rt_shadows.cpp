@@ -179,7 +179,8 @@ bool RtShadows::EnsureSun(u32 w, u32 h) {
     }));
     sun_w = w;
     sun_h = h;
-    std::printf("RT shadows: sun %ux%u (the sun's shadow by ray tracing, sun_shadow=1)\n", w, h);
+    std::printf("RT shadows: sun rays %ux%u (the sun's shadow by ray tracing, sun_shadow=1; sun_half=%d)\n", w, h,
+                settings.sun_half ? 1 : 0);
     return true;
 }
 
@@ -194,7 +195,13 @@ void RtShadows::RecordSun() {
     auto& normal = texture_cache.GetImage(normal_id);
     const u32 w = depth.info.size.width, h = depth.info.size.height;
     if (mask.info.pixel_format != vk::Format::eR8G8B8A8Unorm || mask.info.size.width != w ||
-        mask.info.size.height != h || normal.info.size.width != w || !EnsureSun(w, h)) {
+        mask.info.size.height != h || normal.info.size.width != w) {
+        return;
+    }
+    // sun_half: the rays into a half-size image, the mask pass upsamples it.
+    const bool half_res = settings.sun_half;
+    const u32 vw = half_res ? (w + 1) / 2 : w, vh = half_res ? (h + 1) / 2 : h;
+    if (!EnsureSun(vw, vh)) {
         return;
     }
     ++sun_traced;
@@ -225,7 +232,7 @@ void RtShadows::RecordSun() {
         .erode = float(settings.sun_erode),
         .tmax = settings.sun_far,
         .frame = frame,
-        .mode = settings.sun_debug << 4,
+        .mode = settings.sun_debug << 4 | (half_res ? 4096u : 0u),
     };
     const vk::ImageMemoryBarrier2 to_write{
         .srcStageMask = Compute,
@@ -240,7 +247,7 @@ void RtShadows::RecordSun() {
     const ProfileScope profile{0x55606ull, "rt sun shadow"};
     scheduler.RecordCrumb(
         {.name = "rt sun shadow"},
-        [constants, to_write, tlas, depth_view, normal_view, mask_view, vis = *sun_vis_view, w, h,
+        [constants, to_write, tlas, depth_view, normal_view, mask_view, vis = *sun_vis_view, w, h, vw, vh,
          pipeline = *sun_pipeline, layout = *sun_layout](vk::CommandBuffer cmdbuf) {
             cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_write});
             const auto info = [](vk::ImageView v) {
@@ -266,7 +273,7 @@ void RtShadows::RecordSun() {
             // the mask's channel.
             auto pc = constants;
             cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
-            cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            cmdbuf.dispatch((vw + 7) / 8, (vh + 7) / 8, 1);
             const vk::MemoryBarrier2 b{.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
                                        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite |
                                                         vk::AccessFlagBits2::eShaderRead,
