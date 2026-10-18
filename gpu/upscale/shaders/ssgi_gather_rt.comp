@@ -8,8 +8,9 @@
 // so the apply pass is shared. With a few rays a pixel the gather is far noisier than the march,
 // so the reprojected history is clipped to this frame's 3x3 neighbourhood (mean +- k sigma, from
 // the workgroup's tile): history from a moving character no longer trails as light.
-// The fires (fire_light): the RTAO's point lights from last frame's emission; per pixel one is
-// picked by its unshadowed light here and a shadow ray decides whether it reaches the pixel.
+// The fires (fire_light): the lights made from last frame's emission (rtao_fire_lights.comp), a
+// compact list of sparks and steady bases; per ray one is picked by its unshadowed light and a
+// shadow ray decides whether it reaches the pixel.
 #version 460
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_samplerless_texture_functions : require
@@ -27,7 +28,7 @@ layout(binding = 4) uniform texture2D prev_gi_tex; // half res, previous output
 layout(binding = 5, rgba16f) uniform writeonly image2D gi_img; // half res: rgb gi, a view z
 layout(binding = 6) uniform accelerationStructureEXT scene;   // the RTAO's TLAS (view space)
 layout(binding = 7) uniform texture2D emission_tex; // quarter res, the transparents' light (last frame)
-layout(binding = 8) uniform texture2D lights_tex;   // fire_count x 2: world position (w 1: a light), power
+layout(binding = 8) uniform texture2D lights_tex;   // the fire lights' list: rows 3 (world position, w 1 a spark, 2 a base) and 4 (power), its length in row 5
 
 layout(push_constant) uniform Constants {
     vec4 view[3];     // world -> view, 3x4 rows
@@ -47,18 +48,13 @@ layout(push_constant) uniform Constants {
     float fire_light;   // x the fire lights' light
     uint64_t surface_cache; // the RTAO's surface cache (0: none): radiance of hidden static hits
     uint64_t surface_parts;
-    float fire_shadow;  // 0..1: their unshadowed light taken away (the game's own fire light)
     float fire_range;   // metres
-    uint fire_count;    // lights in lights_tex (0: none bound)
-    float fire_size;    // metres: a light's radius (its cylinder's)
-    float fire_height;  // metres: its cylinder's height (a quarter below the light's point)
+    uint fire_count;    // 0: no fire lights bound
     float fire_wrap;    // 0..1: the cosine wrapped round (thin swaying leaves)
-    uint base_count;    // two-part fires (67): the fires' steady bases after the lights in lights_tex (0: off)
-    float base_strength; // x a base's power
-    float spark_strength; // with bases: x a light's power (the lights then spheres)
-    float base_size;    // metres: a base cylinder's radius
+    float base_size;    // metres: a fire's steady base, its cylinder's radius
     float base_height;  // metres: its height, 40 % below the fire's place
-    float spark_size;   // metres: a light's sphere's radius (with bases)
+    float spark_size;   // metres: a spark's sphere's radius
+    uint fire_rays;     // shadow rays to the fires per pixel (at most rays)
 };
 
 #include "../../render/shaders/rt_surface_lookup.glsl"
@@ -95,90 +91,107 @@ float IGN(vec2 p) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
-// The fire lights' irradiance at `origin`: every light's unshadowed share (power x cosine /
-// distance^2, windowed to fire_range) is summed, one is picked in proportion to it (u: 0..1) and
-// traced; the estimate is the picked light's colour x the summed weight, or 0 when blocked. A
-// fire is no point but a flame: an upright cylinder (fire_size wide, fire_height tall, mostly
-// above the light's point) a random point of which (v) is lit from and traced to each frame, so the
-// history averages an area light: soft shadows, and swaying leaves (whose facing flips from frame to
-// frame) do not strobe. The cosine is wrapped (fire_wrap): a big light reaches round thin things.
-// Two-part fires (base_count > 0): each fire's steady base, a tall slim cylinder, joins the stream;
-// the per-tile lights become spheres (spark_size) carrying the flicker on top.
+// The fire lights' irradiance at `origin`, from one pass over the list: every light's unshadowed
+// share (power x cosine / distance^2, windowed to fire_range) is summed, and for each of fire_rays
+// shadow rays (1: the history averages them; a second ray cost 0.27 ms at the stakes) one light
+// is picked in proportion to it (its own number u, all picks made in the same pass) and traced; a
+// ray's estimate is its light's colour x the summed weight, or 0 when blocked. A fire is no point:
+// a ray traces to a random point (v) of its light's shape each frame, so the history averages an
+// area light (soft shadows; swaying leaves, whose facing flips from frame to frame, do not
+// strobe): a base is a tall upright cylinder (base_size, base_height), a spark a sphere
+// (spark_size). The cosine is wrapped (fire_wrap): a big light reaches round thin things.
+const uint MaxPicks = 8u;
 float Wrapped(vec3 N, vec3 d, float inv_len) {
     return clamp((dot(N, d) * inv_len + fire_wrap) / (1.0 + fire_wrap), 0.0, 1.0);
 }
-vec3 FireLight(vec3 N, vec3 origin, float u, vec3 v, out vec3 unshadowed) {
-    unshadowed = vec3(0.0);
-    float total = 0.0, picked_w = 0.0;
-    vec3 picked_power = vec3(0.0), picked_d = vec3(0.0);
-    bool picked_base = false;
+vec3 FireLights(vec3 N, vec3 origin, ivec2 fp) {
+    const uint picks = clamp(fire_rays, 1u, min(rays, MaxPicks));
+    const uint listed = uint(texelFetch(lights_tex, ivec2(0, 5), 0).x);
+    float u[MaxPicks], picked_w[MaxPicks];
+    vec3 picked_power[MaxPicks], picked_d[MaxPicks];
+    bool picked_base[MaxPicks];
+    for (uint r = 0u; r < MaxPicks; ++r) {
+        u[r] = IGN(vec2(fp) + (float(frame % 16u) + float(r) * 16.0) * 3.141593 + 17.0);
+        picked_w[r] = 0.0;
+    }
+    float total = 0.0;
     const float range2 = fire_range * fire_range;
-    for (uint i = 0u; i < fire_count + base_count; ++i) {
-        const vec4 a = texelFetch(lights_tex, ivec2(i, 0), 0);
-        if (a.w == 0.0) {
-            continue;
-        }
+    for (uint i = 0u; i < listed; ++i) {
+        const vec4 a = texelFetch(lights_tex, ivec2(i, 3), 0);
         const vec4 h = vec4(a.xyz, 1.0);
         const vec3 d = vec3(dot(view[0], h), dot(view[1], h), dot(view[2], h)) - origin;
         const float dist2 = dot(d, d);
+        if (dist2 >= range2) {
+            continue;
+        }
         const float cosine = Wrapped(N, d, inversesqrt(max(dist2, 1e-6)));
-        if (dist2 >= range2 || cosine <= 0.0) {
+        if (cosine <= 0.0) {
             continue;
         }
         const float window = 1.0 - dist2 / range2;
-        const bool base = i >= fire_count;
-        const vec3 power = texelFetch(lights_tex, ivec2(i, 1), 0).rgb *
-                           (base ? base_strength : base_count > 0u ? spark_strength : 1.0);
-        const vec3 c = power * (cosine * window * window / max(dist2, 0.25));
-        const float w = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        const vec3 power = texelFetch(lights_tex, ivec2(i, 4), 0).rgb;
+        const float w = dot(power, vec3(0.2126, 0.7152, 0.0722)) * (cosine * window * window / max(dist2, 0.25));
         if (w <= 0.0) {
             continue;
         }
-        unshadowed += c;
         total += w;
-        // One uniform number for the whole stream: keep this light with probability w / total.
+        // Each ray's number decides for the whole stream: keep this light with probability w / total.
         const float p = w / total;
-        if (u < p) {
-            u /= p;
-            picked_w = w;
-            picked_power = power;
-            picked_d = d;
-            picked_base = base;
-        } else {
-            u = (u - p) / (1.0 - p);
+        for (uint r = 0u; r < MaxPicks; ++r) {
+            if (r >= picks) {
+                break;
+            }
+            if (u[r] < p) {
+                u[r] /= p;
+                picked_w[r] = w;
+                picked_power[r] = power;
+                picked_d[r] = d;
+                picked_base[r] = a.w > 1.5;
+            } else {
+                u[r] = (u[r] - p) / (1.0 - p);
+            }
         }
     }
-    if (picked_w <= 0.0) {
+    if (total <= 0.0) {
         return vec3(0.0);
     }
-    // A point of the flame's cylinder (the world's up in view space: the view rows' y).
+    // The world's up in view space (the view rows' y) and two directions across it.
     const vec3 up = normalize(vec3(view[0].y, view[1].y, view[2].y));
     const vec3 side = abs(up.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     const vec3 T = normalize(cross(side, up));
     const vec3 B = cross(up, T);
-    const float phi = 2.0 * PI * v.x, r = fire_size * sqrt(v.y);
-    vec3 to;
-    if (picked_base) {
-        to = picked_d + (T * cos(phi) + B * sin(phi)) * (base_size * sqrt(v.y)) + up * (base_height * (v.z - 0.4));
-    } else if (base_count > 0u) { // a spark: a point of its sphere
-        const float cos_t = 1.0 - 2.0 * v.y, sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
-        to = picked_d + (T * (cos(phi) * sin_t) + B * (sin(phi) * sin_t) + up * cos_t) * (spark_size * pow(v.z, 1.0 / 3.0));
-    } else {
-        to = picked_d + (T * cos(phi) + B * sin(phi)) * r + up * (fire_height * (v.z - 0.25));
+    vec3 lit = vec3(0.0);
+    for (uint r = 0u; r < picks; ++r) {
+        if (picked_w[r] <= 0.0) {
+            continue;
+        }
+        const float f = float(frame % 16u) + float(r) * 16.0;
+        const vec3 v = vec3(IGN(vec2(fp) + f * 2.236068 + 31.0), IGN(vec2(fp.yx) + f * 4.123106 + 7.0),
+                            IGN(vec2(fp) * 1.3 + f * 6.244998 + 3.0));
+        const float phi = 2.0 * PI * v.x;
+        vec3 to;
+        if (picked_base[r]) { // a point of the base's cylinder
+            to = picked_d[r] + (T * cos(phi) + B * sin(phi)) * (base_size * sqrt(v.y)) +
+                 up * (base_height * (v.z - 0.4));
+        } else { // a point of the spark's sphere
+            const float cos_t = 1.0 - 2.0 * v.y, sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
+            to = picked_d[r] + (T * (cos(phi) * sin_t) + B * (sin(phi) * sin_t) + up * cos_t) *
+                                   (spark_size * pow(v.z, 1.0 / 3.0));
+        }
+        const float dist2 = dot(to, to);
+        const float inv_dist = inversesqrt(max(dist2, 1e-6));
+        const float window = max(1.0 - dist2 / range2, 0.0);
+        const vec3 c = picked_power[r] * (Wrapped(N, to, inv_dist) * window * window / max(dist2, 0.25));
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullNoOpaqueEXT, 0xFF,
+                              origin, 0.0, to * inv_dist, max(dist2 * inv_dist - 0.1, 0.0));
+        while (rayQueryProceedEXT(q)) {
+        }
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+            lit += c * (total / picked_w[r]);
+        }
     }
-    const float dist2 = dot(to, to);
-    const float dist = sqrt(dist2);
-    const float window = max(1.0 - dist2 / range2, 0.0);
-    const vec3 c = picked_power * (Wrapped(N, to, 1.0 / max(dist, 1e-3)) * window * window / max(dist2, 0.25));
-    rayQueryEXT q;
-    rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullNoOpaqueEXT, 0xFF,
-                          origin, 0.0, to / max(dist, 1e-3), max(dist - 0.1, 0.0));
-    while (rayQueryProceedEXT(q)) {
-    }
-    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-        return vec3(0.0);
-    }
-    return c * (total / picked_w);
+    return lit / float(max(picks, 1u));
 }
 
 void main() {
@@ -253,21 +266,11 @@ void main() {
     gi /= float(rays);
     vec3 fire = vec3(0.0);
     if (fire_count > 0u && fire_light > 0.0) {
-        vec3 unshadowed;
-        // One pick and shadow ray per gather ray (rays=), each with its own numbers.
-        vec3 lit = vec3(0.0);
-        for (uint r = 0u; r < rays; ++r) {
-            const float f = float(frame % 16u) + float(r) * 16.0;
-            const vec3 sphere = vec3(IGN(vec2(fp) + f * 2.236068 + 31.0), IGN(vec2(fp.yx) + f * 4.123106 + 7.0),
-                                     IGN(vec2(fp) * 1.3 + f * 6.244998 + 3.0));
-            lit += FireLight(N, origin, IGN(vec2(fp) + f * 3.141593 + 17.0), sphere, unshadowed);
-        }
-        lit /= float(max(rays, 1u));
-        fire = (lit - fire_shadow * unshadowed) * (fire_light / PI);
+        fire = FireLights(N, origin, fp) * (fire_light / PI);
         gi += fire;
     }
-    if (debug == 4u) { // the fire lights alone (blue: taken away by fire_shadow)
-        gi = max(fire, vec3(0.0)) + vec3(0.0, 0.0, max(-dot(fire, vec3(0.3333)), 0.0));
+    if (debug == 4u) { // the fire lights alone
+        gi = fire;
     }
     if (debug == 2u) {
         gi = vec3(hidden, seen, cached) / float(rays);

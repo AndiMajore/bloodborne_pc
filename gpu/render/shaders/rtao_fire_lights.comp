@@ -1,41 +1,38 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// bbport: the fires as point lights for the RT SSGI (fire_light= in rtao.txt, vk_rtao_emission.cpp).
-// One workgroup per 64x64 tile of the (blurred) emission image: the brightest texel is the
-// light's place on screen, the nearest surface under the tile's bright flame its distance, pulled
-// a little towards the camera (the flame burns in front of what it sits on). Its power is the
-// tile's emission summed over the world area each texel covers at that distance, so a fire keeps
-// its strength near and far (mode 0, into raw_img). Mode 1, one invocation per light: the lights
-// are matched with last frame's by their place in the world, not by tile (a fire moving across the
-// screen changes tiles: tied to the tile, the old light faded out while a new one faded in, two
-// shadows), blended with the nearest within reach (`smoothing` the power, `pos_smoothing` the
-// place: flames flicker, the brightest texel wanders), faded in when new, faded out when gone and
-// no light of this frame took it over. Per light two texels: the world position (w 1: a light,
-// 0: none) and the power (w: the distance from the camera).
+// bbport: the fires as lights for the RT SSGI (fire_light= in rtlighting.txt, vk_rt_emission.cpp;
+// tickets 63, 67).
+// Mode 0, one workgroup per 64x64 tile of the (blurred) emission image: the brightest texel is the
+// light's place on screen. Its depth: from the bright texels within 2 quarter-size texels of the
+// peak, the nearest depth that enough of them share (a fifth, at least 3, within 10 %), pulled a
+// little towards the camera (the flame burns in front of what it sits on): not the nearest under
+// any bright texel of the tile (a plant in front of one flame tongue pulled the light forward and
+// a flicker pushed it back), not their median (through thin flame tongues that is the background).
+// Its power is the tile's emission summed over the world area each texel covers at that distance,
+// so a fire keeps its strength near and far.
 // Sticky lights (switch_ratio / hold > 0): the brightest texel wanders with the flicker and the
-// light (and its shadows) jumped with it. Mode 0 keeps the texel of the tile's last light (when it
-// still lies in the tile) as the peak unless this frame's brightest is switch_ratio brighter than
-// the flame there, and for `hold` frames after a jump; it moves at once when the flame there went
-// dark. Only the place on screen is kept: the depth is found again each frame (a light frozen in
-// the world ends up behind its stake, all its shadow rays blocked). A third row: the frames since
-// the light last moved.
-// Merged lights (merge > 0): a tall flame over two tiles made two lights, the upper one popping in
-// and out with the flame's tips. A light within `merge` metres (horizontally) of a stronger one of
-// this frame is dropped and its power added to the stronger.
-// Depth (depth_mode 1): from the bright texels within 2 quarter-size texels of the peak, the
-// nearest depth that enough of them share (a fifth, at least 3, within 10 %), not the nearest under
-// any bright texel of the tile: a plant in front of one flame tongue (a few texels) pulled the
-// light forward and a flicker pushed it back. Not the median either: the background seen through
-// the gaps between thin flame tongues is often most of them.
-// Mode 2 (fire_base, ticket 67), one invocation: the fires' steady bases, after the lights in the
-// same rows (columns count..count+bases). Each base gathers this frame's lights within `base_merge`
-// metres of it (horizontally: a tall flame's tiles are one fire), its place and their summed power
-// averaged over seconds (`base_smooth`); a light near no base starts one (faded in from nothing);
-// a base whose fire is not on screen keeps its light and fades (`base_fade` a frame), so turning
-// away from a fire does not switch its light off at once.
-// A light's depth errs along the line of sight (a flicker puts it on the stake one frame and on the
-// wall behind the next): it joins a base it is near sideways (base_merge, horizontally) even when
-// it is off in depth by up to half the camera's distance, and lights that agree in depth too move
-// the base ten times as much as the others. Without that each depth jump started a base of its own behind or before the fire.
+// light (and its shadows) jumped with it. The texel of the tile's last light (when it still lies in
+// the tile) stays the peak unless this frame's brightest is switch_ratio brighter than the flame
+// there, and for `hold` frames after a jump; it moves at once when the flame there went dark. Only
+// the place on screen is kept: the depth is found again each frame (a light frozen in the world
+// ended up behind its stake, all its shadow rays blocked).
+// Mode 1, one invocation per light: a light within `merge` metres (horizontally) of a stronger one
+// of this frame is dropped and its power added to the stronger (a tall flame over two tiles made two
+// lights, the upper one popping in and out). The lights are matched with last frame's by their place
+// in the world, not by tile (a fire crossing the screen changes tiles), blended with the nearest
+// within reach (`smoothing` the power, `pos_smoothing` the place), faded in when new, faded out
+// when gone and no light of this frame took it over. Per light three texels: the world position
+// (w 1: a light, 0: none), the power (w: the distance from the camera), the frames since it moved.
+// Mode 2, one invocation: the fires' steady bases, after the lights in the same rows (columns
+// count..count+bases). Each base gathers this frame's lights near it sideways (base_merge,
+// horizontally) even when their depth is off along the line of sight (up to half the camera's
+// distance: a flicker puts a light on the stake one frame and on the wall behind the next), its
+// summed power and place averaged over seconds (`base_smooth`; lights that agree in depth move the
+// place ten times as much as the others); a light near no base starts one (faded in from nothing);
+// a base whose fire is not on screen fades (`base_fade` a frame). A base lined up with one of the
+// game's own fire lights (`anchors`, its light list) takes that light's place: exact and fixed.
+// Then the list the gather reads: the lit lights (sparks) and bases, compacted, their power scaled
+// (rows 3 and 4: position with w 1 a spark, 2 a base; power), their count in row 5. The gather
+// loops over a handful of lights instead of every tile's and base's slot.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -45,7 +42,7 @@ layout(binding = 0) uniform texture2D emit_tex;  // quarter size, the transparen
 layout(binding = 1) uniform texture2D depth_tex; // full size, D32 0..1
 layout(binding = 2, rgba32f) uniform image2D raw_img;    // tiles x 2: this frame's (w 0.5: only above half the threshold)
 layout(binding = 3, rgba32f) uniform readonly image2D prev_img;   // tiles x 2: last frame's lights
-layout(binding = 4, rgba32f) uniform image2D lights_img; // tiles x 2: this frame's lights (+ bases)
+layout(binding = 4, rgba32f) uniform image2D lights_img; // (tiles + bases) x 6: this frame's lights, bases, the list
 
 layout(push_constant) uniform Constants {
     vec4 inv_view[3]; // view -> world, 3x4 rows
@@ -58,18 +55,19 @@ layout(push_constant) uniform Constants {
     float pull;     // metres towards the camera
     float smoothing; // 0..1: the share of last frame's power (0: none, a cut)
     float pos_smoothing; // 0..1: the share of last frame's position
-    uint mode;       // 0: per tile into raw_img; 1: matched with last frame's into lights_img
-    uint count;      // lights
-    uint bases;      // mode 2: base slots after the lights (0: no bases)
+    uint mode;       // 0: per tile into raw_img; 1: matched with last frame's; 2: the bases and the list
+    uint count;      // lights (tiles)
+    uint bases;      // base slots after the lights
     float base_smooth;
     float base_fade;
     float base_merge;
     float switch_ratio; // sticky lights: a new peak this much brighter than the flame at the light's place (0: off)
     float hold;         // sticky lights: frames a light stays after it moved
     float merge;        // metres: lights nearer than this (horizontally) merged into the strongest (0: off)
-    uint depth_mode;    // 0: the nearest depth under the tile's bright flame; 1: the nearest well-supported depth
-    uint anchor_count;  // mode 2: the game's own fire lights (its light list), nearest the camera first
-    uint pad1, pad2;
+    float base_strength;  // the list: x a base's power
+    uint anchor_count;    // mode 2: the game's own fire lights (its light list), nearest the camera first
+    float spark_strength; // the list: x a spark's power
+    uint pad;
     vec4 anchors[6];    // world position, w the light's radius
 };
 
@@ -209,19 +207,16 @@ void Match() {
     imageStore(lights_img, index + ivec2(0, 2), vec4(held, 0.0, 0.0, 0.0));
 }
 
-// A light (or base) `p` against base `b` from the camera: x the sideways distance (horizontal),
-// y the distance along the line of sight.
-vec2 FromBase(vec3 b, vec3 p) {
-    const vec3 camera = vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
-    const vec3 ray = normalize(b - camera);
+// A light (or base) `p` against base `b` from the camera (`ray`: the unit direction to the base):
+// x the sideways distance (horizontal), y the distance along the line of sight.
+vec2 FromBase(vec3 b, vec3 ray, vec3 p) {
     const vec3 d = p - b;
     const float along = dot(d, ray);
     const vec3 side = d - along * ray;
     return vec2(length(side.xz), abs(along));
 }
-float DepthReach(vec3 b) {
-    const vec3 camera = vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
-    return max(base_merge, 0.5 * distance(b, camera));
+vec3 Camera() {
+    return vec3(inv_view[0].w, inv_view[1].w, inv_view[2].w);
 }
 
 void Bases() {
@@ -229,8 +224,8 @@ void Bases() {
         return;
     }
     const uint n = min(bases, MaxBases);
-    vec3 position[MaxBases], power[MaxBases], sum_position[MaxBases], sum_power[MaxBases];
-    float weight[MaxBases], place_weight[MaxBases];
+    vec3 position[MaxBases], power[MaxBases], sum_position[MaxBases], sum_power[MaxBases], ray[MaxBases];
+    float weight[MaxBases], place_weight[MaxBases], reach[MaxBases];
     bool alive[MaxBases], fresh[MaxBases];
     for (uint b = 0u; b < n; ++b) {
         const ivec2 at = ivec2(count + b, 0);
@@ -244,6 +239,10 @@ void Bases() {
         sum_power[b] = vec3(0.0);
         weight[b] = 0.0;
         place_weight[b] = 0.0;
+        // The line of sight to it and how far a light may be off along it, once per base.
+        const vec3 to = p.xyz - Camera();
+        ray[b] = to * inversesqrt(max(dot(to, to), 1e-6));
+        reach[b] = max(base_merge, 0.5 * length(to));
     }
     for (uint i = 0u; i < count; ++i) {
         const vec4 p = imageLoad(lights_img, ivec2(i, 0));
@@ -261,9 +260,9 @@ void Bases() {
             if (!alive[b]) {
                 continue;
             }
-            const vec2 d = FromBase(position[b], p.xyz);
+            const vec2 d = FromBase(position[b], ray[b], p.xyz);
             const float score = d.x + 0.25 * d.y;
-            if (d.x < base_merge && d.y < DepthReach(position[b]) && score < best) {
+            if (d.x < base_merge && d.y < reach[b] && score < best) {
                 best = score;
                 nearest = int(b);
             }
@@ -275,6 +274,9 @@ void Bases() {
                     alive[b] = fresh[b] = true;
                     position[b] = p.xyz;
                     power[b] = vec3(0.0);
+                    const vec3 to = p.xyz - Camera();
+                    ray[b] = to * inversesqrt(max(dot(to, to), 1e-6));
+                    reach[b] = max(base_merge, 0.5 * length(to));
                 }
             }
             if (nearest < 0) {
@@ -285,7 +287,7 @@ void Bases() {
         // frame's jump barely moves the base; a base started at a wrong depth still finds the fire).
         sum_power[nearest] += q;
         weight[nearest] += w;
-        const float pw = fresh[nearest] || FromBase(position[nearest], p.xyz).y < base_merge ? w : 0.1 * w;
+        const float pw = fresh[nearest] || FromBase(position[nearest], ray[nearest], p.xyz).y < base_merge ? w : 0.1 * w;
         sum_position[nearest] += p.xyz * pw;
         place_weight[nearest] += pw;
     }
@@ -314,9 +316,9 @@ void Bases() {
         float best = 1e9;
         int anchor = -1;
         for (uint a = 0u; a < anchor_count; ++a) {
-            const vec2 d = FromBase(position[b], anchors[a].xyz);
+            const vec2 d = FromBase(position[b], ray[b], anchors[a].xyz);
             const float score = d.x + 0.25 * d.y;
-            if (d.x < base_merge && d.y < DepthReach(position[b]) && score < best) {
+            if (d.x < base_merge && d.y < reach[b] && score < best) {
                 best = score;
                 anchor = int(a);
             }
@@ -328,8 +330,8 @@ void Bases() {
     // Two bases that drifted onto one fire: the weaker joins the stronger.
     for (uint b = 0u; b < n; ++b) {
         for (uint c = b + 1u; c < n && alive[b]; ++c) {
-            const vec2 d = FromBase(position[b], position[c]);
-            if (alive[c] && d.x < 0.5 * base_merge && d.y < DepthReach(position[b])) {
+            const vec2 d = FromBase(position[b], ray[b], position[c]);
+            if (alive[c] && d.x < 0.5 * base_merge && d.y < reach[b]) {
                 const bool keep_b = Luma(power[b]) >= Luma(power[c]);
                 const uint keep = keep_b ? b : c, drop = keep_b ? c : b;
                 power[keep] = max(power[keep], power[drop]);
@@ -342,6 +344,25 @@ void Bases() {
         imageStore(lights_img, at, alive[b] ? vec4(position[b], 1.0) : vec4(0.0));
         imageStore(lights_img, at + ivec2(0, 1), alive[b] ? vec4(power[b], 0.0) : vec4(0.0));
     }
+    // The gather's list: the lit sparks and bases, their power scaled.
+    uint listed = 0u;
+    for (uint i = 0u; i < count && spark_strength > 0.0; ++i) {
+        const vec4 p = imageLoad(lights_img, ivec2(i, 0));
+        const vec3 q = imageLoad(lights_img, ivec2(i, 1)).rgb * spark_strength;
+        if (p.w == 1.0 && Luma(q) > 0.0) {
+            imageStore(lights_img, ivec2(listed, 3), vec4(p.xyz, 1.0));
+            imageStore(lights_img, ivec2(listed, 4), vec4(q, 0.0));
+            ++listed;
+        }
+    }
+    for (uint b = 0u; b < n && base_strength > 0.0; ++b) {
+        if (alive[b] && Luma(power[b]) > 0.0) {
+            imageStore(lights_img, ivec2(listed, 3), vec4(position[b], 2.0));
+            imageStore(lights_img, ivec2(listed, 4), vec4(power[b] * base_strength, 0.0));
+            ++listed;
+        }
+    }
+    imageStore(lights_img, ivec2(0, 5), vec4(float(listed), 0.0, 0.0, 0.0));
 }
 
 void main() {
@@ -388,9 +409,9 @@ void main() {
         }
         barrier();
     }
-    // The depth: the nearest surface under the bright part of the flame anywhere in the tile (the
-    // peak alone may fall into a gap between flame tongues, and a tile with only the tip of a
-    // flame would put the light on the tree or house far behind it: its power grows with its
+    // The fallback depth: the nearest surface under the bright part of the flame anywhere in the
+    // tile (the peak alone may fall into a gap between flame tongues, and a tile with only the tip
+    // of a flame would put the light on the tree or house far behind it: its power grows with its
     // distance). Only flames over the sky: no light.
     const float bright = 0.25 * s_peak[0];
     float near_depth = 1.0;
@@ -435,10 +456,10 @@ void main() {
         }
     }
     if (s_peak[0] >= 0.5 * min_peak) {
-        // At the peak on screen, at the nearest depth under the flame.
+        // At the peak on screen.
         const ivec2 fp = FullPixel(q);
-        float depth = s_near[0];
-        if (depth_mode == 1u) {
+        float depth = s_near[0]; // no well-supported depth around the peak: the tile's nearest
+        {
             // The bright texels' depths around the peak, insertion-sorted (nearest first).
             const float bright = 0.25 * s_peak[0];
             float d[25];

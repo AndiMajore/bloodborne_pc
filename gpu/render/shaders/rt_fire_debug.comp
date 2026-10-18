@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// bbport: the fire lights' cylinders drawn into the scene (fire_debug=1 in rtao.txt,
-// vk_rtao_emission.cpp). Per pixel the view ray against every light's upright cylinder (fire_size
-// wide, fire_height tall, a quarter of it below the light's point, as ssgi_gather_rt.comp samples
-// it): orange, brightest at its silhouette; faint where the scene is in front of it (a flame's
-// cylinder is mostly inside its stake). The light's point: a yellow dot. Two-part fires (67,
-// fire_base): the lights as spheres (spark_radius), the steady bases as cyan cylinders.
+// bbport: the fire lights drawn into the scene (fire_debug=1 in rtlighting.txt, vk_rt_emission.cpp):
+// per pixel the view ray against every spark's sphere (orange) and every fire's steady base, an
+// upright cylinder 40 % below its place (cyan), as ssgi_gather_rt.comp samples them; brightest at
+// the silhouette, faint where the scene is in front. A light's point: a yellow dot.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0) uniform texture2D depth_tex;  // full res, D32 0..1
-layout(binding = 1) uniform texture2D lights_tex; // count x 2: world position (w 1: a light), power
+layout(binding = 1) uniform texture2D lights_tex; // (count + bases) x 2: world position (w 1: a light), power
 layout(binding = 2, rgba16f) uniform image2D color_img; // the lit opaque scene
 
 layout(push_constant) uniform Constants {
@@ -19,14 +17,11 @@ layout(push_constant) uniform Constants {
     vec4 proj;
     vec2 full_size;
     vec2 jitter;
-    vec4 up_radius; // xyz the world's up in view space, w the radius
-    float height;
-    uint count;
-    uint base_count;   // bases after the lights
-    float spark_radius; // 0: the lights are cylinders
+    vec4 up_spark;  // xyz the world's up in view space, w a spark's radius
+    uint count;     // sparks
+    uint base_count; // base slots after the sparks
     float base_radius;
     float base_height;
-    vec2 pad;
 };
 
 // The ray's entry into a sphere (centre c, radius r): (distance, 1 at the centre .. 0 at the rim).
@@ -91,7 +86,7 @@ void main() {
     const float depth = texelFetch(depth_tex, p, 0).r;
     const vec3 D = normalize(ViewPos(vec2(p) + 0.5, 0.5));
     const float scene_t = depth >= 1.0 ? 1.0e9 : length(ViewPos(vec2(p) + 0.5, depth));
-    const vec3 axis = normalize(up_radius.xyz);
+    const vec3 axis = normalize(up_spark.xyz);
     vec4 color = imageLoad(color_img, p);
     vec3 tint = vec3(0.0);
     float alpha = 0.0;
@@ -104,8 +99,7 @@ void main() {
         const vec3 L = vec3(dot(view[0], h), dot(view[1], h), dot(view[2], h));
         const bool base = i >= count;
         const vec2 hit = base ? Cylinder(D, L - axis * (0.4 * base_height), axis, base_height, base_radius)
-                         : spark_radius > 0.0 ? Sphere(D, L, spark_radius)
-                                              : Cylinder(D, L - axis * (0.25 * height), axis, height, up_radius.w);
+                              : Sphere(D, L, up_spark.w);
         if (hit.x > 0.0) {
             const float rim = 1.0 - hit.y; // bright at the silhouette
             const float a_here = (hit.x < scene_t ? 0.25 : 0.08) + (hit.x < scene_t ? 0.6 : 0.2) * rim * rim;

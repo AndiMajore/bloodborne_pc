@@ -135,7 +135,7 @@ static void EmissionEnd() {
     // Another target ends them as well; a draw without a target does not.
     t.Begin(1);
     assert(!t.OnDraw(0, false) && t.OnDraw(5, true));
-    // Taken another way (emission_at=0): nothing more waits.
+    // Given up (a frame whose transparents never ended): nothing more waits.
     t.Begin(1);
     t.Taken();
     assert(!t.OnDraw(2, false));
@@ -151,17 +151,17 @@ static void LightingSettings() {
     assert(Near(s.fire_light, 0.35f) && s.spot_shadow && !s.sun_shadow && s.EmissionWanted());
     assert(Near(s.fire_smooth, 0.98f)); // clamped
     assert(ApplyText(s, "# spot_res=4096\nspot_res=100 spot_blur=x") == 1 && s.spot_res == 256);
-    // Sticky lights: off by default.
-    assert(defaults.fire_switch == 0.0f && defaults.fire_hold == 0);
-    assert(ApplyText(s, "fire_switch=0.5 fire_hold=12") == 2 && Near(s.fire_switch, 0.5f) && s.fire_hold == 12);
-    // Merged lights and the median depth: off by default.
-    assert(defaults.fire_merge == 0.0f && defaults.fire_depth == 0);
-    assert(ApplyText(s, "fire_merge=1.5 fire_depth=1") == 2 && Near(s.fire_merge, 1.5f) && s.fire_depth == 1);
-    // Two-part fires (67): off by default, clamped.
-    assert(defaults.fire_base == 0.0f && defaults.fire_base_anchor);
-    assert(ApplyText(s, "fire_base_anchor=0") == 1 && !s.fire_base_anchor);
-    assert(ApplyText(s, "fire_base=0.7 fire_base_smooth=1 fire_spark=0.4") == 3);
-    assert(Near(s.fire_base, 0.7f) && Near(s.fire_base_smooth, 0.995f) && Near(s.fire_spark, 0.4f));
+    // The fire model's defaults are the ones chosen at the stakes (2026-10-18); fire_light switches it on.
+    assert(Near(defaults.fire_switch, 0.5f) && defaults.fire_hold == 15 && Near(defaults.fire_merge, 1.0f));
+    assert(Near(defaults.fire_base, 0.7f) && Near(defaults.fire_spark, 0.5f) && Near(defaults.fire_base_size, 0.5f));
+    assert(defaults.fire_rays == 1 && ApplyText(s, "fire_rays=20") == 1 && s.fire_rays == 8);
+    assert(ApplyText(s, "fire_switch=0.5 fire_hold=12 fire_merge=0") == 3 && Near(s.fire_switch, 0.5f) &&
+           s.fire_hold == 12 && s.fire_merge == 0.0f);
+    assert(ApplyText(s, "fire_base=0.6 fire_base_smooth=1 fire_spark=0.4") == 3);
+    assert(Near(s.fire_base, 0.6f) && Near(s.fire_base_smooth, 0.995f) && Near(s.fire_spark, 0.4f));
+    // Options removed in the cleanup (2026-10-18) are unknown keys now.
+    assert(ApplyText(s, "fire_shadow=1 fire_size=1 fire_height=1 fire_depth=1 fire_base_anchor=0 emission_at=0 "
+                        "emission_trace=1") == 0);
     // The RTAO's own keys are not the experiments': rtlighting.txt ignores them.
     assert(ApplyText(s, "rays=4 strength=0.5") == 0);
 }

@@ -10,15 +10,11 @@ bool Apply(Settings& s, std::string_view key, float value) {
     const auto flag = [&](bool& target) { target = value != 0.0f; };
     const auto count = [&](uint32_t lo, uint32_t hi) { return std::clamp(uint32_t(std::max(value, 0.0f)), lo, hi); };
     if (key == "emission") s.emission = std::clamp(value, 0.0f, 16.0f);
-    else if (key == "emission_at") s.emission_at = count(0u, 1u);
-    else if (key == "emission_trace") s.emission_trace = value;
     else if (key == "emission_sat") s.emission_sat = std::clamp(value, 0.0f, 1.0f);
     else if (key == "emission_blur") s.emission_blur = count(0u, 32u);
     else if (key == "fire_light") s.fire_light = std::clamp(value, 0.0f, 64.0f);
-    else if (key == "fire_shadow") s.fire_shadow = std::clamp(value, 0.0f, 1.0f);
     else if (key == "fire_range") s.fire_range = std::clamp(value, 0.5f, 100.0f);
-    else if (key == "fire_size") s.fire_size = std::clamp(value, 0.0f, 5.0f);
-    else if (key == "fire_height") s.fire_height = std::clamp(value, 0.0f, 10.0f);
+    else if (key == "fire_rays") s.fire_rays = count(1u, 8u);
     else if (key == "fire_wrap") s.fire_wrap = std::clamp(value, 0.0f, 1.0f);
     else if (key == "fire_smooth") s.fire_smooth = std::clamp(value, 0.0f, 0.98f);
     else if (key == "fire_smooth_pos") s.fire_smooth_pos = std::clamp(value, 0.0f, 0.98f);
@@ -27,10 +23,8 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "fire_debug") flag(s.fire_debug);
     else if (key == "fire_switch") s.fire_switch = std::clamp(value, 0.0f, 10.0f);
     else if (key == "fire_merge") s.fire_merge = std::clamp(value, 0.0f, 10.0f);
-    else if (key == "fire_depth") s.fire_depth = value >= 0.5f ? 1u : 0u;
     else if (key == "fire_hold") s.fire_hold = uint32_t(std::clamp(value, 0.0f, 600.0f));
     else if (key == "fire_base") s.fire_base = std::clamp(value, 0.0f, 4.0f);
-    else if (key == "fire_base_anchor") flag(s.fire_base_anchor);
     else if (key == "fire_spark") s.fire_spark = std::clamp(value, 0.0f, 4.0f);
     else if (key == "fire_base_size") s.fire_base_size = std::clamp(value, 0.0f, 5.0f);
     else if (key == "fire_base_height") s.fire_base_height = std::clamp(value, 0.0f, 10.0f);

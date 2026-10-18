@@ -32,7 +32,7 @@ public:
         }
         return false;
     }
-    /// Taken by another way (emission_at=0: the first full-screen pass): no more draws wait.
+    /// Given up (a frame whose transparents never ended): no more draws wait.
     void Taken() {
         pending = false;
     }

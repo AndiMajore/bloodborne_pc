@@ -14,6 +14,7 @@
 #include "bbgpu/shaders/ssgi_denoise_temporal_comp.h"
 #include "bbgpu/shaders/ssgi_gather_comp.h"
 #include "bbgpu/shaders/ssgi_gather_rt_comp.h"
+#include "render/vk_gpu_profiler.h"
 #include "render/vk_rtao.h"
 #include "upscale/vk_camera_motion.h"
 #include "vulkan/instance.h"
@@ -53,23 +54,19 @@ struct GatherRtConstants {
     float clip;
     float max_radiance;
     float emission;
-    float fire_light; // the fires as point lights (the RTAO's fire_light); 0: none
+    float fire_light; // the fires as lights (rtlighting.txt fire_light); 0: none
     u64 surface_cache;
     u64 surface_parts;
-    float fire_shadow;
     float fire_range;
-    u32 fire_count;
-    float fire_size;
-    float fire_height;
+    u32 fire_count; // 0: no fire lights bound
     float fire_wrap;
-    u32 base_count;
-    float base_strength;
-    float spark_strength;
     float base_size;
     float base_height;
     float spark_size;
+    u32 fire_rays;
+    u32 pad;
 };
-static_assert(sizeof(GatherRtConstants) == 192);
+static_assert(sizeof(GatherRtConstants) == 176);
 struct ApplyConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
@@ -626,22 +623,20 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         .fire_light = emission.light_strength,
         .surface_cache = surface.cache,
         .surface_parts = surface.parts,
-        .fire_shadow = emission.light_shadow,
         .fire_range = emission.light_range,
-        .fire_count = emission.lights ? emission.light_count : 0u,
-        .fire_size = emission.light_size,
-        .fire_height = emission.light_height,
+        .fire_count = emission.lights ? 1u : 0u,
         .fire_wrap = emission.light_wrap,
-        .base_count = emission.lights ? emission.base_count : 0u,
-        .base_strength = emission.base_strength,
-        .spark_strength = emission.spark_strength,
         .base_size = emission.base_size,
         .base_height = emission.base_height,
         .spark_size = emission.spark_size,
+        .fire_rays = emission.light_rays,
     };
 
     const vk::ImageView gi_read = *gi_views[read], gi_write = *gi_views[write];
     const vk::ImageView motion = *motion_view;
+    if (auto* profiler = GpuProfiler::Get()) {
+        profiler->Mark(0x55601ull, [] { return std::string{"ssgi"}; });
+    }
     scheduler.RecordCrumb(
         {.name = "ssgi"},
         [gather, gather_rt, tlas, apply, denoise, depth_view, normal_view, color_view, albedo_view, motion, emission_view,

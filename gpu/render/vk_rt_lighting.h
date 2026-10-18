@@ -65,17 +65,11 @@ public:
     [[nodiscard]] bool WantsDraws() const noexcept {
         return wants_draws || emission->DrawsWanted();
     }
-    void OnDraw(VideoCore::ImageId color, u64 ps_hash, bool scene_depth, bool blended, bool depth_write, u32 indices,
-                u32 instances);
-    /// The emission's two scene points (the first transparent draw; the first full-screen pass).
+    void OnDraw(VideoCore::ImageId color, u64 ps_hash, bool scene_depth);
+    /// The emission's start: the first transparent draw.
     void OnOpaqueSceneLit(VideoCore::ImageId color) {
         if (wants_emission) {
             emission->OnOpaqueSceneLit(color);
-        }
-    }
-    void OnSceneComposite(VideoCore::ImageId color) {
-        if (wants_emission) {
-            emission->OnSceneComposite(color);
         }
     }
     /// The emission image and the fire lights of the frame before (SSGI, the probes, the reflections).

@@ -239,20 +239,16 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 // (Not an SSGI trigger: the lighting composites into intermediate RGBA16F
                 // targets come first and would be hit before they draw.)
                 upscaler->OnSceneComposite();
-                rt_lighting->OnSceneComposite(cb_descs[0].first); // the transparents' light (emission_at=0)
             }
         }
     }
     // bbport (RT lighting, only when an effect wants draws): each draw before it is recorded (the
-    // shadows' mask and light draws; the emission's end of the transparents and its trace).
+    // shadows' mask and light draws; the emission's end of the transparents).
     if (rt_lighting->WantsDraws()) {
         const u64 ps_hash = pipeline && pipeline->HasStage(Shader::SwStage::Fragment)
                                 ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
                                 : 0;
-        rt_lighting->OnDraw(cb_descs[0].first, ps_hash, db_desc.first && db_desc.first == camera_motion->Depth(),
-                            regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass,
-                            regs.depth_control.depth_write_enable, regs.num_indices,
-                            regs.num_instances.NumInstances());
+        rt_lighting->OnDraw(cb_descs[0].first, ps_hash, db_desc.first && db_desc.first == camera_motion->Depth());
     }
 }
 

@@ -44,23 +44,17 @@ public:
     struct Frame {
         vk::ImageView view{}; // RGBA16F quarter size, eGeneral; empty: none (bind something else, strength 0)
         float strength = 0.0f;
-        // The fires as lights (RGBA32F, count x 2: world position, w 1: a light; power), eGeneral.
+        // The fires as lights (RGBA32F, eGeneral; rtao_fire_lights.comp): the gather's list in rows 3
+        // (world position, w 1 a spark, 2 a base) and 4 (power, scaled), its length in row 5. A base
+        // is an upright cylinder (base_size, base_height), a spark a sphere (spark_size).
         vk::ImageView lights{};
-        u32 light_count = 0;
         float light_strength = 0.0f;
-        float light_shadow = 0.0f;
         float light_range = 0.0f;
-        float light_size = 0.0f;
-        float light_height = 0.0f;
         float light_wrap = 0.0f;
-        // Two-part fires (67): the bases after the lights (columns light_count..+base_count), upright
-        // cylinders; the lights then spheres (spark_size) at spark_strength. base_count 0: off.
-        u32 base_count = 0;
-        float base_strength = 0.0f;
-        float spark_strength = 1.0f;
         float base_size = 0.0f;
         float base_height = 0.0f;
         float spark_size = 0.0f;
+        u32 light_rays = 1; // shadow rays per pixel
     };
     [[nodiscard]] Frame FrameEmission() const noexcept;
 
@@ -68,14 +62,11 @@ public:
     void OnGBufferPass(VideoCore::ImageId depth);
     /// The first transparent draw: the opaque scene (with the bounce of SSGI and the probes) is kept.
     void OnOpaqueSceneLit(VideoCore::ImageId color);
-    /// The first full-screen pass over the scene (emission_at=0, never hit in Bloodborne).
-    void OnSceneComposite(VideoCore::ImageId color);
-    /// Draws after the opaque scene wait for the end of the transparents (or are traced).
+    /// Draws after the opaque scene wait for the end of the transparents.
     [[nodiscard]] bool DrawsWanted() const noexcept {
-        return trigger.Pending() || trace_lines;
+        return trigger.Pending();
     }
-    void OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, bool blended, bool depth_write, u32 indices,
-                           u32 instances, u64 ps_hash);
+    void OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth);
 
 private:
     bool Ensure(u32 w, u32 h);
@@ -103,8 +94,6 @@ private:
     bool emit_written = false;
     VideoCore::ImageId scene{};       // the scene colour the opaque base was taken from
     EmissionRules::Trigger trigger;
-    u32 trace_lines = 0, trace_draws = 0;
-    float trace_seen = 0.0f;
     u32 taken = 0, missed = 0, report_frames = 0; // per 600 frames: emission made / not
     vk::UniqueDescriptorSetLayout emit_desc_layout;
     vk::UniquePipelineLayout emit_layout;
@@ -117,7 +106,6 @@ private:
     u32 lights_count = 0, tiles_x = 0, tiles_y = 0;
     u32 lights_frame = ~0u - 1;
     bool lights_written = false;
-    u32 bases_frame = ~0u - 1; // the frame the bases were last made in
     vk::UniqueDescriptorSetLayout lights_desc_layout;
     vk::UniquePipelineLayout lights_layout;
     vk::UniquePipeline lights_pipeline;

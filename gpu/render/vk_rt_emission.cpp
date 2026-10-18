@@ -10,6 +10,7 @@
 #include "render/runtime.h"
 #include "render/scheduler.h"
 #include "render/vk_rt_pipeline.h"
+#include "render/vk_gpu_profiler.h"
 #include "render/vk_rt_lights.h"
 #include "render/vk_rtao.h"
 #include "textures/texture_cache.h"
@@ -47,9 +48,10 @@ struct FireLightConstants {
     float switch_ratio;
     float hold;
     float merge;
-    u32 depth_mode;
-    u32 anchor_count; // the game's fire lights below (bases snap to them)
-    std::array<u32, 2> pad;
+    float base_strength;  // the gather's list: x a base's power
+    u32 anchor_count;     // the game's fire lights below (bases snap to them)
+    float spark_strength; // the gather's list: x a spark's power
+    u32 pad;
     std::array<std::array<float, 4>, 6> anchors; // world position, w its radius
 };
 static_assert(sizeof(FireLightConstants) == 256);
@@ -59,16 +61,13 @@ struct FireDebugConstants {
     std::array<float, 4> proj;
     std::array<float, 2> full_size;
     std::array<float, 2> jitter;
-    std::array<float, 4> up_radius;
-    float height;
+    std::array<float, 4> up_spark; // xyz the world's up in view space, w a spark's radius
     u32 count;
     u32 base_count;
-    float spark_radius; // 0: the lights drawn as cylinders
     float base_radius;
     float base_height;
-    std::array<float, 2> pad;
 };
-static_assert(sizeof(FireDebugConstants) == 128);
+static_assert(sizeof(FireDebugConstants) == 112);
 constexpr u32 FireLightTile = 64; // quarter-size texels per light (rtao_fire_lights.comp)
 constexpr u32 FireBases = 32;      // base slots after the lights (rtao_fire_lights.comp MaxBases)
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
@@ -111,17 +110,16 @@ RtEmission::Frame RtEmission::FrameEmission() const noexcept {
     if (settings.fire_light <= 0.0f || !lights_views[lights_out] || lights_frame + 1 != frame) {
         return {*emit_view, settings.emission};
     }
-    Frame out{*emit_view, settings.emission, *lights_views[lights_out], lights_count, settings.fire_light,
-              settings.fire_shadow, settings.fire_range, settings.fire_size, settings.fire_height, settings.fire_wrap};
-    if (settings.fire_base > 0.0f && bases_frame == lights_frame) {
-        out.base_count = FireBases;
-        out.base_strength = settings.fire_base;
-        out.spark_strength = settings.fire_spark;
-        out.base_size = settings.fire_base_size;
-        out.base_height = settings.fire_base_height;
-        out.spark_size = settings.fire_spark_size;
-    }
-    return out;
+    return {*emit_view,
+            settings.emission,
+            *lights_views[lights_out],
+            settings.fire_light,
+            settings.fire_range,
+            settings.fire_wrap,
+            settings.fire_base_size,
+            settings.fire_base_height,
+            settings.fire_spark_size,
+            settings.fire_rays};
 }
 
 void RtEmission::OnFrameStart(u32 next_frame) {
@@ -186,14 +184,13 @@ bool RtEmission::Ensure(u32 w, u32 h) {
     tiles_x = (w + FireLightTile - 1) / FireLightTile;
     tiles_y = (h + FireLightTile - 1) / FireLightTile;
     lights_count = tiles_x * tiles_y;
-    make(lights_image, lights_views.data(), lights_count + FireBases, 3, vk::Format::eR32G32B32A32Sfloat, 3);
+    make(lights_image, lights_views.data(), lights_count + FireBases, 6, vk::Format::eR32G32B32A32Sfloat, 3);
     emit_w = w;
     emit_h = h;
     emit_written = false;
     emit_frame = ~0u - 1;
     lights_written = false;
     lights_frame = ~0u - 1;
-    bases_frame = ~0u - 1;
     std::printf("RT emission: capture %ux%u (the transparents' light for the RT lighting)\n", w, h);
     return true;
 }
@@ -226,6 +223,10 @@ void RtEmission::Record(VideoCore::ImageId color_id, u32 mode) {
                                       .radius = s32(settings.emission_blur)};
     // mode 1 then the blur's two halves (2: emit -> opaque, 3: opaque -> emit) when it has a radius.
     const u32 last_mode = mode == 1 && settings.emission_blur > 0 ? 3 : mode;
+    if (auto* profiler = GpuProfiler::Get()) {
+        profiler->Mark(mode == 0 ? 0x55603ull : 0x55604ull,
+                       [mode] { return std::string{mode == 0 ? "rt emission opaque" : "rt emission"}; });
+    }
     scheduler.RecordCrumb({.name = mode == 0 ? "rt emission opaque" : "rt emission"},
                           [constants, last_mode, color_view, opaque = *opaque_view, emit = *emit_view, qw, qh,
                            pipeline = *emit_pipeline, layout = *emit_layout](vk::CommandBuffer cmdbuf) {
@@ -307,16 +308,17 @@ void RtEmission::RecordFireLights() {
         .smoothing = continued ? settings.fire_smooth : 0.0f,
         .pos_smoothing = continued ? settings.fire_smooth_pos : 0.0f,
         .count = lights_count,
-        .bases = settings.fire_base > 0.0f ? FireBases : 0u,
+        .bases = FireBases,
         .base_smooth = settings.fire_base_smooth,
         .base_fade = settings.fire_base_fade,
         .base_merge = settings.fire_base_merge,
         .switch_ratio = settings.fire_switch,
         .hold = float(settings.fire_hold),
         .merge = settings.fire_merge,
-        .depth_mode = settings.fire_depth,
+        .base_strength = settings.fire_base,
+        .spark_strength = settings.fire_spark,
     };
-    if (constants.bases && settings.fire_base_anchor) {
+    {
         // The game's warm point lights nearest the camera (its own fire lights: orange, not the
         // grey fill lights), last frame's list.
         const auto inv_view = camera_motion.InvView();
@@ -341,10 +343,9 @@ void RtEmission::RecordFireLights() {
         }
         constants.anchor_count = std::min(n, MaxAnchors);
     }
-    // The bases carry on from last frame's when there were any and no cut came between.
-    const bool bases_continued = continued && bases_frame + 1 == frame;
-    if (constants.bases) {
-        bases_frame = frame;
+    const bool bases_continued = continued;
+    if (auto* profiler = GpuProfiler::Get()) {
+        profiler->Mark(0x55602ull, [] { return std::string{"rt fire lights"}; });
     }
     scheduler.RecordCrumb({.name = "rt fire lights"},
                           [constants, depth_view, emit = *emit_view, raw = *lights_views[0],
@@ -387,7 +388,7 @@ void RtEmission::RecordFireLights() {
                               pc.mode = 1;
                               cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
                               cmdbuf.dispatch((pc.count + 255) / 256, 1, 1);
-                              if (pc.bases) { // mode 2: the bases from this frame's lights
+                              { // mode 2: the bases from this frame's lights, then the gather's list
                                   const vk::MemoryBarrier2 rw{
                                       .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
                                       .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
@@ -438,11 +439,9 @@ void RtEmission::RecordFireDebug(VideoCore::ImageId color_id) {
         .proj = camera_motion.Projection(),
         .full_size = {float(w), float(h)},
         .jitter = camera_motion.Jitter(),
-        .up_radius = {view[1], view[5], view[9], settings.fire_size},
-        .height = settings.fire_height,
+        .up_spark = {view[1], view[5], view[9], settings.fire_spark_size},
         .count = lights_count,
-        .base_count = settings.fire_base > 0.0f && bases_frame == lights_frame ? FireBases : 0u,
-        .spark_radius = settings.fire_base > 0.0f ? settings.fire_spark_size : 0.0f,
+        .base_count = FireBases,
         .base_radius = settings.fire_base_size,
         .base_height = settings.fire_base_height,
     };
@@ -472,20 +471,9 @@ void RtEmission::RecordFireDebug(VideoCore::ImageId color_id) {
                           });
 }
 
-void RtEmission::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth, bool blended, bool depth_write,
-                                   u32 indices, u32 instances, u64 ps_hash) {
-    ++trace_draws;
-    if (trace_lines && trace_lines < 400) {
-        ++trace_lines;
-        std::printf("  draw %u: target %s, scene depth %d, blended %d, depth write %d, %u indices x %u, ps %016llx\n",
-                    trace_draws, !color ? "none" : color == scene ? "scene" : "other", scene_depth ? 1 : 0,
-                    blended ? 1 : 0, depth_write ? 1 : 0, indices, instances, (unsigned long long)ps_hash);
-    }
-    if (settings.emission_at == 1 && trigger.OnDraw(Key(color), scene_depth)) {
+void RtEmission::OnDrawAfterOpaque(VideoCore::ImageId color, bool scene_depth) {
+    if (trigger.OnDraw(Key(color), scene_depth)) {
         Record(scene, 1);
-        if (trace_lines) {
-            std::printf("  -> emission taken before draw %u\n", trace_draws);
-        }
     }
 }
 
@@ -499,42 +487,19 @@ void RtEmission::OnOpaqueSceneLit(VideoCore::ImageId color_id) {
     }
     // The last frame's outcome (per 600 frames in the log).
     if (++report_frames == 600) {
-        std::printf("RT emission: made in %u of 600 frames (%u without; at %s)\n", taken, missed,
-                    settings.emission_at == 1 ? "the end of the transparents" : "the first full-screen pass");
+        std::printf("RT emission: made in %u of 600 frames (%u without)\n", taken, missed);
         report_frames = taken = missed = 0;
     }
     if (snapshot_frame + 1 == frame) {
         ++(emit_frame + 1 == frame ? taken : missed);
     }
-    if (trace_lines) {
-        std::printf("  (end of the traced frame: %u draws)\n", trace_draws);
-        trace_lines = 0;
-    }
-    if (settings.emission_trace != trace_seen) { // a new value: trace this frame's draws
-        trace_seen = settings.emission_trace;
-        trace_lines = 1;
-        std::printf("RT emission: trace, frame %u (draws after the opaque scene; at %u):\n", frame, settings.emission_at);
-    }
     snapshot_frame = frame;
     scene = color_id;
-    trace_draws = 0;
     trigger.Begin(Key(color_id));
     if (settings.fire_debug) {
         RecordFireDebug(color_id); // before the opaque base is kept: not counted as light
     }
     Record(color_id, 0);
-}
-
-void RtEmission::OnSceneComposite(VideoCore::ImageId color_id) {
-    if (settings.emission_at != 0 || !color_id || snapshot_frame != frame || emit_frame == frame || !emit_image) {
-        return;
-    }
-    auto& color = texture_cache.GetImage(color_id);
-    if (color.info.pixel_format != vk::Format::eR16G16B16A16Sfloat) {
-        return;
-    }
-    trigger.Taken();
-    Record(color_id, 1);
 }
 
 } // namespace Vulkan

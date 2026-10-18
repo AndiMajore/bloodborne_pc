@@ -46,19 +46,22 @@ void RtLighting::PollSettings() {
     std::ifstream file(settings_path);
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     RtLightingSettings::ApplyText(settings, text);
-    std::printf("RT lighting: settings from %s: emission %.2f, fire light %.2f (size %.2f m, height %.2f m, wrap %.2f, "
-                "smooth %.2f, switch %.2f, hold %u, merge %.2f m, depth %u, base %.2f, spark %.2f), sun shadow %d, spot shadow %d (%u, blur %u, soft %.2f m)\n",
-                settings_path.c_str(), settings.emission, settings.fire_light, settings.fire_size,
-                settings.fire_height, settings.fire_wrap, settings.fire_smooth, settings.fire_switch, settings.fire_hold, settings.fire_merge, settings.fire_depth, settings.fire_base, settings.fire_spark, settings.sun_shadow ? 1 : 0,
+    std::printf("RT lighting: settings from %s: emission %.2f, fire light %.2f (base %.2f: %.2f x %.2f m, spark %.2f: "
+                "%.2f m, wrap %.2f, smooth %.2f, switch %.2f, hold %u, merge %.2f m), sun shadow %d, spot shadow %d "
+                "(%u, blur %u, soft %.2f m)\n",
+                settings_path.c_str(), settings.emission, settings.fire_light, settings.fire_base,
+                settings.fire_base_size, settings.fire_base_height, settings.fire_spark, settings.fire_spark_size,
+                settings.fire_wrap, settings.fire_smooth, settings.fire_switch, settings.fire_hold, settings.fire_merge,
+                settings.sun_shadow ? 1 : 0,
                 settings.spot_shadow ? 1 : 0, settings.spot_res, settings.spot_blur, settings.spot_soft);
 }
 
 void RtLighting::UpdateWants() {
     const bool on = rtao.Enabled();
     wants_constants = on && shadows->WantsConstants();
-    // The light list: for the spot's shadow, a dump, or the fires' bases' anchors.
+    // The light list: for the spot's shadow, a dump, or the fires' bases (anchored to its fire lights).
     wants_lights = on && (settings.spot_shadow || settings.lights_dump != dump_done ||
-                          (settings.fire_base > 0.0f && settings.fire_base_anchor));
+                          settings.fire_light > 0.0f);
     wants_draws = on && shadows->WantsDraws();
     wants_emission = on && settings.EmissionWanted();
 }
@@ -85,13 +88,12 @@ void RtLighting::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId norm
     emission->OnGBufferPass(depth);
 }
 
-void RtLighting::OnDraw(VideoCore::ImageId color, u64 ps_hash, bool scene_depth, bool blended, bool depth_write,
-                        u32 indices, u32 instances) {
+void RtLighting::OnDraw(VideoCore::ImageId color, u64 ps_hash, bool scene_depth) {
     if (wants_draws) {
         shadows->OnDraw(color, ps_hash);
     }
     if (emission->DrawsWanted()) {
-        emission->OnDrawAfterOpaque(color, scene_depth, blended, depth_write, indices, instances, ps_hash);
+        emission->OnDrawAfterOpaque(color, scene_depth);
     }
 }
 

@@ -107,7 +107,13 @@ void GpuProfiler::Print() {
     }
     std::printf("GPU profile: %.2f ms/frame over %llu frames, %zu labels\n", sum / frames,
                 static_cast<unsigned long long>(frames), sorted.size());
-    for (size_t i = 0; i < std::min<size_t>(sorted.size(), 30); ++i) {
+    // BB_GPU_PROFILE_TOP: how many labels are printed (30; the small passes of one effect are
+    // further down the list).
+    static const size_t top = [] {
+        const char* env = std::getenv("BB_GPU_PROFILE_TOP");
+        return env ? size_t(std::strtoul(env, nullptr, 10)) : size_t(30);
+    }();
+    for (size_t i = 0; i < std::min<size_t>(sorted.size(), top); ++i) {
         const auto& [key, total] = sorted[i];
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,
                     double(total.segments) / frames, described[key].c_str());
