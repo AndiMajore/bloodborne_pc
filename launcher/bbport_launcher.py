@@ -142,8 +142,9 @@ EFFECTS = [
     ("effect_game_aa", "Собственное сглаживание игры", True),
     ("effect_dynamic_shadows", "Тени от динамических источников", True),
     ("effect_ssr", "Отражения SSR (не было в игре)", False),
+    ("effect_bloom", "Свечение (Bloom)", True),
     ("skip_intro", "Пропуск заставок при запуске", False),
-    ("debug_camera", "Свободная камера (Cross + L3 / Space + Z)", False),
+    ("debug_camera", "Свободная камера (Cross + L3 / F + Ctrl)", False),
     ("debug_menu", "Debug menu (левый touchpad / Tab; нужны шрифты)", False),
 ]
 MODEL_LOD = [("Как в игре", "0"), ("Максимальная (-2)", "-2"), ("Ниже (1)", "1"),
@@ -156,8 +157,14 @@ PRESENT_MODES = [("Mailbox", "Mailbox"), ("FIFO (VSync)", "Fifo"),
 # choice labels stay short, so the selected one is shown in full.
 DRAW_PIPE = [("Авто", "", "Включён при 8 и более потоках процессора"), ("Включён", "1"),
              ("Выключен", "0", "Стабильнее, но медленнее")]
-LANGUAGES = [("Английский", "1"), ("Русский", "8"), ("Японский", "0"), ("Французский", "2"),
-             ("Испанский", "3"), ("Немецкий", "4"), ("Итальянский", "5")]
+# The game's text languages (dvdroot_ps4/msg) by the PS4 system language code (#249).
+LANGUAGES = [("Английский", "1"), ("Английский (Великобритания)", "18"), ("Русский", "8"),
+             ("Японский", "0"), ("Французский", "2"), ("Испанский", "3"),
+             ("Испанский (Латинская Америка)", "20"), ("Немецкий", "4"), ("Итальянский", "5"),
+             ("Нидерландский", "6"), ("Португальский", "7"), ("Португальский (Бразилия)", "17"),
+             ("Польский", "16"), ("Турецкий", "19"), ("Корейский", "9"),
+             ("Китайский (упрощённый)", "11"), ("Китайский (традиционный)", "10"),
+             ("Финский", "12"), ("Шведский", "13"), ("Датский", "14"), ("Норвежский", "15")]
 LIVE_RESOLUTION = [("Авто (по видеокарте)", "auto"), ("Выключена (быстрее)", "0"), ("Включена", "1")]
 READBACKS = [("Relaxed", "", "По умолчанию"), ("Выключены", "0"), ("Precise", "2")]
 # Background pre-upload of the game's GPU memory into VRAM (BB_PREUPLOAD): auto = on with a discrete GPU.
@@ -178,6 +185,8 @@ DEFAULTS = {
     "gamepad": "",
     "gamepad_name": "",
     "display": "",
+    # The GPU by its Vulkan name ("" = the port's choice: a discrete one first).
+    "gpu": "",
     "skip_network_choice": True,
     "fps_mode": "uncap",
     "fps_limit": 0,
@@ -205,6 +214,13 @@ DEFAULTS = {
     "online_npid": "",
     "online_password": "",
     "online_upnp": True,
+    # The pool: "seamless" (BBSC, the shadp2p module gpu/bbnet), "shadnet" (shadPS4 0.20's shadNet client,
+    # gpu/bbnet20) or "huntersdream" (The Hunter's Dream, bbhost's protocol, gpu/bbnet20; the account
+    # comes from the Discord sign-in).
+    "online_pool": "seamless",
+    "thd_server": "",
+    "thd_online_id": "",
+    "thd_token": "",
 }
 
 # bbport.ini keys the launcher edits; the rest of the file is kept.
@@ -337,9 +353,11 @@ def fsr411_build_command(upscaler, loader=None):
     return command + ([str(loader)] if loader else []), env
 
 
-def online_module():
-    """The online module beside the GPU library (gpu/bbnet; a build without its libraries has none)."""
-    return (PORT_DIR / ("bin" if PACKAGED else "out") / "gpu" / "libbbnet.so").is_file()
+def online_module(pool="seamless"):
+    """The online module beside the GPU library (gpu/bbnet, or gpu/bbnet20 for the shadNet and The
+    Hunter's Dream pools; a build without its libraries has none)."""
+    name = "libbbnet20.so"
+    return (PORT_DIR / ("bin" if PACKAGED else "out") / "gpu" / name).is_file()
 
 
 def game_environment(s):
@@ -386,6 +404,14 @@ def game_environment(s):
     model = s.get("memory_model", "auto")
     if model in ("new", "old"):
         env["BB_PC_MODEL"] = "1" if model == "new" else "0"
+    # The GPU chosen by name: its index in Vulkan's order now (BB_GPU_ID). One not found (taken
+    # out, renamed by a driver update) leaves the choice to the port. BB_GPU_ID from the shell
+    # wins.
+    if s.get("gpu") and "BB_GPU_ID" not in os.environ:
+        index = next((index for index, _vendor, _kind, name, _best in connected_gpus()
+                      if name == s["gpu"]), None)
+        if index is not None:
+            env["BB_GPU_ID"] = str(index)
     # Synchronisation and memory as released in 0.3 (run.sh: BB_AS_0_3), for comparisons.
     if s.get("as_0_3"):
         env["BB_AS_0_3"] = "1"
@@ -397,7 +423,8 @@ def game_environment(s):
         env["BB_GPU_PROFILE"] = "1"
     if s["vk_validation"]:
         env["BB_VK_VALIDATION"] = "1"
-    if s.get("online") and online_module():
+    pool = "huntersdream" if s.get("online_pool") == "huntersdream" else "seamless"
+    if s.get("online") and online_module(pool):
         server = s["online_server"].strip() or online.SHADNET_SERVER
         community = online.community_address(s["online_community"])
         env["BB_ONLINE"] = "1"
@@ -407,13 +434,35 @@ def game_environment(s):
         env["BB_SHADNET_PASSWORD"] = s["online_password"]
         env["BB_UPNP"] = "1" if s["online_upnp"] else "0"
         env["BB_COMMUNITY_SERVER"] = community
-        if s.get("online_bbsc"):
+        env["BB_NET_GEN"] = "20"
+        if pool == "seamless" and s.get("online_bbsc"):
             env["BB_BBSC"] = "1"
+        if pool == "huntersdream":
+            # run.sh turns these into the backend's addresses and the host overrides.
+            env["BB_NET_BACKEND"] = "thd"
+            env["BB_COMMUNITY_SERVER"] = online.thd_base(s.get("thd_server", ""))
+            env["BB_THD_ONLINE_ID"] = s.get("thd_online_id", "")
+            env["BB_THD_TOKEN"] = s.get("thd_token", "")
     for item in s["extra_env"].split():
         if "=" in item:
             key, value = item.split("=", 1)
             env[key] = value
     return env
+
+
+def open_url(url):
+    """Opens url in the user's browser: GIO, then Python's webbrowser (xdg-open and the like);
+    True when one of them took it."""
+    try:
+        if Gio.AppInfo.launch_default_for_uri(url, None):
+            return True
+    except GLib.Error:
+        pass
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
 
 
 def flat_button(icon, tooltip, handler):
@@ -459,7 +508,9 @@ def combo_value(row):
 # wheel are keys ("Mouse Left", "Wheel Down"); they act while the game holds the mouse.
 CONTROLS = [
     ("cross", "Крест (взаимодействие)", "F, Return", "a"),
-    ("circle", "Круг (уклонение, бег)", "Space", "b"),
+    ("circle", "Круг (уклонение, бег; на клавиатуре — Space и Shift ниже)", "", "b"),
+    ("dodge", "Кувырок (короткое нажатие Круга; Shift+Space — прыжок)", "Space", None),
+    ("sprint", "Бег (удержание Круга)", "Left Shift", None),
     ("square", "Квадрат (быстрый предмет)", "Tab, R", "x"),
     ("triangle", "Треугольник (флакон крови)", "Q", "y"),
     ("l1", "L1 (трансформация оружия)", "E, Mouse X2", "leftshoulder"),
@@ -468,7 +519,7 @@ CONTROLS = [
     ("r2", "R2 (сильная атака)", "Left Shift+Mouse Left, Mouse X1", "righttrigger"),
     ("l3", "L3", "Left Ctrl", "leftstick"),
     ("r3", "R3 (захват цели)", "C, Mouse Middle", "rightstick"),
-    ("options", "Options (меню)", "Escape", "start"),
+    ("options", "Options (меню; в меню игры Escape — «назад», Круг)", "Escape", "start"),
     ("touchpad", "Тачпад, левая половина (жесты)", "G", "back, touchpad"),
     ("touchpad_right", "Тачпад, правая половина (личные вещи)", "Backspace", ""),
     ("up", "Крестовина вверх", "3, Up, Wheel Up", "dpup"),
@@ -511,6 +562,22 @@ def connected_displays():
              f"{number}: {name} ({size})" + (tr(", основной") if primary == "1" else ""),
              parse_size(size, None), primary == "1")
             for number, (name, size, primary) in enumerate(rows, 1)]
+
+
+
+def connected_gpus():
+    """(index, vendor ID, type, name, the port's own choice) of the GPUs in Vulkan's order
+    (bb-gpu-capabilities --gpus; BB_GPU_ID is the index), [] if unknown."""
+    tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+    env = {key: value for key, value in os.environ.items() if key != "BB_GPU_ID"}
+    try:
+        run = subprocess.run([str(tool), "--gpus"], capture_output=True, text=True, timeout=10,
+                             env=env)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = [line.split("\t") for line in run.stdout.splitlines() if line.count("\t") == 4]
+    return [(int(index), vendor, kind, name, best == "1")
+            for index, vendor, kind, name, best in rows if index.isdigit()]
 
 
 class FolderList:
@@ -628,6 +695,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.memory_model_row = combo_row(tr("Модель памяти и трансляции"), tr(PC_MODEL_SUBTITLE),
                                           MEMORY_MODELS, self.settings.get("memory_model", "auto"))
         mode.add(self.memory_model_row)
+        # The GPU the game runs on, as in shadPS4 (laptops with two GPUs).
+        self.gpu_row = Adw.ComboRow(title=tr("Видеокарта"))
+        self.gpu_row.add_suffix(flat_button("view-refresh-symbolic", tr("Обновить список"),
+                                            lambda _button: self.fill_gpus()))
+        self.fill_gpus()
+        mode.add(self.gpu_row)
         page.add(mode)
 
         self.mods_group = Adw.PreferencesGroup(
@@ -1107,6 +1180,24 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.display_row.values = [value for _, value in choices]
         self.display_row.set_selected(self.display_row.values.index(current) if current in self.display_row.values else 0)
 
+    def fill_gpus(self):
+        """The GPU choices: the port's own (named), the GPUs found, and the saved one while it is
+        not found."""
+        current = self.settings.get("gpu", "")
+        gpus = connected_gpus()
+        best = [name for _index, _vendor, _kind, name, is_best in gpus if is_best]
+        auto = tr("Авто") + (f" ({best[0]})" if best else "")
+        choices = [(auto, "")]
+        for _index, _vendor, kind, name, _best in gpus:
+            note = {"integrated": tr("встроенная"), "cpu": tr("программная, очень медленно")}.get(kind)
+            choices.append((f"{name} ({note})" if note else name, name))
+        if current and current not in [value for _, value in choices]:
+            choices.append((tr("{} (не найдена)").format(current), current))
+        self.gpu_row.set_model(Gtk.StringList.new([label for label, _ in choices]))
+        self.gpu_row.values = [value for _, value in choices]
+        self.gpu_row.set_selected(self.gpu_row.values.index(current) if current in self.gpu_row.values else 0)
+        self.gpu_row.set_subtitle(tr("На ноутбуке с двумя видеокартами — дискретная; применяется при запуске игры"))
+
     def show_gamepad(self):
         names = getattr(self.gamepad_row, "names", None)
         selected = names[self.gamepad_row.get_selected()] if names else ""
@@ -1118,6 +1209,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["gamepad"] = combo_value(self.gamepad_row)
         s["gamepad_name"] = self.gamepad_row.names[self.gamepad_row.get_selected()]
         s["display"] = combo_value(self.display_row)
+        s["gpu"] = combo_value(self.gpu_row)
         s["skip_network_choice"] = self.skip_network_row.get_active()
         s["language"] = combo_value(self.language_row)
         s["fullscreen"] = self.fullscreen_row.get_active()
@@ -1146,6 +1238,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["online_npid"] = self.npid_row.get_text().strip()
         s["online_password"] = self.password_row.get_text()
         s["online_upnp"] = self.upnp_row.get_active()
+        s["online_pool"] = self.online_pool()
+        s["thd_server"] = self.thd_server_row.get_text().strip()
+        s["thd_online_id"], s["thd_token"] = self.thd_id, self.thd_token
         self.save_mod_profile()
         self.save_patch_profile()
         save_settings(s)
@@ -1298,13 +1393,22 @@ class LauncherWindow(Adw.ApplicationWindow):
         if not online_module():
             self.online_row.set_sensitive(False)
             self.online_row.set_subtitle(tr("Эта сборка без модуля онлайна (libbbnet.so): игра только офлайн"))
+        self.pool_row = combo_row(tr("Пул"), tr("С кем играть: у всех в сессии должен быть один пул"), [
+            ("Seamless Hunt (seamlesshunt.com)", "seamless",
+             "Сервер BBSC: бесшовный кооператив, колокола и призывы; аккаунт создаётся на сайте"),
+            ("The Hunter's Dream (thehuntersdream.com)", "huntersdream",
+             "Кооператив с игроками bbhost через The Hunter's Dream; вход через Discord"),
+        ], "huntersdream" if s.get("online_pool") == "huntersdream" else "seamless")
+        play.add(self.pool_row)
         page.add(play)
 
         game = Adw.PreferencesGroup(title=tr("Игровой сервер (сообщения, пятна крови, призраки)"))
+        self.game_group = game
         self.community_row = Adw.EntryRow(title=tr("Игровой сервер"), text=s["online_community"])
         game.add(self.community_row)
         page.add(game)
 
+        coop = None
         coop = Adw.PreferencesGroup(
             title=tr("Сервер кооператива (колокола и призывы)"),
             description=tr("play.seamlesshunt.com:31313 — сервер Seamless Hunt (BBSC). Публичный "
@@ -1321,6 +1425,7 @@ class LauncherWindow(Adw.ApplicationWindow):
                         "Нужен сервер с игровым сервером BBSC, у всех игроков включено"),
             active=s.get("online_bbsc", False))
         coop.add(self.bbsc_row)
+        self.coop_group = coop
         page.add(coop)
 
         account = Adw.PreferencesGroup(
@@ -1332,7 +1437,27 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.password_row = Adw.PasswordEntryRow(title=tr("Пароль"), text=s["online_password"])
         account.add(self.npid_row)
         account.add(self.password_row)
+        self.account_group = account
         page.add(account)
+
+        thd = Adw.PreferencesGroup(
+            title=tr("The Hunter's Dream"),
+            description=tr("Вход через Discord, как в bbhost: на сайте нужно подтвердить код. Пароль не "
+                           "нужен, токен хранится на этом компьютере вместе с настройками лаунчера"))
+        self.thd_server_row = Adw.EntryRow(title=tr("Адрес сервера"), text=s.get("thd_server", ""))
+        self.thd_server_row.set_tooltip_text(online.HUNTERS_DREAM_SERVER)
+        thd.add(self.thd_server_row)
+        self.thd_account_row = Adw.ActionRow()
+        self.thd_sign_button = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.thd_sign_button.connect("clicked", self.on_thd_sign)
+        self.thd_account_row.add_suffix(self.thd_sign_button)
+        thd.add(self.thd_account_row)
+        self.thd_group = thd
+        self.thd_id, self.thd_token = s.get("thd_online_id", ""), s.get("thd_token", "")
+        self.thd_signing = False
+        self.thd_cancel = False
+        self.show_thd_account()
+        page.add(thd)
 
         connection = Adw.PreferencesGroup(
             title=tr("Соединение"),
@@ -1350,7 +1475,96 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.test_rows = []
         self.connection_group = connection
         page.add(connection)
+        self.pool_row.connect("notify::selected", self.on_pool_changed)
+        self.on_pool_changed()
         return page
+
+    def online_pool(self):
+        return combo_value(self.pool_row)
+
+    def on_pool_changed(self, *_):
+        pool = self.online_pool()
+        legacy, thd = pool == "seamless", pool == "huntersdream"
+        self.game_group.set_visible(not thd)
+        self.coop_group.set_visible(not thd)
+        self.account_group.set_visible(not thd)
+        self.bbsc_row.set_visible(legacy)
+        self.thd_group.set_visible(thd)
+        if not online_module(pool):
+            self.pool_row.set_subtitle(tr("В этой сборке нет модуля для этого пула (libbbnet20.so)"))
+
+    def show_thd_account(self):
+        link = getattr(self, "thd_link", None)
+        if link is not None:
+            self.thd_account_row.remove(link)
+            self.thd_link = None
+        if self.thd_id and self.thd_token:
+            self.thd_account_row.set_title(tr("Вы вошли как {}").format(GLib.markup_escape_text(self.thd_id)))
+            self.thd_account_row.set_subtitle("")
+            self.thd_sign_button.set_label(tr("Выйти"))
+        else:
+            self.thd_account_row.set_title(tr("Вход не выполнен"))
+            self.thd_account_row.set_subtitle(tr("Нужен аккаунт Discord, привязанный к The Hunter's Dream"))
+            self.thd_sign_button.set_label(tr("Войти через Discord"))
+        if self.thd_signing:
+            self.thd_sign_button.set_label(tr("Отмена"))
+        self.thd_sign_button.set_sensitive(True)
+
+    def on_thd_sign(self, _button):
+        if self.thd_signing:
+            self.thd_cancel = True  # the waiting thread stops; done() resets the row
+            return
+        self.thd_cancel = False
+        if self.thd_id and self.thd_token:
+            self.thd_id = self.thd_token = ""
+            self.show_thd_account()
+            return
+        self.thd_signing = True
+        self.show_thd_account()
+        server = self.thd_server_row.get_text().strip()
+
+        def show_code(page, code):
+            def show():
+                self.thd_account_row.set_title(tr("Код входа: {}").format(code))
+                self.thd_account_row.set_subtitle(GLib.markup_escape_text(tr(
+                    "На странице {}: 1) нажмите «Sign in with Discord to link» и войдите; "
+                    "2) вернувшись на страницу, введите код в поле кода (не в «Sign in with a code from the game»). "
+                    "Код скопирован в буфер").format(page)))
+                # The code goes to the clipboard; the page opens by whatever works in this environment
+                # (an AppImage may have no default handler for the GIO call), else a button does it.
+                try:
+                    self.thd_account_row.get_clipboard().set(code)
+                except Exception:
+                    pass
+                if not open_url(page):
+                    link = Gtk.LinkButton(uri=page, label=tr("Открыть страницу"), valign=Gtk.Align.CENTER)
+                    self.thd_account_row.add_prefix(link)
+                    self.thd_link = link
+                return False
+            GLib.idle_add(show)
+
+        def done(name, token, error):
+            self.thd_signing = False
+            if error:
+                self.show_thd_account()
+                if error != "cancelled":
+                    self.thd_account_row.set_subtitle(GLib.markup_escape_text(error))
+            else:
+                self.thd_id, self.thd_token = name, token
+                self.settings["thd_online_id"], self.settings["thd_token"] = name, token
+                save_settings(self.settings)
+                self.show_thd_account()
+            return False
+
+        def work():
+            try:
+                name, token = online.thd_sign_in(server, show_code, device="bbport on Linux",
+                                                  cancelled=lambda: self.thd_cancel)
+            except ValueError as error:
+                GLib.idle_add(done, "", "", str(error))
+                return
+            GLib.idle_add(done, name, token, "")
+        threading.Thread(target=work, daemon=True).start()
 
     def online_addresses(self):
         server = self.server_row.get_text().strip() or online.SHADNET_SERVER
@@ -1359,6 +1573,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         return server, webapi, community
 
     def on_test_connection(self, _button):
+        if self.online_pool() == "huntersdream":
+            self.test_thd_connection()
+            return
         server, webapi, community = self.online_addresses()
         names = {"game": tr("Игровой сервер"), "shadnet": tr("Сервер shadNet"), "webapi": "WebAPI"}
         for row in self.test_rows:
@@ -1384,6 +1601,29 @@ class LauncherWindow(Adw.ApplicationWindow):
             results = online.check(server, webapi, community)
             GLib.idle_add(show, results)
         threading.Thread(target=work, daemon=True).start()
+
+    def test_thd_connection(self):
+        names = {"game": tr("Игровой сервер"), "service": tr("Сервис кооператива")}
+        server = self.thd_server_row.get_text().strip()
+        for row in self.test_rows:
+            self.connection_group.remove(row)
+        self.test_rows = []
+        self.test_button.set_sensitive(False)
+        self.test_button.set_label(tr("Проверка…"))
+
+        def show(results):
+            for name, address, ok, detail in results:
+                row = Adw.ActionRow(title=GLib.markup_escape_text(f"{names[name]}: {address}"),
+                                    subtitle=GLib.markup_escape_text(
+                                        tr("доступен") if ok else f'{tr("недоступен")} ({detail})'))
+                row.add_prefix(Gtk.Image(icon_name="object-select-symbolic" if ok else "dialog-warning-symbolic"))
+                self.connection_group.add(row)
+                self.test_rows.append(row)
+            self.test_button.set_sensitive(True)
+            self.test_button.set_label(tr("Проверить"))
+            return False
+
+        threading.Thread(target=lambda: GLib.idle_add(show, online.check_thd(server)), daemon=True).start()
 
     def build_log_page(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
