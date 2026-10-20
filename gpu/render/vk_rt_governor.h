@@ -11,9 +11,10 @@
 //   level 3  + the RT sun shadow off, the RTAO 1 ray
 //   level 4  + the bounce by the screen march (no rays; no fire lights)
 //
-// Down one level when two half-second windows in a row are over the budget (1 s apart at most);
+// Down one level when two half-second windows in a row are over the budget, or the GPU is over 90 %
+// busy while the frames run 5 % past the cap (the share saturates near 98 %: budgets near 16.6);
 // up one after `up_wait` with room (budget - 1.5 ms); a step down within 3 s of a step up doubles
-// up_wait (4 s .. 64 s) so the level does not swing at an edge; 20 s held halves it again.
+// up_wait (4 s .. 64 s) so the level does not swing at an edge; a step up held 20 s halves it.
 
 #pragma once
 

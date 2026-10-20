@@ -23,7 +23,10 @@ struct State {
     double room_since = -1.0;     // seconds: with room since
     double last_up = -1e9, last_change = -1e9;
     double up_wait = 4.0;
+    bool last_was_up = false;     // the last change a step up
     bool was_enabled = false;
+    u32 frames = 0;               // Update calls (frames) since the last reading
+    double frames_since = -1.0;
 } state;
 
 double Now() {
@@ -76,31 +79,43 @@ void Update(bool enabled, float budget_ms) {
         return;
     }
     state.was_enabled = true;
+    const double now = Now();
+    ++state.frames;
+    if (state.frames_since < 0.0) {
+        state.frames_since = now;
+    }
     const auto* busy = GpuBusy::Get();
     if (!busy || busy->Windows() == state.last_window) {
         return;
     }
     state.last_window = busy->Windows();
+    // The frames' mean length since the last reading.
+    const float frame_ms = state.frames > 1 ? float((now - state.frames_since) * 1000.0 / state.frames) : FrameMs;
+    state.frames = 0;
+    state.frames_since = now;
     const float u = busy->Utilisation();
     if (u < 0.0f) {
         return;
     }
-    const double now = Now();
     static double last_print = 0.0;
     if (now - last_print >= 10.0) {
         last_print = now;
-        std::printf("RT governor: level %u, GPU %.0f %% of the frame (%.1f ms; budget %.1f)\n",
-                    level.load(std::memory_order_relaxed), u * 100.0f, u * FrameMs, budget_ms);
+        std::printf("RT governor: level %u, GPU %.0f %% of the frame (%.1f ms; budget %.1f), frames %.1f ms\n",
+                    level.load(std::memory_order_relaxed), u * 100.0f, u * FrameMs, budget_ms, frame_ms);
     }
     const float high = std::clamp(budget_ms, 8.0f, FrameMs) / FrameMs;
     const float low = std::clamp(budget_ms - 1.5f, 6.0f, FrameMs) / FrameMs;
     const u32 l = level.load(std::memory_order_relaxed);
-    // 20 s held: the wait for a step up shrinks again.
-    if (now - state.last_change > 20.0 && state.up_wait > 4.0) {
+    // A step up held 20 s: the wait for the next one shrinks again (a level held after a step down
+    // keeps it, or the level swings every ~30 s at an edge).
+    if (state.last_was_up && now - state.last_change > 20.0 && state.up_wait > 4.0) {
         state.up_wait = std::max(4.0, state.up_wait * 0.5);
         state.last_change = now;
     }
-    if (u > high) {
+    // The share saturates near 0.98 (the gaps between submissions): a GPU-bound frame past the cap
+    // never reads over a budget near 16.6, so a busy GPU with frames over the cap counts as over too.
+    const bool gpu_bound = u > 0.9f && frame_ms > FrameMs * 1.05f;
+    if (u > high || gpu_bound) {
         state.room_since = -1.0;
         if (++state.over >= 2 && l < MaxLevel) {
             if (now - state.last_up < 3.0) {
@@ -108,7 +123,8 @@ void Update(bool enabled, float budget_ms) {
             }
             state.over = 0;
             state.last_change = now;
-            Set(l + 1, u, "over the budget");
+            state.last_was_up = false;
+            Set(l + 1, u, gpu_bound ? "frames over the cap" : "over the budget");
         }
         return;
     }
@@ -120,6 +136,7 @@ void Update(bool enabled, float budget_ms) {
             state.room_since = -1.0;
             state.last_up = now;
             state.last_change = now;
+            state.last_was_up = true;
             Set(l - 1, u, "room");
         }
     } else {
