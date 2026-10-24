@@ -165,33 +165,28 @@ static ABI __attribute__((noreturn)) void hard_exit(int status) {
     fflush(stdout);
     _exit(status);
 }
-/* bbport: game asserts that continue. libc's _Assert raises 0xa0020007 twice around its message;
- * an assert listed here returns to the game instead (logged), the rest stop it.
- * +0xc33f3c: YEBIS GetMotionBlur_CameraRotationPerspectiveParameters calls
- * GPUTexUtil_GetRecursiveSampleParameters with nBaseSamples 2 (it wants >= 3) after walking the
- * blur levels down; the math stays finite with 2 (logs, a clamp): one frame of odd camera blur
- * instead of the game's end (three times, 2026-10-18 and 10-24, two of them landing from a fall). */
-static int assert_continues(const uint64_t *stack,uint64_t text_lo,uint64_t text_hi) {
-    static const uint64_t sites[]={0xc33f3cull};
-    for (int i=0,found=0;i<256 && found<4;++i) {
-        if (stack[i]<text_lo || stack[i]>=text_hi) continue;
-        ++found;
-        for (size_t k=0;k<sizeof(sites)/sizeof(sites[0]);++k)
-            if (stack[i]-text_lo==sites[k]) return 1;
-    }
-    return 0;
-}
 static ABI void raise_exception(uint32_t code,uint64_t argument) {
-    const uint64_t text_lo=0x800000000ull, text_hi=0x800000000ull+0x50d96dcull;
-    if (code==0xa0020007u && assert_continues((const uint64_t *)__builtin_frame_address(0),text_lo,text_hi)) {
-        static _Atomic unsigned long long continued;
-        const unsigned long long n=++continued;
-        if (n<=4 || (n&(n-1))==0)
-            fprintf(stderr,"Runtime: game assert continued (YEBIS camera motion blur, nBaseSamples < 3), %llu so far\n",n);
-        return;
+    /* The renderer's own debug assertions on blur-kernel sample counts (Yebis, GPUMath.cpp 3199 and
+     * GPUTextureUtil.cpp 18141: "nBaseSamples >= 3", "nSamples >= 2"; a game-data value that
+     * got small, seen at +0xbbc429 and +0xc33efe). The code after the check goes on with the
+     * value, so a retail build just continued: logged, and the game goes on.
+     * BB_GAME_ASSERT_STOP=1 stops as before. */
+    {
+        const uint64_t base=0x800000000ull, hi=base+0x50d96dcull;
+        /* The call goes through an import stub: the first game address up the stack is the site. */
+        const uint64_t *frame=(const uint64_t *)__builtin_frame_address(0);
+        uint64_t at=0;
+        for (int i=0;i<64 && !at;++i) if (frame[i]>=base && frame[i]<hi) at=frame[i]-base;
+        static int stop=-1, told;
+        if (stop<0) { const char *e=getenv("BB_GAME_ASSERT_STOP"); stop=e && e[0]=='1'; }
+        if (!stop && code==0xa0020007u && ((at>=0xbbc3e0 && at<0xbbc700) || (at>=0xc33000 && at<0xc34200))) {
+            if (told++<5) printf("Runtime: the game's blur-kernel assertion at +0x%llx ignored (BB_GAME_ASSERT_STOP=1: stop)\n",(unsigned long long)at);
+            return;
+        }
     }
     fprintf(stderr,"STOP: guest raised debug exception code=0x%x argument=0x%llx\n",code,(unsigned long long)argument);
     /* Who raised it: the caller and the game's return addresses further up this thread's stack. */
+    const uint64_t text_lo=0x800000000ull, text_hi=0x800000000ull+0x50d96dcull;
     const uint64_t caller=(uint64_t)__builtin_return_address(0);
     fprintf(stderr,"STOP: called from %s0x%llx; game code up the stack:",
             caller>=text_lo && caller<text_hi ? "+" : "host ",

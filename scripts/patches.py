@@ -45,6 +45,7 @@ EFFECTS={
     'effect_game_aa':('Disable AA',None),
     'effect_dynamic_shadows':('Disable Dynamic Light Shadows (perf increase)',None),
     'effect_ssr':(None,'Enable Screen Space Reflections (READ NOTE)'),
+    'effect_bloom':('Disable Bloom',None),
     'skip_intro':(None,'Skip Intro'),
     'debug_camera':(None,'Restore Debug Camera'),
     'debug_menu':(None,'Restore Debug Menu (READ NOTES)'),
@@ -73,9 +74,7 @@ def skip_network_choice(env=os.environ):
     return env.get('BB_SKIP_NETWORK_CHOICE','1')!='0'
 
 
-# The game's per-frame render command heap (#162): 256 KiB per frame, and the game writes through
-# the null it gets once a frame's commands fill it. 1 MiB instead; on by default,
-# BB_GX_COMMAND_HEAP=0 keeps the game's size.
+# Two per-frame GX command heaps: the game writes through NULL when a 256 KiB heap fills (#162).
 GX_COMMAND_HEAP='Larger GX Per-Frame Command Heap'
 
 
@@ -150,10 +149,22 @@ def validate_patch_requirements(names, game):
     return names
 
 
-def effect_patches(settings):
+# Effects the engine switches live (gpu/shim bbport_guest_hooks.cpp, "game effects switched live"):
+# they get no startup patch, the engine writes the same bytes from the settings (and again on
+# every change in the menu). BB_HOT_EFFECTS=0: the patches at start, as before.
+HOT_EFFECTS={'effect_chromatic_aberration','effect_dof','effect_motion_blur','effect_ssao',
+             'effect_game_aa','effect_dynamic_shadows','effect_bloom'}
+# SSR also changes the size of a resource allocated by the renderer constructor
+# (0x22c428d). Applying only its shader/pass switches corrupts the scene; apply
+# the complete community patch before construction, and require a restart.
+
+
+def effect_patches(settings, env=os.environ):
     names=[]
+    hot=env.get('BB_HOT_EFFECTS','1')!='0'
     for key,(off,on) in EFFECTS.items():
         if key not in settings: continue
+        if hot and key in HOT_EFFECTS: continue
         name=on if settings[key]=='1' else off
         if name: names.append(name)
     lod=MODEL_LOD.get(settings.get('model_lod','0'))

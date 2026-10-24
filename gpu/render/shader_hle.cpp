@@ -3,6 +3,7 @@
 // (destination, source, count) records of one stride; copies close together are grouped so
 // that each group needs one source and one destination buffer, and each group is one dispatch
 // of buffer_multi_copy.comp (or vkCmdCopyBuffer for a few copies).
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -150,28 +151,6 @@ struct CopyShaderControl {
 static_assert(sizeof(CopyShaderControl) == 12);
 } // namespace
 
-void CopyShaderDestinations(const Shader::Info& info, const Gcn::ComputeProgram& cs_program,
-                            std::vector<std::pair<VAddr, VAddr>>& out) {
-    out.clear();
-    if (info.buffers.size() < 3) {
-        return;
-    }
-    const auto ctl_sharp = info.buffers[0].GetSharp(info);
-    const auto dst_sharp = info.buffers[2].GetSharp(info);
-    const u64 stride = dst_sharp.GetStride();
-    const u64 count = cs_program.dim_x;
-    if (ctl_sharp.GetStride() != sizeof(CopyShaderControl) || stride == 0 || count == 0 ||
-        u64(ctl_sharp.GetSize()) < count * sizeof(CopyShaderControl) || ctl_sharp.base_address == 0) {
-        return;
-    }
-    const auto* ctl = reinterpret_cast<const CopyShaderControl*>(ctl_sharp.base_address);
-    out.reserve(count);
-    for (u64 i = 0; i < count; ++i) {
-        const VAddr start = dst_sharp.base_address + u64(ctl[i].dst_idx) * stride;
-        out.emplace_back(start, start + (u64(ctl[i].end) + 1) * stride);
-    }
-}
-
 /// The copy shader's three formatted buffers: control records, source and destination.
 static bool ExecuteCopyShaderHLE(const Shader::Info& info, const Gcn::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer) {
@@ -260,8 +239,19 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const Gcn::ComputePro
             dst_min = new_dst_min;
             dst_max = new_dst_max;
         }
-        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
+        auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
             src_buf_sharp.base_address + src_min, src_max - src_min, false);
+        // BB_EXP_COPY_SRC_SNAPSHOT=1 (experiment): the source bytes as they are now, in the stream
+        // buffer (what the old memory model did), not read in place when the GPU gets there.
+        static const bool snapshot = std::getenv("BB_EXP_COPY_SRC_SNAPSHOT") != nullptr;
+        if (snapshot && src_max - src_min <= 256_KB &&
+            !buffer_cache.IsRegionGpuModified(src_buf_sharp.base_address + src_min, src_max - src_min)) {
+            auto& stream = buffer_cache.GetStreamBuffer();
+            src_buf_offset = stream.Copy(
+                reinterpret_cast<const void*>(src_buf_sharp.base_address + src_min), src_max - src_min,
+                runtime.GetInstance().StorageMinAlignment());
+            src_buf = &stream;
+        }
         const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
             dst_buf_sharp.base_address + dst_min, dst_max - dst_min, true);
         const auto group = std::span{copies}.subspan(batch_start, batch_end - batch_start);
@@ -307,13 +297,83 @@ bool ExecuteShaderHLE(const Shader::Info& info, const Gcn::Regs& regs,
         // Rasterizer::DispatchRecord): our translator reads what it copies there on the CPU.
         auto& buffer_cache = rasterizer.GetBufferCache();
         buffer_cache.force_writes_in_place = true;
-        CopyShaderDestinations(info, cs_program, buffer_cache.copy_destinations);
+        thread_local std::vector<std::pair<unsigned long long, unsigned long long>> copy_writes;
+        copy_writes.clear();
+        if (CopyDestinationsPrecise() &&
+            CopyShaderDestinations(info, cs_program.dim_x, CopyDestinationGap(), copy_writes)) {
+            buffer_cache.precise_writes = &copy_writes;
+        }
         const bool done = ExecuteCopyShaderHLE(info, cs_program, rasterizer);
         buffer_cache.force_writes_in_place = false;
-        buffer_cache.copy_destinations.clear();
+        buffer_cache.precise_writes = nullptr;
         return done;
     }
     return false;
+}
+
+} // namespace Vulkan
+
+namespace Vulkan {
+
+bool CopyShaderDestinations(const Shader::Info& info, u32 groups, u64 gap,
+                            std::vector<std::pair<unsigned long long, unsigned long long>>& out) {
+    const u64 copy_shader = Game::BufferCopyShader();
+    if (copy_shader == 0 || info.pgm_hash != copy_shader || info.buffers.size() < 3 || groups == 0) {
+        return false;
+    }
+    const auto ctl_sharp = info.buffers[0].GetSharp(info);
+    const auto dst_sharp = info.buffers[2].GetSharp(info);
+    const u64 stride = dst_sharp.GetStride();
+    if (ctl_sharp.GetStride() != 12 || stride == 0 || ctl_sharp.base_address == 0 ||
+        u64(groups) * 12 > ctl_sharp.GetSize()) {
+        return false;
+    }
+    struct Control {
+        u32 dst_idx;
+        u32 src_idx;
+        u32 end;
+    };
+    const auto* ctl = reinterpret_cast<const Control*>(ctl_sharp.base_address);
+    const size_t first = out.size();
+    for (u32 i = 0; i < groups; ++i) {
+        const u64 begin = dst_sharp.base_address + u64(ctl[i].dst_idx) * stride;
+        out.emplace_back(begin, begin + (u64(ctl[i].end) + 1) * stride);
+    }
+    std::sort(out.begin() + first, out.end());
+    size_t merged = first;
+    for (size_t i = first + 1; i < out.size(); ++i) {
+        if (out[i].first <= out[merged].second + gap) {
+            out[merged].second = std::max(out[merged].second, out[i].second);
+        } else {
+            out[++merged] = out[i];
+        }
+    }
+    out.resize(merged + 1);
+    // As sizes from here on.
+    for (size_t i = first; i < out.size(); ++i) {
+        out[i].second -= out[i].first;
+    }
+    return true;
+}
+
+} // namespace Vulkan
+
+namespace Vulkan {
+
+bool CopyDestinationsPrecise() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_COPY_DEST_PRECISE");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+unsigned long long CopyDestinationGap() {
+    static const unsigned long long gap = [] {
+        const char* env = std::getenv("BB_COPY_DEST_GAP");
+        return env ? std::strtoull(env, nullptr, 0) : 256ull;
+    }();
+    return gap;
 }
 
 } // namespace Vulkan

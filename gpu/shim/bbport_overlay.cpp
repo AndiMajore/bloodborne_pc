@@ -18,6 +18,8 @@
 #include <vector>
 
 #include <SDL3/SDL.h>
+#include "bbport_guest_hooks.h"
+#include "bbport_frame_rate.h"
 #include "bbport_settings.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -733,6 +735,15 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
+    if (BbSettings::FixedRenderSession() && s.startup_live_resolution != 0) {
+        // Started with a fixed render size (BB_LIVE_RES=0 or BB_RENDER_RES): the setting is
+        // not what this session runs.
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                           BbSettings::MenuText("This session started with a fixed resolution: "
+                                                "changes apply after a restart",
+                                                "Эта сессия запущена с фиксированным разрешением: "
+                                                "смена — после перезапуска"));
+    }
     Hint(BbSettings::MenuText(
         "On: output resolution and preset change without restarting, but game post-processing "
         "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. "
@@ -742,7 +753,7 @@ void Menu() {
         "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
         "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
         "её на мощных дискретных видеокартах. Применяется после перезапуска игры."));
-    ImGui::SeparatorText(BbSettings::MenuText("Game effects (restart required)",
+    ImGui::SeparatorText(BbSettings::MenuText("Game effects",
                                               "Эффекты игры (после перезапуска)"));
     const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
                           BbSettings::MenuText("Game default", "Как в игре"),
@@ -766,8 +777,8 @@ void Menu() {
         const auto& effect = BbSettings::Effects[e];
         Checkbox(BbSettings::MenuText(effect.label, effect.label_ru), s.effects[e]);
         if (std::string_view(effect.key) == "debug_camera") {
-            Hint(BbSettings::MenuText("Hold Cross and press L3 (keyboard: Space + Z).",
-                                      "Удерживайте Cross и нажмите L3 (клавиатура: Space + Z)."));
+            Hint(BbSettings::MenuText("Hold Cross and press L3 (keyboard: F + Left Ctrl).",
+                                      "Удерживайте Cross и нажмите L3 (клавиатура: F + Left Ctrl)."));
         } else if (std::string_view(effect.key) == "debug_menu") {
             Hint(BbSettings::MenuText(
                 "Left side of the touchpad (Tab); right side: Backspace. Needs the adhoc folder "
@@ -776,17 +787,18 @@ void Menu() {
                 "Nexus #253 (шрифты в adhoc/font)."));
         }
     }
+    BbGuestHooks::ApplyGameEffects();
     Hint(BbSettings::MenuText(
-        "Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
-        "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
-        "Эффекты включаются и выключаются патчами игры при запуске (patches/Bloodborne.xml). "
-        "Размытие в движении и тени от динамических источников заметно нагружают GPU."));
+        "SSR reflections, intros, free camera and debug menu apply after a restart. Other effects "
+        "switch immediately. Motion blur and shadows from dynamic lights place a significant load on the GPU.",
+        "Отражения SSR, заставки, свободная камера и debug menu применяются после перезапуска. "
+        "Остальные эффекты переключаются сразу. Размытие в движении и тени от динамических источников заметно нагружают GPU."));
 
     bool restart =
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
         s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
-        restart |= s.effects[e] != s.startup_effects[e];
+        restart |= !BbSettings::IsHotEffect(e) && s.effects[e] != s.startup_effects[e];
     }
     if (restart) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
@@ -799,6 +811,30 @@ void Menu() {
         }
     }
 
+    ImGui::SeparatorText(BbSettings::MenuText("Frame rate limit (now)", "Лимит кадров (сейчас)"));
+    {
+        static const int steps[] = {0, 30, 60, 90, 120, 144, 240};
+        static const char* labels[] = {"As launched", "30", "60", "90", "120", "144", "240"};
+        static const char* labels_ru[] = {"Как при запуске", "30", "60", "90", "120", "144", "240"};
+        int index = 0;
+        for (int i = 0; i < 7; ++i) {
+            if (steps[i] == BbFrameRate::Limit()) index = i;
+        }
+        if (ImGui::BeginCombo(BbSettings::MenuText("Limit (F3: 30 FPS on and off)", "Лимит (F3: 30 FPS вкл/выкл)"),
+                              BbSettings::MenuText(labels[index], labels_ru[index]))) {
+            for (int i = 0; i < 7; ++i) {
+                if (ImGui::Selectable(BbSettings::MenuText(labels[i], labels_ru[i]), i == index)) {
+                    BbFrameRate::SetLimit(steps[i]);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        Hint(BbSettings::MenuText(
+            "Not saved. At 30 FPS the cinematic of Laurence (optional boss) does not hang, as it can "
+            "above 30 (the community 60 FPS patch has the same problem).",
+            "Не сохраняется. На 30 FPS кинематика Лоуренса (необязательный босс) не зависает, "
+            "как может выше 30 (у общего патча на 60 FPS та же проблема)."));
+    }
     ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
     Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
 

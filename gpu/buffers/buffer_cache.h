@@ -144,13 +144,9 @@ public:
     }
     /// bbport: GPU writes of the bindings resolved now stay in the game's memory (no VRAM copy).
     bool force_writes_in_place = false;
-    /// bbport (ticket 53): with force_writes_in_place, the bytes the copy shader really writes
-    /// ([start, end), from its copy list read on the CPU). A written binding over blocks in VRAM
-    /// then sends only these blocks back in place and marks only them dynamic; the rest of its
-    /// wide range (descriptors of 25-59 MB around writes of a few KB) keeps its VRAM copies, among
-    /// them other shaders' outputs (cs 8b355b5a: 0.27 -> 1.65 ms on 0.6). Empty: unknown, the
-    /// whole range as before. BB_COPY_DEST_PRECISE=0: always the whole range.
-    std::vector<std::pair<VAddr, VAddr>> copy_destinations;
+    /// bbport: with force_writes_in_place, the bytes the bindings now resolved really write (the copy
+    /// shader's control list, CopyShaderDestinations: address, size); null: all of each binding.
+    const std::vector<std::pair<unsigned long long, unsigned long long>>* precise_writes = nullptr;
 
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
@@ -261,6 +257,19 @@ public:
                                                               bool clamp_huge = false);
     std::optional<std::pair<const Buffer*, u64>> LayerInPlaceUncached(VAddr address, u64 size,
                                                                       bool clamp_huge);
+    /// BB_TRACE_SHADER: what a binding got: the game's memory (a chunk buffer), a copy in the
+    /// stream buffer, or another buffer (VRAM mirrors, the arena).
+    [[nodiscard]] const char* BoundPlace(const Buffer* buffer) const {
+        if (buffer == &stream_buffer) {
+            return "stream copy";
+        }
+        for (const auto& chunk : chunk_buffers) {
+            if (chunk.get() == buffer) {
+                return "game memory";
+            }
+        }
+        return "other (VRAM)";
+    }
     /// Whether any part of the range is.
     [[nodiscard]] bool IsAnyInPlace(VAddr addr, u64 size) const {
         if (LayerActive() && size != 0) {
@@ -403,7 +412,10 @@ private:
                                size_t total_size_bytes);
 
     /// The image at device_addr, if any, tiled into `buffer` at `offset` (where the range is).
-    bool SynchronizeMemoryFromImage(const Buffer* buffer, u64 offset, VAddr device_addr, u32 size);
+    /// `vram_copy`: where the shader may read the whole range instead, when the image was tiled
+    /// in VRAM on its way to host memory (BB_TILE_BIND_VRAM; else left alone).
+    bool SynchronizeMemoryFromImage(const Buffer* buffer, u64 offset, VAddr device_addr, u32 size,
+                                    std::pair<const Buffer*, u64>* vram_copy = nullptr);
     /// bbport BB_LAYER_MEMORY (statistics): a binding not whole in one chunk.
     void NoteLayerMiss(VAddr address, u64 size, bool is_written);
     /// bbport BB_LAYER_MEMORY (buffer_cache_layer.cpp): a binding through the layer's memory
@@ -482,6 +494,8 @@ private:
     u64 LayerCompactMirrors(u64 wanted);
     /// The GPU writes [address, address + size) in the submission being recorded (write ticks).
     void NoteWriteTick(VAddr address, u64 size);
+    /// NoteWriteTick for a written binding: only the parts precise_writes names, when it is set.
+    void NoteBindingWriteTick(VAddr address, u64 size);
     /// Page table entry of a block (LayerPagedRecord), its writes, and rewrites after changes.
     u64 LayerEntry(u64 block);
     void LayerWriteEntries(u64 first_block, u64 end_block);

@@ -55,22 +55,26 @@ Mesa/RADV) has been tested thoroughly.
   - **The old memory model, as in 0.3** (*Old*). VRAM copies of the game's memory, writes
     tracked through page protection, with every fix made since 0.3.
 
-  [Changes in 0.6-pre1](docs/CHANGES_0.6-pre1.md), [0.51](docs/CHANGES_0.51.md),
-  [0.5](docs/CHANGES_0.5.md).
+  [Changes in 0.6](docs/CHANGES_0.6.md), [0.6-pre1](docs/CHANGES_0.6-pre1.md),
+  [0.51](docs/CHANGES_0.51.md), [0.5](docs/CHANGES_0.5.md).
 
   Unused textures are freed in both modes, so VRAM no longer grows with every area visited.
 - **Unlocked frame rate.** Hooks in the game's code make the simulation use the real frame time
   (the community patches in `patches/Bloodborne.xml` remain for comparison, `BB_FRAME_HOOKS=0`);
   ~90 FPS at 4K with FSR 4 Balanced on an RX 7800 XT, ~150 FPS at 1440p with FSR 4 Quality.
-  Also 30/60/90 FPS modes.
+  Also 30/60/90 FPS modes; **F3** switches a 30 FPS limit on and off while playing (some
+  cinematics, e.g. Laurence's, are safest at 30).
 - **Any aspect ratio, live.** 4:3, 16:10, 16:9, 21:9 and 32:9 with the HUD at the screen's edges,
-  through hooks (the game's code is not patched).
+  through hooks (the game's code is not patched); cinematics are wide too.
 - **Keyboard and mouse.** Mouse look turns the game's camera directly; a mouse pointer in the
-  game's menus; a layout close to Dark Souls III's; button prompts show the bound key, or the
-  buttons of the gamepad in use (Xbox and others), PlayStation icons only with a PlayStation pad.
-- **Online play and seamless co-op.** Messages, bloodstains, bells and summons through a shadNet
-  server; seamless co-op (BBSC). Seamless Hunt's servers by default (`play.seamlesshunt.com`,
-  an account from seamlesshunt.com).
+  game's menus (F1 releases the mouse); a layout close to Dark Souls III's (Space dodge, Left
+  Shift run, Shift+Space jump); movement keys ramp up like a stick; button prompts show the bound
+  key, or the buttons of the gamepad in use (Xbox and others), PlayStation icons only with a
+  PlayStation pad.
+- **Online play and seamless co-op.** Two pools on shadPS4 0.20's network stack: **Seamless
+  Hunt** (default; bells, summons, messages, bloodstains and seamless co-op, BBSC, up to five
+  hunters; an account from seamlesshunt.com) and **The Hunter's Dream** (sign-in with Discord; no
+  BBSC).
 - **Temporal upscaling built for this game.** Bloodborne has no velocity buffer, so bbport
   computes motion vectors itself: camera motion from depth and the scene matrices, and object
   motion (characters, cloth, weapons) from the vertex positions of the previous frame. The
@@ -94,7 +98,9 @@ Mesa/RADV) has been tested thoroughly.
   at ~26 FPS; now it runs at 90–150 FPS depending on resolution and scene.
 - **Settings inside the game's own menu:** *System → Display / Effects* (after *Screen/Sound*),
   built and drawn by the game itself — output resolution, upscaler, preset, sharpness, FPS
-  counter, model detail and the game's effects, in the game's language.
+  counter, model detail and the game's effects, in the game's language. Chromatic aberration,
+  depth of field, motion blur, SSAO, the game's AA and dynamic-light shadows switch at once;
+  screen-space reflections, the intro, free camera and the debug menu need a restart.
 - **Overlay menu** (Insert or L3+R3), styled like the game's dialogs: everything above plus the
   advanced settings, with gamepad, keyboard and mouse.
 - **GTK4 launcher** and an **AppImage** for the Steam Deck.
@@ -144,8 +150,8 @@ neither has nor includes.
 
 ## Requirements
 
-- Linux x86-64, a Vulkan 1.3 GPU. Tested: AMD RX 7800 XT with Mesa 26 (RADV).
-  The *New memory and translation model* mode is not tested on NVIDIA yet.
+- Linux x86-64, a Vulkan 1.3 GPU. Tested: AMD RX 7800 XT with Mesa 26 (RADV); NVIDIA and Intel
+  by players (please report how the default memory model runs there).
   FSR 4 / 4.1.1 require shader Float16, Int8/Int16, integer dot products, linear compute
   derivatives and extended storage image formats; FSR 4.1.1 additionally requires
   `VK_VALVE_shader_mixed_float_dot_product`. Unsupported choices fall back to FSR 3.1
@@ -215,11 +221,14 @@ layout, e.g. `user/addcont/CUSA03173/SPEXPANSIONDLC03` for The Old Hunters): eac
 reported to the game as an installed add-on.
 
 **Launcher language:** Russian, English, Brazilian Portuguese or Simplified Chinese (follows the system language by default).
+The game's own text language is chosen separately, from all 21 languages the game has.
+**GPU choice:** *Mode → GPU* picks the graphics card on machines with two (*Auto* prefers the
+discrete one; stored by name; `BB_GPU_ID=N` from the shell wins).
 
 **Free camera and game debug menu** (v1.09): enable the corresponding switches in the
 launcher or in-game menu and restart. Free camera uses Lance McDonald's
 [GoldHEN patch](https://github.com/GoldHEN/GoldHEN_Patch_Repository/blob/main/patches/xml/Bloodborne-Orbis.xml):
-hold Cross and press L3 to cycle modes (keyboard: hold Space and press Z). It needs no fonts
+hold Cross and press L3 to cycle modes (keyboard: hold F and press Left Ctrl). It needs no fonts
 and conflicts with *Enemy Control*.
 For the game debug menu, install `DbgFont14h.ccm` and `DbgFont14h.tpf` from
 [Debug Menu and XML Patch](https://www.nexusmods.com/bloodborne/mods/253) into the game's
@@ -229,9 +238,9 @@ no longer opens the gestures); Backspace is the right touchpad.
 Touch coordinates are forwarded from SDL gamepads; Back/Select emulates a left click on
 pads without a touch surface. The port's settings menu remains Insert / L3+R3.
 
-GPU occlusion queries still use synthetic pixel counters (`PixelPipeStatDump`), and
-`IT_SET_PREDICATION` is unimplemented. Free camera allows visual investigation; it does
-not implement GPU occlusion culling.
+With the *Restore Debug Camera* patch the mouse turns the free camera. The game's occlusion
+queries are Vulkan occlusion queries in the default model (`BB_OCCLUSION_QUERIES=0`: everything
+counts as visible, as in the old model).
 
 **Upscaler assets** (not included; FSR 3.1 needs none):
 
@@ -252,7 +261,8 @@ builds (4.0.2b, 4.1.1b and similar OptiScaler INT8 builds: another model and pas
 the DLL runs under Proton and is recorded at 20 sizes (progress in the row and in the *Log* tab;
 on RDNA4 a second time, for the FP8 variant),
 the passes are translated to SPIR-V, and FSR 4.1.1 is selected. The Proton build is picked
-automatically — the first under which the DLL enables FSR 4.1: GE-Proton 10 or newer,
+automatically — the first under which the DLL enables FSR 4.1: GE-Proton 10 or newer (also the
+AUR's `proton-ge-custom` in `/usr/share/steam/compatibilitytools.d`),
 Proton-CachyOS, Proton Experimental (tested: GE-Proton 11, Proton-CachyOS 11, Experimental of
 October 2026; Steam's Proton 11.0 and GE-Proton 9 do not). It runs in the Steam runtime it
 requires (Steam installs it the first time any game runs with that Proton), or through
@@ -337,8 +347,8 @@ When running from source, install MangoHud separately. A diagnostic launch with
 `VK_LOADER_LAYERS_DISABLE=~implicit~` also disables MangoHud.
 
 Useful variables: `BB_FRAME_STATS=1` (frame statistics, including a `Memory:` line: VRAM, GTT,
-RSS, images and guest blocks in VRAM), `BB_PC_MODEL=1` (the new memory and translation model,
-0, the old model as in 0.3, is the default), `BB_ANISO=N` (anisotropic filtering of scene textures; 16 by
+RSS, images and guest blocks in VRAM), `BB_PC_MODEL=0` (the old memory model as in 0.3; the new
+one is the default), `BB_ANISO=N` (anisotropic filtering of scene textures; 16 by
 default, 0 = the game's own),
 `BB_GC_IDLE_SECONDS=N` / `BB_VRAM_IDLE_SECONDS=N` (how long unused textures / buffers stay in VRAM;
 20 / 60), `BB_BREADCRUMBS=0` (no GPU breadcrumbs; with them a GPU hang names the draw or dispatch
@@ -354,17 +364,28 @@ budget taken as at most N MiB: checks the behaviour of cards with little VRAM), 
 with `BB_PRESENT_DUMP_COUNT=N` (dump N consecutive presented frames),
 `BB_FSR411_VARIANT=int8|fp8|fp8emu` (FSR 4.1.1 variant; by default FP8 where the GPU has FP8
 matrices), `BB_READBACKS=0|1|2` (reads of GPU-written memory by the game: 1 by default, 2
-precise and slow, 0 off).
-More in [docs/](docs); recent changes: [docs/CHANGES_0.4.md](docs/CHANGES_0.4.md) (in Russian),
-[docs/CHANGES_2026-10-06.md](docs/CHANGES_2026-10-06.md).
+precise and slow, 0 off), `BB_RENDER_RESOURCE_CACHE_MB=160` (the game's render resource cache
+at its own size instead of 512 MiB of the port's memory; `BB_DMEM_EXTRA_MB`, 512 by default, is
+the direct memory the port keeps past the game's own).
+More in [docs/](docs); recent changes: [docs/CHANGES_0.6.md](docs/CHANGES_0.6.md),
+[docs/CHANGES_after_0.6-pre1.md](docs/CHANGES_after_0.6-pre1.md) (in Russian).
 
-**Online play (shadNet).** A separate module, `out/gpu/libbbnet.so` (`gpu/bbnet`: shadPS4's network
-and PSN libraries from shadp2p, a shadPS4 fork, with the shadNet client), built when protobuf,
-nlohmann_json, OpenSSL, zlib and miniupnpc are there (`shell.nix`) and included in the AppImage.
-The launcher's *Online* page turns it on (`BB_ONLINE=1`): messages, bloodstains and ghosts come
-from The Hunter's Dream, bells and summons go through a shadNet server (`srv.shadps4.net:31313` by
-default) with a shadNet account (Online ID and password). Offline the module is never loaded; a
-build without it plays offline only.
+**Online play.** A separate module, `out/gpu/libbbnet20.so` (`gpu/bbnet20`: shadPS4 v0.20's
+network, NP and shadNet code, the port's BBSC and The Hunter's Dream backend), built when
+protobuf, nlohmann_json, OpenSSL, zlib and miniupnpc are there (`shell.nix`) and included in the
+AppImage. The launcher's *Online* page turns it on (`BB_ONLINE=1`) and offers two pools:
+- **Seamless Hunt** (default): a shadNet server with BBSC's game server
+  (`play.seamlesshunt.com:31313`, WebAPI `:31315`); bells, summons, messages, bloodstains and
+  **seamless co-op (BBSC)**: the session survives deaths, lamps, area changes, bosses and the
+  Hunter's Dream, up to five hunters (*Seamless co-op (BBSC)*, on by default; every player needs
+  it and the same server). The account (online id and password) is made on
+  https://seamlesshunt.com. Details: [docs/BBSC.md](docs/BBSC.md).
+- **The Hunter's Dream** (thehuntersdream.com): sign in with Discord from the launcher (a code is
+  confirmed on the site); no BBSC.
+
+The former module on shadp2p (`libbbnet.so`) stays as a fallback (`BB_NET_GEN=19`). shadPS4's
+public server (`srv.shadps4.net`) accepts only shadPS4's own builds. Offline the module is never
+loaded; a build without it plays offline only.
 
 ## Repository layout
 
@@ -372,7 +393,7 @@ build without it plays offline only.
 |---|---|
 | `src/` | Loader (`probe.c`) and the HLE runtime |
 | `scripts/` | Offline preparation of the game image, module linking, patch compiler |
-| `gpu/` | Renderer library, the port's own (`gpu/VENDOR.txt`): command processor, shader translator, renderer, caches, ImGui menu, FSR 4.1.1 runtime (`gpu/upscale/fsr411`); the online module (`gpu/bbnet`) |
+| `gpu/` | Renderer library, the port's own (`gpu/VENDOR.txt`): command processor, shader translator, renderer, caches, ImGui menu, FSR 4.1.1 runtime (`gpu/upscale/fsr411`); the online module (`gpu/bbnet20`, the former one in `gpu/bbnet`) |
 | `launcher/`, `packaging/` | GTK4 launcher; Nix package and AppImage |
 | `patches/` | Community patches for Bloodborne |
 | `tools/` | Developer tools: scripted runs, A/B toggles, FSR benchmark helpers, FSR 4 shader rewrites, `fsr4cap` (FSR 4.1.1 recording/extraction) |
@@ -408,11 +429,14 @@ from shadPS4 (GPL-2.0-or-later). Third-party components keep their licenses:
 [sirit](https://github.com/shadps4-emu/sirit), [half](https://half.sourceforge.net/),
 [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) by FireBurn (MIT; FSR 3.1 on Vulkan and the
 FSR 4 v07 provider), AMD FidelityFX SDK (MIT), [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9)
-(MIT), [Dear ImGui](https://github.com/ocornut/imgui) (MIT), DejaVu fonts, BBSC seamless co-op
-(GPL-2.0+, in the online module),
+(MIT), [Dear ImGui](https://github.com/ocornut/imgui) (MIT), DejaVu fonts,
+[BBSC](https://github.com/CLSAMG22/BBSC) seamless co-op (GPL-2.0+, in the online module), the
+online module's network code from [shadPS4 v0.20](https://github.com/shadps4-emu/shadPS4/tree/v.0.20.0),
+The Hunter's Dream backend from
+[droogie/bbhost](https://github.com/droogie/bbhost) (GPL-3.0-or-later, so `libbbnet20.so` as a
+whole is GPL-3.0-or-later),
 [dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT, used to build the
 FSR 4.1.1 assets). Game patches by Kyo, Lance McDonald, auser1337, illusion, emoose and other
-community members (`patches/Bloodborne.xml`). The DLSS bridge (`gpu/dlss_bridge`, MIT) and
-loader come from [Supermedo's Windows port](https://github.com/Supermedo/bloodborne_pc), adapted
+community members (`patches/Bloodborne.xml`). The DLSS bridge (`gpu/dlss_bridge`, MIT) is adapted
 from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR).
 AMD's FSR 4 DLLs and model data and NVIDIA's DLSS SDK and libraries are not distributed here.

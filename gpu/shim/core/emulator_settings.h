@@ -52,7 +52,7 @@ public:
         static const u32 value = u32(std::max(0L, Number("BB_FPS_LIMIT", 0)));
         return value;
     }
-    bool IsCopyGpuBuffers() { static const auto value = Flag("BB_COPY_GPU_BUFFERS", false); return value; }
+    bool IsCopyGpuBuffers() { static const auto value = Flag("BB_COPY_GPU_BUFFERS", true); return value; }
     bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("BB_DIRECT_MEMORY_ACCESS", false); return value; }
     bool IsDumpShaders() { static const auto value = Flag("BB_DUMP_SHADERS", false); return value; }
     bool IsHdrAllowed() { static const auto value = Flag("BB_HDR", false); return value; }

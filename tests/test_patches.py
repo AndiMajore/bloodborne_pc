@@ -90,6 +90,16 @@ class NativeUiTests(unittest.TestCase):
 
 
 class DebugPatchTests(unittest.TestCase):
+    def test_ssr_uses_complete_startup_patch_with_live_effects(self):
+        for env in ({}, {'BB_HOT_EFFECTS': '0'}):
+            names = effect_patches({'effect_ssr': '1'}, env)
+            writes = dict(compile_patches(XML, names, '01.09', SEGMENTS))
+            # Replace both dimension-halving instructions before allocation.
+            self.assertEqual(writes[0x22c428d], bytes.fromhex('0f1f4000'))
+            self.assertEqual(len(writes), 10)
+            self.assertEqual(effect_patches({'effect_ssr': '0'}, env), [])
+        self.assertEqual(effect_patches({'effect_bloom': '0'}, {}), [])
+
     def test_camera_patch_is_optional_and_compatible_with_fps_and_debug_menu(self):
         self.assertEqual(effect_patches({'debug_camera': '0', 'debug_menu': '0'}), [])
         camera = effect_patches({'debug_camera': '1'})
@@ -203,17 +213,12 @@ class IntelTonemapTests(unittest.TestCase):
         self.assertIn(patches.INTEL_TONEMAP, names)
 
 
-
 class GxCommandHeapTests(unittest.TestCase):
-    def test_on_unless_the_environment_turns_it_off(self):
-        self.assertTrue(patches.gx_command_heap({}))
-        self.assertFalse(patches.gx_command_heap({'BB_GX_COMMAND_HEAP': '0'}))
-
-    def test_both_heaps_get_1_mib(self):
+    def test_compiled_patch_changes_only_the_two_heap_size_operands(self):
         writes = dict(compile_patches(XML, [patches.GX_COMMAND_HEAP], '01.09', SEGMENTS))
-        # The imm32 of `mov edx, 0x40000` before each heap init (eboot vaddr 0x2195c09/0x2195c46).
-        for address in (0x2595c0a - EBOOT_BASE, 0x2595c47 - EBOOT_BASE):
-            self.assertEqual(struct.unpack('<I', writes[address])[0], 0x100000)
+        expected = {0x2195c0a: struct.pack('<I', 1024 * 1024),
+                    0x2195c47: struct.pack('<I', 1024 * 1024)}
+        self.assertEqual(writes, expected)
 
 
 if __name__ == '__main__':
