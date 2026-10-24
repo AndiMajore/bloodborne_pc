@@ -131,12 +131,16 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     const auto staging = runtime.GetStagingPool().Request(bytes, MemoryType::HostCached, 16, !sync);
     auto copy = copy_to(staging.offset);
     runtime.DownloadImage(&image, staging.buffer, std::span{&copy, 1});
-    const auto write_back = [this, address = info.guest_address, bytes](const auto& download) {
+    // bbport: a sync download runs where the caches are this thread's (the command processor's,
+    // or the recording thread's in order: the collector in OnSubmit with BB_PIPE_SIGNALS), so its
+    // invalidation runs here too. Sent to the command processor it waited for that thread, which
+    // waited in DrainDrawPipe for this one: the game froze at a cutscene's end under memory pressure.
+    const auto write_back = [this, address = info.guest_address, bytes, sync](const auto& download) {
         download.Invalidate();
         BbFreeCheck::Check(address, bytes, download.mapped, BbFreeCheck::ImageDownload);
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(address), download.mapped,
                                                   bytes);
-        buffer_cache.InvalidateMemory(address, bytes);
+        buffer_cache.InvalidateMemory(address, bytes, sync);
     };
     if (sync) {
         scheduler.Finish();
