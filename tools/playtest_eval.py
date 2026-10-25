@@ -379,6 +379,39 @@ def compare_image(path: Path, golden: Path, masks=None, channel_threshold=8):
     return out
 
 
+def mean_luma(path: Path, masks=None, reduce: int = 4):
+    """Mean luminance (0..255) of an image outside the masks, on a reduced copy (speed)."""
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError:  # pragma: no cover
+        return None
+    try:
+        img = Image.open(path).convert("RGB")
+    except OSError:
+        return None
+    if reduce > 1 and min(img.size) >= 8 * reduce:
+        img = img.reduce(reduce)
+    a = np.asarray(img, dtype=np.float64) @ np.array([0.299, 0.587, 0.114])
+    keep = np.ones(a.shape, dtype=bool)
+    h, w = keep.shape
+    for rect in (masks or {}).values():
+        x0, y0 = int(rect[0] * w), int(rect[1] * h)
+        x1, y1 = int((rect[0] + rect[2]) * w), int((rect[1] + rect[3]) * h)
+        keep[max(0, y0):min(h, y1), max(0, x0):min(w, x1)] = False
+    return float(a[keep].mean()) if keep.any() else float(a.mean())
+
+
+def black_frames(lumas: list, black_luma: float = 3.0, black_rel: float = 0.25) -> list[int]:
+    """Indices of the frames of a burst that are (near) black: below black_luma, or below black_rel
+    of the burst's median (a dark scene stays dark; a frame the post pass blanked drops out)."""
+    vals = [v for v in lumas if v is not None]
+    if not vals:
+        return []
+    limit = max(black_luma, black_rel * statistics.median(vals))
+    return [i for i, v in enumerate(lumas) if v is not None and v < limit]
+
+
 def _ssim(aa, bb, keep, win: int = 7):
     """Mean windowed SSIM over the kept region, on luminance; numpy only (no scipy/skimage).
     Returns None if the image is smaller than the window."""
@@ -472,6 +505,18 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
     images = []
     for i, dump in enumerate(test.get("dumps", [])):
         name = dump.get("name", f"dump{i}")
+        count = int(dump.get("count", 1))
+        if count > 1:   # a burst of consecutive frames: judged by brightness, not by a golden
+            pngs = [results_dir / "dumps" / f"{name}_{j:03d}.png" for j in range(count)]
+            lumas = [mean_luma(f, test.get("masks")) if f.exists() else None for f in pngs]
+            got = sum(v is not None for v in lumas)
+            black = black_frames(lumas, float(criteria.get("black_luma", 3.0)), float(criteria.get("black_rel", 0.25)))
+            entry = {"name": name, "burst": count, "frames": got, "black": black,
+                     "luma": [None if v is None else round(v, 2) for v in lumas], "ok": not black}
+            if got < count:
+                invalid.append(f"burst {name}: {got} of {count} frames dumped")
+            images.append(entry)
+            continue
         png = results_dir / "dumps" / f"{name}.png"
         golden = (lib / "golden" / test["name"] / f"{name}.png") if lib else None
         entry = {"name": name, "file": str(png), "golden": str(golden) if golden else None, "ok": None}
@@ -540,6 +585,15 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
         detail = ", ".join(f"{k}: {v}" for k, v in markers["asserts"].items())
         reasons.append(f"{total_asserts} continued asserts > {criteria['max_asserts']} ({detail})")
 
+    if "max_black_frames" in criteria:
+        bursts = [im for im in images if im.get("burst")]
+        if not bursts:
+            invalid.append("max_black_frames set but no burst dump ([[dumps]] with count > 1, kind present)")
+        for im in bursts:
+            if len(im["black"]) > int(criteria["max_black_frames"]):
+                reasons.append(f"burst {im['name']}: {len(im['black'])} black frames > {criteria['max_black_frames']} "
+                               f"(frames {im['black'][:12]})")
+
     if crashed:
         status, code = "crash", EXIT_FAIL
     elif reasons:
@@ -605,9 +659,16 @@ def summary_markdown(result: dict) -> str:
         out += ["", "| checkpoint ms | distance m | tolerance | ok |", "|---|---|---|---|"]
         for cp in result["camera"]["checkpoints"]:
             out.append(f"| {cp['at_ms']:.0f} | {cp['distance_m']} | {cp['tolerance_m']} | {'yes' if cp['ok'] else 'NO'} |")
-    if result["images"]:
+    for im in result["images"]:
+        if im.get("burst"):
+            lumas = [v for v in im["luma"] if v is not None]
+            span = f"luma {min(lumas)} .. {max(lumas)}" if lumas else "no frames"
+            out.append(f"Burst {im['name']}: {im['frames']} of {im['burst']} frames, {span}; "
+                       f"black frames: {im['black'] or 'none'}.")
+    stills = [im for im in result["images"] if not im.get("burst")]
+    if stills:
         out += ["", "| image | mad | diff | psnr | ssim | ok |", "|---|---|---|---|---|---|"]
-        for im in result["images"]:
+        for im in stills:
             ok = im.get("ok") if im.get("ok") is not None else im.get("note", im.get("error", ""))
             out.append(f"| {im['name']} | {im.get('mad', '')} | {im.get('diff_frac', '')} | "
                        f"{im.get('psnr', '')} | {im.get('ssim', '')} | {ok} |")

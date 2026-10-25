@@ -53,6 +53,8 @@ SETTINGS_FILES = ("rtao", "ssgi", "rtlighting", "rtreflect", "rtprobes")
 # level (BB_LEVEL_SETTLE); the engine's scene-load check + BB_PAD_REPLAY_DELAY_MS then govern timing.
 MEASURE_ENV = {"BB_FRAME_STATS": "1", "BB_GPU_PROFILE": "1", "BB_CAMERA_LOG": "1", "BB_FAULT_WAIT": "0",
                "BB_SAVE_LOG": "0", "BB_SKIP_NETWORK_CHOICE": "1", "BB_LEVEL_SETTLE": "3"}
+# Env keys naming files or folders the game silently does without (see env_path_problems).
+PATH_KEYS = ("BB_GAME_DIR", "BB_MODS_DIR", "BB_MODS_CONFIG", "BB_PATCHES_DIR", "BB_PATCHES_CONFIG", "BB_CONFIG")
 # Keys dropped when saving a recording's launcher snapshot (routes/<route>.env): session/path
 # specifics and instrumentation, which the runner sets itself. What stays is the visual/effect/perf
 # settings — the actual reproduction point (fullscreen, HDR, mods, patches, shader packs, …).
@@ -344,15 +346,41 @@ class LogWatch:
         return sum(1 for line in self.lines if line.startswith(prefix))
 
 
-def convert_dumps(raw_dir: Path, results: Path, names: list[str], keep_raw: bool):
-    """Raw frame dumps (fNNN_final_WxH_fmt.raw) in dump order -> results/dumps/<name>.png."""
+def dump_names(dumps: list) -> dict:
+    """{kind: [png names in dump order]} for a test's [[dumps]]. A dump with count = N > 1 (a burst
+    of N consecutive frames, kind present only) yields <name>_000 .. <name>_<N-1>."""
+    names = {"final": [], "present": []}
+    for i, d in enumerate(dumps):
+        name, count = d.get("name", f"dump{i}"), int(d.get("count", 1))
+        names[d.get("kind", "final")].extend([name] if count <= 1 else [f"{name}_{j:03d}" for j in range(count)])
+    return names
+
+
+def env_path_problems(env: dict) -> list[str]:
+    """Configured files and folders that do not exist. A missing mods.json does not fail the game: it
+    enables every mod in BB_MODS_DIR (2026-10-25: bb_enhanced, which removes the game's AO pass, so
+    RTAO had nothing to write into), so such a run measures another game and must not start."""
+    return [f"{k}={env[k]} does not exist" for k in PATH_KEYS if env.get(k) and not Path(env[k]).exists()]
+
+
+def convert_dumps(raw_dir: Path, results: Path, names, keep_raw: bool):
+    """Raw frame dumps (fNNN_<kind>_WxH_fmt.raw) -> results/dumps/<name>.png. The final and present
+    dumps count separately (each kind's index starts at 0); names is {kind: [names]} or, for the
+    final dumps alone, a list."""
+    if isinstance(names, list):
+        names = {"final": names}
     dumps = results / "dumps"
     dumps.mkdir(exist_ok=True)
     raws = sorted(p for p in raw_dir.glob("f*_*.raw") if RE_DUMP_FILE.search(p.name))
     produced = []
-    for i, raw in enumerate(raws):
+    seen = {"final": 0, "present": 0}
+    for raw in raws:
         m = RE_DUMP_FILE.search(raw.name)
-        name = names[i] if i < len(names) else f"dump{i}"
+        kind = m.group(2)
+        i = seen[kind]
+        seen[kind] += 1
+        kind_names = names.get(kind, [])
+        name = kind_names[i] if i < len(kind_names) else (f"dump{i}" if kind == "final" else f"present{i}")
         png = dumps / f"{name}.png"
         size, fmt = f"{m.group(3)}x{m.group(4)}", m.group(5)
         r = subprocess.run(["magick", "-size", size, "-depth", "8", f"{fmt}:{raw}", "-alpha", "off", str(png)],
@@ -405,6 +433,9 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         if timed:
             env["BB_PAD_REPLAY_DUMPS"] = ",".join(str(int(d["at_ms"])) for d in timed)
             env["BB_PAD_REPLAY_DUMP_KIND"] = timed[0].get("kind", "final")
+        burst = max((int(d.get("count", 1)) for d in dumps if d.get("kind") == "present"), default=1)
+        if burst > 1:   # one present trigger dumps this many consecutive frames
+            env["BB_PRESENT_DUMP_COUNT"] = str(burst)
     env["BB_DUMP_DIR"] = str(results / "dumps_raw")
     env["BB_FINAL_DUMP_TRIGGER"] = str(results / "final_trigger")
     env["BB_PRESENT_DUMP_TRIGGER"] = str(results / "present_trigger")
@@ -431,6 +462,11 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         env["BB_CONFIG"] = str(user_dir / "bbport.ini")
         print(f"[{name}] effects: " + ", ".join(f"{k}={v}" for k, v in effects.items())
               + " (scratch bbport.ini)")
+    problems = env_path_problems(env)
+    if problems:
+        raise SystemExit(f"test {name}: not started, the environment names missing paths: "
+                         + "; ".join(problems) + f" (fix env/{test.get('env_base', 'default')}.env"
+                         + (f" or routes/{route}.env" if route else "") + ")")
     (results / "dumps_raw").mkdir()
     # Today's restart.sh hard-sets BB_DUMP_DIR=out/present and the triggers to out/*_trigger,
     # overriding the env above. So the legacy dump path fires those files and collects from
@@ -562,7 +598,7 @@ def finish(lib, test, test_path, results: Path, run: dict, watch: LogWatch, args
     if session.exists():
         shutil.copy2(session, results / "session.log")
     (results / "run.json").write_text(json.dumps(run, indent=1) + "\n")
-    names = [d.get("name", f"dump{i}") for i, d in enumerate(test.get("dumps", []))]
+    names = dump_names(test.get("dumps", []))
     raw_dir = results / "dumps_raw"
     raw_dir.mkdir(exist_ok=True)
     if not any(raw_dir.glob("f*_*.raw")):

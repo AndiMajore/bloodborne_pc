@@ -592,6 +592,68 @@ class LauncherEnvTests(unittest.TestCase):
             self.assertIsNone(pt.launcher_env())
 
 
+class BurstAndEnvPathTests(unittest.TestCase):
+    """Bursts of consecutive present dumps judged by brightness (ticket 81's black flicker) and the
+    guard against env paths that no longer exist (a missing mods.json enabled every mod)."""
+
+    def test_dump_names_expand_bursts_per_kind(self):
+        names = pt.dump_names([{"at_ms": 100, "kind": "final", "name": "still"},
+                               {"at_ms": 7000, "kind": "present", "name": "gate", "count": 3}])
+        self.assertEqual(names, {"final": ["still"], "present": ["gate_000", "gate_001", "gate_002"]})
+
+    def test_convert_dumps_counts_each_kind_from_zero(self):
+        if shutil.which("magick") is None:
+            self.skipTest("magick not installed")
+        with tempfile.TemporaryDirectory() as d:
+            raw_dir = Path(d) / "raw"
+            raw_dir.mkdir()
+            (raw_dir / "f000_final_4x2_rgba.raw").write_bytes(bytes([10, 20, 30, 255] * 8))
+            (raw_dir / "f000_present_4x2_rgba.raw").write_bytes(bytes([1, 1, 1, 255] * 8))
+            (raw_dir / "f001_present_4x2_rgba.raw").write_bytes(bytes([2, 2, 2, 255] * 8))
+            results = Path(d) / "results"
+            results.mkdir()
+            produced = pt.convert_dumps(raw_dir, results, {"final": ["still"], "present": ["gate_000", "gate_001"]}, False)
+            self.assertEqual(sorted(p.name for p in produced), ["gate_000.png", "gate_001.png", "still.png"])
+
+    def test_black_frames(self):
+        self.assertEqual(ev.black_frames([40, 42, 1.0, 39, 9, 41]), [2, 4])     # 9 < 0.25 * median 39.5
+        self.assertEqual(ev.black_frames([6, 5, 6, 5]), [])                     # a dark scene stays dark
+        self.assertEqual(ev.black_frames([None, 2.0, 30, 30]), [1])
+        self.assertEqual(ev.black_frames([]), [])
+
+    def test_burst_criterion(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            results, lib = EvaluateTests().make_results(Path(d))
+            (results / "dumps").mkdir()
+            for j, v in enumerate([60, 0, 62]):
+                Image.new("RGB", (64, 64), (v, v, v)).save(results / "dumps" / f"gate_{j:03d}.png")
+            test = dict(TEST, checkpoints=[], dumps=[{"at_ms": 7000, "kind": "present", "name": "gate", "count": 3}],
+                        criteria={"max_black_frames": 0})
+            r = ev.evaluate(results, test, lib)
+            self.assertEqual(r["status"], "fail")
+            self.assertEqual(r["images"][0]["black"], [1])
+            self.assertIn("1 black frames", " ".join(r["reasons"]))
+            self.assertIn("Burst gate: 3 of 3 frames", ev.summary_markdown(r))
+
+    def test_burst_missing_frames_is_invalid(self):
+        with tempfile.TemporaryDirectory() as d:
+            results, lib = EvaluateTests().make_results(Path(d))
+            test = dict(TEST, checkpoints=[], dumps=[{"at_ms": 7000, "kind": "present", "name": "gate", "count": 3}],
+                        criteria={"max_black_frames": 0})
+            r = ev.evaluate(results, test, lib)
+            self.assertIn("burst gate: 0 of 3 frames dumped", r["invalid_reasons"])
+
+    def test_env_path_problems(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "mods.json").write_text("{}")
+            env = {"BB_MODS_CONFIG": str(Path(d) / "mods.json"), "BB_PATCHES_DIR": str(Path(d) / "gone"),
+                   "BB_RTAO": "1"}
+            problems = pt.env_path_problems(env)
+            self.assertEqual(len(problems), 1)
+            self.assertIn("BB_PATCHES_DIR", problems[0])
+
+
 class ReproEnvTests(unittest.TestCase):
     """resolve_repro_env picks the recording's snapshot as the reproduction point, else the fallback."""
 
