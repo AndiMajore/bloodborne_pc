@@ -204,6 +204,15 @@ class EvaluateTests(unittest.TestCase):
             self.assertIn("8 continued asserts", " ".join(r["reasons"]))
             self.assertEqual(r["summaries"]["asserts"], {"YEBIS camera motion blur": 8})
 
+    def test_ignored_assert_is_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            lines = LINES + ["G:\\workspace\\yebis\\GPUMath.cpp(3199) : Assertion Failed (nBaseSamples >= 3) in function X",
+                             "Runtime: the game's blur-kernel assertion at +0xbbc429 ignored (BB_GAME_ASSERT_STOP=1: stop)"]
+            results, lib = self.make_results(Path(d), lines=lines)
+            r = ev.evaluate(results, dict(TEST, dumps=[], checkpoints=[], criteria={}), lib)
+            self.assertNotEqual(r["status"], "crash")
+            self.assertEqual(r["summaries"]["asserts"], {"blur-kernel": 1})
+
     def test_off_route_is_invalid(self):
         with tempfile.TemporaryDirectory() as d:
             results, lib = self.make_results(Path(d))
@@ -619,6 +628,8 @@ class BurstAndEnvPathTests(unittest.TestCase):
         self.assertEqual(ev.black_frames([40, 42, 1.0, 39, 9, 41]), [2, 4])     # 9 < 0.25 * median 39.5
         self.assertEqual(ev.black_frames([20, 20, 6, 18, 19]), [2])             # the 81 dip: a third of its neighbours
         self.assertEqual(ev.black_frames([20, 14, 10, 7, 6]), [])               # a fade is not a drop
+        self.assertEqual(ev.black_frames([21, 21, 6.5, 6.3, 18.6, 19]), [2, 3])  # a two-frame dip
+        self.assertEqual(ev.black_frames([20, 5, 5, 5, 5, 5, 5, 20]), [])        # longer than drop_span: a scene change
         self.assertEqual(ev.black_frames([6, 5, 6, 5]), [])                     # a dark scene stays dark
         self.assertEqual(ev.black_frames([None, 2.0, 30, 30]), [1])
         self.assertEqual(ev.black_frames([]), [])

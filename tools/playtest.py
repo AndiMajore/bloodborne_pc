@@ -452,7 +452,10 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
     # The test's [effects] (e.g. ssr = 1) are game-effect toggles that live only in bbport.ini — no
     # env var sets them. Copy the real bbport.ini, apply the overrides, and point BB_CONFIG at the
     # copy so the test controls the effects it needs without touching the player's config.
-    effects = test.get("effects") or {}
+    effects = dict(test.get("effects") or {})
+    for kv in (getattr(args, "effect", None) or []):   # ad-hoc effect changes, e.g. motion_blur=0
+        k, _, v = kv.partition("=")
+        effects[k.strip().removeprefix("effect_")] = v.strip()
     if effects:
         base_ini = Path(env.get("BB_CONFIG") or (PORT / "bbport.ini"))
         text = base_ini.read_text() if base_ini.is_file() else ""
@@ -1450,6 +1453,9 @@ def main(argv=None) -> int:
     p.add_argument("--env", action="append", metavar="KEY=VALUE",
                    help="override one setting for this run (repeatable), e.g. --env BB_RTAO=0; "
                         "investigate without changing the recorded reproduction point")
+    p.add_argument("--effect", action="append", metavar="NAME=0|1",
+                   help="override one game effect for this run (repeatable), e.g. --effect motion_blur=0 "
+                        "(the effect_* keys of bbport.ini, applied through a scratch copy)")
     p.set_defaults(func=cmd_run)
     p = sub.add_parser("eval", help="evaluate a results directory again")
     p.add_argument("results_dir")

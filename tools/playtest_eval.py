@@ -38,6 +38,8 @@ RE_REPLAY_DUMP = re.compile(r"^Runtime: pad replay dump at (\d+) ms \(index (\d+
 RE_FINAL_DUMP = re.compile(r"^Final dump (\d+): GPU frame (\d+)")
 RE_REFLECT = re.compile(r"^RT reflections: (\d+) passes in 600 frames")
 RE_GOVERNOR = re.compile(r"^RT governor: level (\d+)")
+# 0.6's form of a continued game assert (upstream's raise_exception), and the guest's own assert text.
+RE_ASSERT_IGNORED = re.compile(r"Runtime: the game's (.+?) assertion at \S+ ignored|Assertion Failed \((.+?)\)")
 RE_ERROR = re.compile(r"Fault \(signal|Device lost|STOP|Assertion|Unimplemented PM4")
 RE_ASSERT = re.compile(r"Runtime: game assert continued \(([^,]+)")
 RE_ZERO_HEX = re.compile(r"\b0+([0-9a-f]{4,})")
@@ -147,6 +149,12 @@ def parse_markers(lines):
                 kind = am.group(1).strip()
                 num = re.search(r"(\d+) so far", line)
                 mk["asserts"][kind] = max(mk["asserts"].get(kind, 0), int(num.group(1)) if num else mk["asserts"].get(kind, 0) + 1)
+                continue
+            im = RE_ASSERT_IGNORED.search(line)
+            if im:   # the game goes on: counted as an assert, not a crash
+                if im.group(1):
+                    kind = im.group(1).strip()
+                    mk["asserts"][kind] = mk["asserts"].get(kind, 0) + 1
                 continue
             if RE_ERROR.search(line):
                 mk["errors"].append(line.rstrip()[:200])
@@ -402,24 +410,30 @@ def mean_luma(path: Path, masks=None, reduce: int = 4):
     return float(a[keep].mean()) if keep.any() else float(a.mean())
 
 
-def black_frames(lumas: list, black_luma: float = 3.0, black_rel: float = 0.25, drop_rel: float = 0.5) -> list[int]:
+def black_frames(lumas: list, black_luma: float = 3.0, black_rel: float = 0.25, drop_rel: float = 0.5,
+                 drop_span: int = 4) -> list[int]:
     """Indices of the frames of a burst that are (near) black or drop out: below black_luma, below
-    black_rel of the burst's median, or below drop_rel of both neighbours (ticket 81's flicker is a
-    single frame whose scene falls to about a third of its brightness while the HUD stays)."""
+    black_rel of the burst's median, or inside a run of up to drop_span frames that all fall below
+    drop_rel of both frames around the run (ticket 81's flicker: one or two frames whose scene falls
+    to about a third of its brightness while the HUD stays)."""
     vals = [v for v in lumas if v is not None]
     if not vals:
         return []
     limit = max(black_luma, black_rel * statistics.median(vals))
-    out = []
-    for i, v in enumerate(lumas):
-        if v is None:
-            continue
-        prev = lumas[i - 1] if i > 0 else None
-        nxt = lumas[i + 1] if i + 1 < len(lumas) else None
-        near = [n for n in (prev, nxt) if n is not None]
-        if v < limit or (near and all(v < drop_rel * n for n in near)):
-            out.append(i)
-    return out
+    out = {i for i, v in enumerate(lumas) if v is not None and v < limit}
+    n = len(lumas)
+    for start in range(n):
+        for length in range(1, drop_span + 1):
+            end = start + length            # the run is [start, end)
+            if end > n:
+                break
+            run = lumas[start:end]
+            if any(v is None for v in run):
+                break
+            around = [lumas[k] for k in (start - 1, end) if 0 <= k < n and lumas[k] is not None]
+            if around and max(run) < drop_rel * min(around):
+                out.update(range(start, end))
+    return sorted(out)
 
 
 def _ssim(aa, bb, keep, win: int = 7):
@@ -521,7 +535,7 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
             lumas = [mean_luma(f, test.get("masks")) if f.exists() else None for f in pngs]
             got = sum(v is not None for v in lumas)
             black = black_frames(lumas, float(criteria.get("black_luma", 3.0)), float(criteria.get("black_rel", 0.25)),
-                                 float(criteria.get("drop_rel", 0.5)))
+                                 float(criteria.get("drop_rel", 0.5)), int(criteria.get("drop_span", 4)))
             entry = {"name": name, "burst": count, "frames": got, "black": black,
                      "luma": [None if v is None else round(v, 2) for v in lumas], "ok": not black}
             if got < count:
@@ -663,7 +677,7 @@ def summary_markdown(result: dict) -> str:
     if s["rt_reflections_passes"]:
         out.append(f"RT reflections passes per 600 frames: {s['rt_reflections_passes']}.")
     if s.get("asserts"):
-        out.append("Continued asserts (black flicker): " + ", ".join(f"{k}: {v}" for k, v in s["asserts"].items()) + ".")
+        out.append("Continued game asserts: " + ", ".join(f"{k}: {v}" for k, v in s["asserts"].items()) + ".")
     if s["governor_levels"]:
         out.append(f"Governor levels seen: {sorted(set(s['governor_levels']))}.")
     if result["camera"]["checkpoints"]:
