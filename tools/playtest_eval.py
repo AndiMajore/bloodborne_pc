@@ -370,7 +370,39 @@ def compare_image(path: Path, golden: Path, masks=None, channel_threshold=8):
     diff = np.abs(aa - bb)[keep]
     mad = float(diff.mean())
     frac = float((diff.max(axis=1) > channel_threshold).mean())
-    return {"mad": round(mad, 3), "diff_frac": round(frac, 5), "pixels": int(keep.sum())}
+    out = {"mad": round(mad, 3), "diff_frac": round(frac, 5), "pixels": int(keep.sum())}
+    mse = float((diff.astype(np.float64) ** 2).mean())
+    out["psnr"] = 99.0 if mse == 0 else round(10.0 * math.log10(255.0 * 255.0 / mse), 2)
+    ssim = _ssim(aa, bb, keep)
+    if ssim is not None:
+        out["ssim"] = round(ssim, 4)
+    return out
+
+
+def _ssim(aa, bb, keep, win: int = 7):
+    """Mean windowed SSIM over the kept region, on luminance; numpy only (no scipy/skimage).
+    Returns None if the image is smaller than the window."""
+    import numpy as np
+    if aa.shape[0] < win or aa.shape[1] < win:
+        return None
+    a = (aa @ np.array([0.299, 0.587, 0.114])).astype(np.float64)
+    b = (bb @ np.array([0.299, 0.587, 0.114])).astype(np.float64)
+
+    def boxmean(x):
+        ii = np.zeros((x.shape[0] + 1, x.shape[1] + 1), dtype=np.float64)
+        ii[1:, 1:] = x.cumsum(0).cumsum(1)
+        s = ii[win:, win:] - ii[:-win, win:] - ii[win:, :-win] + ii[:-win, :-win]
+        return s / (win * win)
+
+    mu_a, mu_b = boxmean(a), boxmean(b)
+    va = boxmean(a * a) - mu_a ** 2
+    vb = boxmean(b * b) - mu_b ** 2
+    cov = boxmean(a * b) - mu_a * mu_b
+    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+    smap = ((2 * mu_a * mu_b + c1) * (2 * cov + c2)) / ((mu_a ** 2 + mu_b ** 2 + c1) * (va + vb + c2))
+    off = (win - 1) // 2
+    kv = keep[off:off + smap.shape[0], off:off + smap.shape[1]]
+    return float(smap[kv].mean()) if kv.any() else float(smap.mean())
 
 
 def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
@@ -532,7 +564,7 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
                       "replay_dumps": markers["replay_dumps"], "final_dumps": markers["final_dumps"],
                       "asserts": markers["asserts"]},
         "camera": {"checkpoints": checkpoints, "samples": len(camera)},
-        "images": images, "errors": {"log_lines": markers["errors"]},
+        "images": images, "events": run.get("events", []), "errors": {"log_lines": markers["errors"]},
         "env": run.get("env", {}), "files": {"session_log": str(results_dir / "session.log"),
                                              "frames_csv": str(results_dir / "frames.csv"),
                                              "run_json": str(results_dir / "run.json")},
@@ -574,9 +606,15 @@ def summary_markdown(result: dict) -> str:
         for cp in result["camera"]["checkpoints"]:
             out.append(f"| {cp['at_ms']:.0f} | {cp['distance_m']} | {cp['tolerance_m']} | {'yes' if cp['ok'] else 'NO'} |")
     if result["images"]:
-        out += ["", "| image | mad | diff | ok |", "|---|---|---|---|"]
+        out += ["", "| image | mad | diff | psnr | ssim | ok |", "|---|---|---|---|---|---|"]
         for im in result["images"]:
-            out.append(f"| {im['name']} | {im.get('mad', '')} | {im.get('diff_frac', '')} | {im.get('ok') if im.get('ok') is not None else im.get('note', im.get('error', ''))} |")
+            ok = im.get("ok") if im.get("ok") is not None else im.get("note", im.get("error", ""))
+            out.append(f"| {im['name']} | {im.get('mad', '')} | {im.get('diff_frac', '')} | "
+                       f"{im.get('psnr', '')} | {im.get('ssim', '')} | {ok} |")
+    if result.get("events"):
+        out += ["", "Event captures:"]
+        for e in result["events"]:
+            out.append(f"- {e.get('reason')} at {e.get('at_s')} s: {e.get('line', '')}")
     clean = result["timing"].get("clean_end")
     out += ["", f"Clean end: {clean}; end mode: {result['timing'].get('end_mode', 'engine')}."]
     return "\n".join(out) + "\n"
@@ -585,6 +623,55 @@ def summary_markdown(result: dict) -> str:
 def write_results(results_dir: Path, result: dict):
     (results_dir / "result.json").write_text(json.dumps(result, indent=1) + "\n")
     (results_dir / "summary.md").write_text(summary_markdown(result))
+
+
+def baseline_from_result(result: dict) -> dict:
+    """The accepted-metrics snapshot to store as baselines/<test>.json."""
+    labels = {lbl: {"ms_median": e.get("ms_median"), "per_call_us_median": e.get("per_call_us_median")}
+              for lbl, e in result["gpu_profile"]["labels"].items()}
+    return {"commit": result.get("commit"), "busy_ms": result["gpu_profile"]["busy_ms_median"],
+            "p99_ms": (result.get("frames") or {}).get("p99_ms"), "labels": labels}
+
+
+def aggregate_metrics(results: list) -> dict:
+    """Median busy/p99/label metrics across several runs of one test (so a noisy run does not flip
+    the gate). Shaped like a baseline for check_baseline."""
+    def med(vals):
+        vals = [v for v in vals if v is not None]
+        return round(statistics.median(vals), 3) if vals else None
+    labels: dict = {}
+    for r in results:
+        for lbl, e in r["gpu_profile"]["labels"].items():
+            labels.setdefault(lbl, {"ms": [], "us": []})
+            labels[lbl]["ms"].append(e.get("ms_median"))
+            labels[lbl]["us"].append(e.get("per_call_us_median"))
+    return {"commit": results[-1].get("commit"),
+            "busy_ms": med([r["gpu_profile"]["busy_ms_median"] for r in results]),
+            "p99_ms": med([(r.get("frames") or {}).get("p99_ms") for r in results]),
+            "labels": {lbl: {"ms_median": med(v["ms"]), "per_call_us_median": med(v["us"])}
+                       for lbl, v in labels.items()}}
+
+
+def check_baseline(metrics: dict, baseline: dict, pct: float) -> list:
+    """Regression reasons: metrics (median busy/p99/labels) risen above the baseline by more than
+    pct per cent. Only increases (slower / more cost) count; improvements never fail."""
+    out = []
+
+    def cmp(label, cur, base):
+        if cur is None or not base:
+            return
+        delta = (cur - base) / base * 100
+        if delta > pct:
+            out.append(f"{label} {base}→{cur} (+{delta:.0f}%) vs baseline")
+
+    cmp("GPU busy ms", metrics.get("busy_ms"), baseline.get("busy_ms"))
+    cmp("frame p99 ms", metrics.get("p99_ms"), baseline.get("p99_ms"))
+    for lbl, b in (baseline.get("labels") or {}).items():
+        e = (metrics.get("labels") or {}).get(lbl)
+        if e:
+            cmp(f"{lbl} ms", e.get("ms_median"), b.get("ms_median"))
+            cmp(f"{lbl} us/call", e.get("per_call_us_median"), b.get("per_call_us_median"))
+    return out
 
 
 def compare_runs(results_root: Path, test_name: str, last: int = 5, regression_pct: float = 5.0):

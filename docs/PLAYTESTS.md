@@ -7,13 +7,16 @@ separate private library (`--lib`, `$BB_PLAYTESTS`, default `../bbport-playtests
 are the player's own game data.
 
 ```
-tools/playtest.py run <test> [--repeat N] [--accept-goldens] [--suite bugs|all] [--env KEY=VALUE]
+tools/playtest.py run <test> [--repeat N] [--accept-goldens] [--accept-baseline] [--suite bugs|all] [--env KEY=VALUE]
 tools/playtest.py eval <results-dir>        evaluate a run again
 tools/playtest.py compare <test> [--last N] medians of the last runs by commit
+tools/playtest.py report [--suite bugs|all] one table across tests: status + metrics + Δ vs baseline
+tools/playtest.py ab <test> --a K=V --b K=V run two settings and diff metrics + image quality
 tools/playtest.py record [<name>]           create a playtest, or record a test's route (wizard)
 tools/playtest.py edit <name>               change a playtest's save/description/ticket/env/delay
 tools/playtest.py remove <name>             delete a playtest (keeps the frozen save)
 tools/playtest.py saves                      list the frozen saves and where they are
+tools/playtest.py lib-sync [--push]          commit the private library (push if it has a remote)
 tools/playtest.py list
 tools/playtest_eval.py <results-dir> --test <toml> [--lib <dir>]
 ```
@@ -77,15 +80,61 @@ delay_ms = 10000                 # replay start after the level
 hold_s = 5                       # seconds after the route before the quit
 loop = 0                         # extra replays of the route (soak)
 [env]                            # BB_* overrides
+[effects]  ssr = 1  ssao = 1     # game-effect toggles -> a scratch bbport.ini via BB_CONFIG (effect_<name>)
 [settings.rtao]                  # live settings files of the scratch user
 [measure]  gpu_labels = [...]  per_call = [...]  split_ms = 25000
 [[checkpoints]]  at_ms = 30000  tolerance_m = 1.5
-[[dumps]]        at_ms = 30000  kind = "final"  name = "cp1"
+[[dumps]]        at_ms = 30000  kind = "final"  name = "cp1"   # or: on = "YEBIS"  (dump when that log line appears)
 [masks]  hud = [x, y, w, h]      # fractions of the output
 [criteria]  crash_free  clean_end  max_busy_ms  max_p99_ms  max_label_ms = {label = ms}
             per_call_ratio_max = {label = ratio}  min_reflection_passes  require_reflections_first_pass
             no_error_lines  image_mad_max  image_diff_frac_max  max_compiles  regression_pct
 ```
+
+## Baselines and the regression gate
+
+Absolute `[criteria]` thresholds catch gross failures; a **baseline** catches creeping regressions.
+`run <test> --accept-baseline` stores the run's metrics (busy, p99, measured label medians and
+per-call µs) in the library as `baselines/<test>.json`, tagged with the commit. On later runs, the
+median across this invocation's `--repeat N` runs is compared to that baseline, and any metric risen
+above it by more than `regression_pct` (default 5, per-test overridable) makes the test **REGRESSED**
+(a failure, with the offending deltas printed). Improvements never fail. Re-accept the baseline on a
+new known-good commit to move it.
+
+**Setting all baselines at once** (e.g. when a new stable release lands): `run --suite all
+--accept-baseline` runs every test and writes each one's baseline in a single pass (the gate is
+skipped while accepting). A suite run skips and continues past tests it cannot run — a route not yet
+recorded, say — rather than aborting, so one unrecorded route does not stop the rest; those show as
+SKIPPED and the run exits non-zero to flag that not everything baselined.
+
+`report [--suite all|bugs]` prints one table — `test | status | busy | p99 | Δbusy | Δp99 | notes` —
+from each test's latest result, and exits non-zero if anything fails or regressed; `run --suite all`
+emits the same report and writes it to `results/report-<stamp>.md`. This is the "is this merge
+stable?" check.
+
+## A/B and image quality (investigating changes)
+
+`ab <test> --a KEY=VALUE… --b KEY=VALUE…` runs the test under two settings on the current build and
+writes `results/ab/<test>/<stamp>.md`: the metrics side by side (busy, p99, each measured label, with
+Δ and Δ%), and — if the test takes `[[dumps]]` — the **image quality** between the paired dumps
+(MAD, PSNR and SSIM), flagging any below `--min-ssim` (default 0.98) as a quality degradation. Use it
+to judge an RT/optimisation change: e.g. `ab cathedral-goldens --a BB_RTAO=1 --b BB_RTAO=0`, or two
+commits by building each and running `ab` with the same `--a/--b` on each. `--env` on a plain `run`
+makes the same ad-hoc change without touching the recorded reproduction point.
+
+## Event-triggered capture
+
+A `[[dumps]]` entry with `on = "<log substring>"` (instead of `at_ms`) dumps the next frame when that
+line first appears — the YEBIS flicker assert, `Device lost`, an error — and records the event (the
+line and its time) in `result.json`. The capture is the next frame after the marker (within the
+~0.5 s poll), which is right for a multi-frame stall; a single-frame event would need an engine-side
+trigger (future).
+
+## Backing up the library
+
+The library (`~/software/bbport-playtests`) holds the saves, routes, goldens and baselines the gate
+depends on — back it up. `lib-sync [-m msg]` commits it; with a remote configured it also pushes on
+`--push`. It has no remote by default; add a **private** one (never the public fork) before pushing.
 
 ## Engine switches (`src/runtime_pad.c`)
 

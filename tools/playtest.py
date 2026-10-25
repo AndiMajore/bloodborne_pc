@@ -30,6 +30,7 @@ import fcntl
 import json
 import os
 import re
+import copy
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,14 @@ def find_test(lib: Path, name: str) -> Path:
                  lib / "tests" / name, lib / "tests" / "bugs" / name):
         if cand.is_file():
             return cand
+    # Fall back to the `name` field inside the TOMLs (what the summary/report show may differ from
+    # the file stem, e.g. a bug test filed as tests/bugs/<ticket>-<name>.toml).
+    for tp in all_test_paths(lib):
+        try:
+            if ev.load_test(tp).get("name") == name:
+                return tp
+        except Exception:  # noqa: BLE001
+            continue
     raise SystemExit(f"test {name} not found under {lib / 'tests'}")
 
 
@@ -392,9 +401,10 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         env["BB_PAD_REPLAY_END"] = f"quit:{hold_s:g}"
         if loop:
             env["BB_PAD_REPLAY_LOOP"] = str(loop)
-        if dumps:
-            env["BB_PAD_REPLAY_DUMPS"] = ",".join(str(int(d["at_ms"])) for d in dumps)
-            env["BB_PAD_REPLAY_DUMP_KIND"] = dumps[0].get("kind", "final")
+        timed = [d for d in dumps if "at_ms" in d]   # engine fires these; 'on' dumps fire from here
+        if timed:
+            env["BB_PAD_REPLAY_DUMPS"] = ",".join(str(int(d["at_ms"])) for d in timed)
+            env["BB_PAD_REPLAY_DUMP_KIND"] = timed[0].get("kind", "final")
     env["BB_DUMP_DIR"] = str(results / "dumps_raw")
     env["BB_FINAL_DUMP_TRIGGER"] = str(results / "final_trigger")
     env["BB_PRESENT_DUMP_TRIGGER"] = str(results / "present_trigger")
@@ -408,6 +418,19 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
     user_dir = OUT / "playtest_user"
     prepare_user(lib, test["save"], test.get("settings", {}), user_dir, reset=args.reset_user)
     env["BB_USER_DIR"] = str(user_dir)
+    # The test's [effects] (e.g. ssr = 1) are game-effect toggles that live only in bbport.ini — no
+    # env var sets them. Copy the real bbport.ini, apply the overrides, and point BB_CONFIG at the
+    # copy so the test controls the effects it needs without touching the player's config.
+    effects = test.get("effects") or {}
+    if effects:
+        base_ini = Path(env.get("BB_CONFIG") or (PORT / "bbport.ini"))
+        text = base_ini.read_text() if base_ini.is_file() else ""
+        for k, v in effects.items():
+            text = set_ini(text, f"effect_{k}", "1" if str(v).lower() in ("1", "true", "on") else "0")
+        (user_dir / "bbport.ini").write_text(text)
+        env["BB_CONFIG"] = str(user_dir / "bbport.ini")
+        print(f"[{name}] effects: " + ", ".join(f"{k}={v}" for k, v in effects.items())
+              + " (scratch bbport.ini)")
     (results / "dumps_raw").mkdir()
     # Today's restart.sh hard-sets BB_DUMP_DIR=out/present and the triggers to out/*_trigger,
     # overriding the env above. So the legacy dump path fires those files and collects from
@@ -484,11 +507,24 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         if not pid_alive(pid):
             timing["process_ended"] = True
             break
-        if replay_wall and not watch.has("Runtime: pad replay dump at"):
+        if replay_wall:
             for i, d in enumerate(dumps):
-                if i not in legacy_dumps_fired and now - replay_wall >= d["at_ms"] / 1000:
+                if i in legacy_dumps_fired:
+                    continue
+                trig = legacy_final if d.get("kind", "final") == "final" else legacy_present
+                if "at_ms" in d and not watch.has("Runtime: pad replay dump at") \
+                        and now - replay_wall >= d["at_ms"] / 1000:
                     legacy_dumps_fired.add(i)
-                    (legacy_final if d.get("kind", "final") == "final" else legacy_present).touch()
+                    trig.touch()
+                elif d.get("on"):   # event-triggered: dump the next frame when the marker first appears
+                    hit = next((ln for ln in watch.lines if d["on"] in ln), None)
+                    if hit is not None:
+                        legacy_dumps_fired.add(i)
+                        trig.touch()
+                        run.setdefault("events", []).append(
+                            {"reason": d["on"], "name": d.get("name", f"dump{i}"),
+                             "at_s": round(now - t0, 2), "line": hit.strip()[:200]})
+                        print(f"[{name}] event '{d['on']}' at {now - t0:.1f} s -> dump {d.get('name', i)}")
         if now > deadline:
             timing["note"] = "the replay did not finish in time"
             break
@@ -554,9 +590,22 @@ def finish(lib, test, test_path, results: Path, run: dict, watch: LogWatch, args
         for png in (results / "dumps").glob("*.png"):
             shutil.copy2(png, golden / png.name)
             print(f"[{name}] golden accepted: {golden / png.name}")
+    if getattr(args, "accept_baseline", False) and result["status"] in ("pass", "fail"):
+        bdir = lib / "baselines"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / f"{name}.json").write_text(json.dumps(ev.baseline_from_result(result), indent=1) + "\n")
+        print(f"[{name}] baseline accepted -> baselines/{name}.json")
     print(ev.summary_markdown(result), end="")
     print(f"[{name}] {result['status']} -> {results}")
-    return result["exit_code"], result["status"]
+    return result["exit_code"], result["status"], results
+
+
+def skip_reason(lib: Path, test: dict) -> str:
+    """Why a suite test was skipped (shown in the summary)."""
+    route = test.get("route")
+    if route and not (lib / "routes" / f"{route}.pad").is_file():
+        return f"route '{route}' not recorded — tools/playtest.py record {test['name']}"
+    return "could not start"
 
 
 def cmd_run(args) -> int:
@@ -576,25 +625,217 @@ def cmd_run(args) -> int:
         print("another playtest runner holds out/playtest.lock", file=sys.stderr)
         return ev.EXIT_TOOL
     worst = ev.EXIT_PASS
-    roll: list[tuple[str, str]] = []
+    roll: list[tuple[str, str, str]] = []
     for test_path in tests:
-        name = ev.load_test(test_path)["name"]
+        test = ev.load_test(test_path)
+        name = test["name"]
+        run_results = []
+        statuses = []
+        reason = ""
         for _ in range(args.repeat):
             foreign = foreign_game_running()
             if foreign:
                 print(f"a game these tools did not start is running (pid {foreign}): no playtest", file=sys.stderr)
                 return ev.EXIT_TOOL
-            code, status = run_once(lib, test_path, args)
-            roll.append((name, status))
+            try:
+                code, status, rdir = run_once(lib, test_path, args)
+            except SystemExit as e:   # e.g. a route not recorded yet — skip it, keep the suite going
+                code = e.code if isinstance(e.code, int) else ev.EXIT_INVALID
+                statuses.append("skipped")
+                reason = e.code if isinstance(e.code, str) else skip_reason(lib, test)
+                worst = max(worst, code) if code != ev.EXIT_TOOL else ev.EXIT_TOOL
+                break
+            statuses.append(status)
             worst = max(worst, code) if code != ev.EXIT_TOOL else ev.EXIT_TOOL
+            try:
+                run_results.append(json.loads((rdir / "result.json").read_text()))
+            except (OSError, ValueError):
+                pass
+        status = next((s for s in ("crash", "fail", "invalid", "skipped") if s in statuses), "pass")
+        if not reason and run_results:   # why a non-pass run ended up that way
+            r = run_results[-1]
+            reason = "; ".join(r.get("reasons") or r.get("invalid_reasons") or [])
+        # Regression gate: the median of this invocation's repeats vs the accepted baseline.
+        base_file = lib / "baselines" / f"{name}.json"
+        if run_results and base_file.is_file() and not getattr(args, "accept_baseline", False):
+            pct = float(test.get("criteria", {}).get("regression_pct", 5.0))
+            regs = ev.check_baseline(ev.aggregate_metrics(run_results), json.loads(base_file.read_text()), pct)
+            if regs:
+                status, reason = "regressed", "; ".join(regs)
+                worst = max(worst, ev.EXIT_FAIL)
+                print(f"[{name}] REGRESSED vs baseline:")
+                for r in regs:
+                    print(f"    {r}")
+        roll.append((name, status, reason))
     if len(roll) > 1:
-        passed = sum(1 for _, s in roll if s == "pass")
+        passed = sum(1 for _, s, _ in roll if s == "pass")
         print("\n=== playtest summary ===")
-        for n, s in roll:
-            print(f"  {'PASS' if s == 'pass' else s.upper():7} {n}")
+        for n, s, why in roll:
+            line = f"  {'PASS' if s == 'pass' else s.upper():9} {n}"
+            print(f"{line}  — {why}" if why else line)
         verdict = "all passed" if passed == len(roll) else f"{len(roll) - passed} not passing"
         print(f"{passed}/{len(roll)} passed — {verdict}")
+    if args.suite:
+        md, _ = build_report(lib, tests)
+        stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        (lib / "results").mkdir(exist_ok=True)
+        (lib / "results" / f"report-{stamp}.md").write_text(md)
+        print(f"\nreport written to results/report-{stamp}.md")
     return worst
+
+
+def build_report(lib: Path, test_paths: list) -> tuple:
+    """One markdown table across tests — status, busy, p99, deltas vs baseline, notes — from each
+    test's latest result. Returns (markdown, any_fail). A pass that regressed past its baseline is
+    reported as REGRESSED and counts as a failure."""
+    rows = []
+    any_fail = False
+    for tp in test_paths:
+        test = ev.load_test(tp)
+        name = test["name"]
+        runs = sorted((lib / "results" / name).glob("*/result.json"))
+        if not runs:
+            rows.append((name, "never run", "", "", "", "", ""))
+            continue
+        r = json.loads(runs[-1].read_text())
+        busy = r["gpu_profile"]["busy_ms_median"]
+        p99 = (r.get("frames") or {}).get("p99_ms")
+        status, note, db, dp = r["status"], "; ".join(r.get("reasons", [])), "", ""
+        base_file = lib / "baselines" / f"{name}.json"
+        if base_file.is_file():
+            baseline = json.loads(base_file.read_text())
+            pct = float(test.get("criteria", {}).get("regression_pct", 5.0))
+            regs = ev.check_baseline(ev.baseline_from_result(r), baseline, pct)
+            if baseline.get("busy_ms") and busy:
+                db = f"{(busy - baseline['busy_ms']) / baseline['busy_ms'] * 100:+.0f}%"
+            if baseline.get("p99_ms") and p99:
+                dp = f"{(p99 - baseline['p99_ms']) / baseline['p99_ms'] * 100:+.0f}%"
+            if regs and status == "pass":
+                status, note = "regressed", "; ".join(regs)
+        if status in ("fail", "crash", "regressed"):
+            any_fail = True
+        rows.append((name, status, busy, p99, db, dp, note))
+    out = ["# Playtest report", "",
+           "| test | status | busy ms | p99 ms | Δbusy | Δp99 | notes |",
+           "|---|---|---|---|---|---|---|"]
+    for name, status, busy, p99, db, dp, note in rows:
+        out.append(f"| {name} | {str(status).upper()} | {busy} | {p99} | {db} | {dp} | {note} |")
+    return "\n".join(out) + "\n", any_fail
+
+
+def cmd_report(args) -> int:
+    lib = library(args.lib)
+    if args.suite:
+        tests = sorted((lib / "tests" / args.suite).glob("*.toml")) if args.suite != "all" else \
+            sorted(list((lib / "tests").glob("*.toml")) + list((lib / "tests" / "bugs").glob("*.toml")))
+    else:
+        tests = all_test_paths(lib)
+    md, any_fail = build_report(lib, tests)
+    print(md, end="")
+    return ev.EXIT_FAIL if any_fail else ev.EXIT_PASS
+
+
+def format_ab(name: str, args, runs: dict, test: dict) -> tuple:
+    """Markdown diff of two runs: metrics side by side, then (if the test dumps) per-image quality
+    (MAD/PSNR/SSIM) between the paired dumps. Returns (markdown, degraded)."""
+    (ra, da), (rb, db) = runs["A"], runs["B"]
+
+    def busy(r):
+        return r["gpu_profile"]["busy_ms_median"]
+
+    def p99(r):
+        return (r.get("frames") or {}).get("p99_ms")
+
+    out = [f"# A/B — {name}", "",
+           f"A: {' '.join(args.a or []) or 'defaults'}", f"B: {' '.join(args.b or []) or 'defaults'}",
+           "", "| metric | A | B | Δ | Δ% |", "|---|---|---|---|---|"]
+
+    def row(label, a, b):
+        d = dpct = ""
+        if a is not None and b is not None:
+            d = round(b - a, 3)
+            if a:
+                dpct = f"{(b - a) / a * 100:+.0f}%"
+        out.append(f"| {label} | {a} | {b} | {d} | {dpct} |")
+
+    row("busy ms", busy(ra), busy(rb))
+    row("p99 ms", p99(ra), p99(rb))
+    labels = list(ra["gpu_profile"]["labels"])
+    labels += [k for k in rb["gpu_profile"]["labels"] if k not in labels]
+    for lbl in labels:
+        row(f"{lbl} ms", ra["gpu_profile"]["labels"].get(lbl, {}).get("ms_median"),
+            rb["gpu_profile"]["labels"].get(lbl, {}).get("ms_median"))
+
+    degraded = False
+    img_rows = []
+    for i, d in enumerate(test.get("dumps", [])):
+        nm = d.get("name", f"dump{i}")
+        pa, pb = da / "dumps" / f"{nm}.png", db / "dumps" / f"{nm}.png"
+        if pa.exists() and pb.exists():
+            q = ev.compare_image(pa, pb, test.get("masks"))
+            ssim = q.get("ssim")
+            ok = ssim is None or ssim >= args.min_ssim
+            degraded = degraded or not ok
+            img_rows.append(f"| {nm} | {q.get('mad')} | {q.get('psnr')} | {ssim} | "
+                            f"{'ok' if ok else 'DEGRADED'} |")
+    if img_rows:
+        out += ["", f"Image quality A vs B (flag ssim < {args.min_ssim}):", "",
+                "| image | mad | psnr | ssim | ok |", "|---|---|---|---|---|"] + img_rows
+    return "\n".join(out) + "\n", degraded
+
+
+def cmd_ab(args) -> int:
+    lib = library(args.lib)
+    if foreign_game_running():
+        print("a game these tools did not start is running: no A/B", file=sys.stderr)
+        return ev.EXIT_TOOL
+    test_path = find_test(lib, args.target)
+    test = ev.load_test(test_path)
+    name = test["name"]
+    runs = {}
+    for tag, envset in (("A", args.a or []), ("B", args.b or [])):
+        if foreign_game_running():
+            return ev.EXIT_TOOL
+        sub = copy.copy(args)
+        sub.env, sub.accept_goldens, sub.accept_baseline = envset, False, False
+        print(f"\n=== A/B {name}: side {tag} ({' '.join(envset) or 'defaults'}) ===")
+        _, _, rdir = run_once(lib, test_path, sub)
+        try:
+            runs[tag] = (json.loads((rdir / "result.json").read_text()), rdir)
+        except (OSError, ValueError):
+            print(f"side {tag} produced no result", file=sys.stderr)
+            return ev.EXIT_TOOL
+    md, degraded = format_ab(name, args, runs, test)
+    outdir = lib / "results" / "ab" / name
+    outdir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    (outdir / f"{stamp}.md").write_text(md)
+    print("\n" + md, end="")
+    print(f"A/B written to results/ab/{name}/{stamp}.md")
+    return ev.EXIT_FAIL if degraded else ev.EXIT_PASS
+
+
+def cmd_lib_sync(args) -> int:
+    lib = library(args.lib)
+    if not (lib / ".git").exists():
+        print(f"{lib} is not a git repository", file=sys.stderr)
+        return ev.EXIT_TOOL
+    git = ["git", "-C", str(lib)]
+    remote = subprocess.run([*git, "remote"], capture_output=True, text=True).stdout.strip()
+    subprocess.run([*git, "add", "-A"], check=False)
+    msg = args.message or f"playtests snapshot {dt.datetime.now():%Y-%m-%d %H:%M}"
+    c = subprocess.run([*git, "commit", "-m", msg], capture_output=True, text=True)
+    print((c.stdout + c.stderr).strip())
+    if not remote:
+        print(f"no remote on {lib}; add a private one, then re-run with --push to back it up",
+              file=sys.stderr)
+        return ev.EXIT_PASS
+    if args.push:
+        p = subprocess.run([*git, "push"], capture_output=True, text=True)
+        print((p.stdout + p.stderr).strip())
+    else:
+        print("committed locally; pass --push to push to the remote")
+    return ev.EXIT_PASS
 
 
 def cmd_eval(args) -> int:
@@ -864,7 +1105,13 @@ def record_route(lib: Path, route: str, save: str, args, interactive: bool):
     prepare_user(lib, save, {}, user_dir)
     env["BB_USER_DIR"] = str(user_dir)
     info = git_info()
-    print(f"spawning on save '{save}'; the game starts and enters the level by itself")
+    # Print the how-to BEFORE launching: once the game window is up the player is looking at it,
+    # not the console.
+    print(f"\nspawning on save '{save}'; the game launches and loads the level by itself.")
+    print("how to record (switch to the game; nothing records until you press F9):")
+    print("  1) Get set at the spawn, then press F9 to START.")
+    print("  2) Play the route, pausing 2 s at each checkpoint; come back and stand 2 s.")
+    print("  3) Press F9 again to STOP.\n")
     watch = LogWatch(OUT / "session.log")
     timing: dict = {}
     pid, level, out = start_game(env, route, watch, timing)
@@ -872,10 +1119,6 @@ def record_route(lib: Path, route: str, save: str, args, interactive: bool):
         print(f"the level was not reached: {timing.get('note', out.strip()[-300:])}", file=sys.stderr)
         stop_own()
         return ev.EXIT_TOOL
-    print("\nlevel reached — how to record:")
-    print("  1) Get set at the spawn (nothing is recorded yet), then press F9 to START.")
-    print("  2) Play the route, pausing 2 s at each checkpoint; come back and stand 2 s.")
-    print("  3) Press F9 again to STOP.\n")
     started = None
     while pid_alive(pid):
         watch.poll()
@@ -963,6 +1206,14 @@ def set_scalar(text: str, key: str, value) -> str:
         return line_re.sub(lambda m: newline, text, count=1)
     anchor = re.search(r"(?m)^(description|name) *=.*\n", text)   # insert new keys near the top
     return text[:anchor.end()] + newline + text[anchor.end():] if anchor else newline + text
+
+
+def set_ini(text: str, key: str, value: str) -> str:
+    """Set `key=value` in a bbport.ini (replace the line or append it), leaving the rest intact."""
+    line_re = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
+    if line_re.search(text):
+        return line_re.sub(f"{key}={value}", text, count=1)
+    return (text if not text or text.endswith("\n") else text + "\n") + f"{key}={value}\n"
 
 
 def cmd_edit(args) -> int:
@@ -1156,6 +1407,8 @@ def main(argv=None) -> int:
     p.add_argument("--suite", help="all tests of tests/<suite>/ (e.g. bugs), or 'all'")
     p.add_argument("--repeat", type=int, default=1)
     p.add_argument("--accept-goldens", action="store_true", help="store this run's dumps as the golden images")
+    p.add_argument("--accept-baseline", action="store_true",
+                   help="store this run's metrics as the baseline the regression gate compares against")
     p.add_argument("--keep-raw", action="store_true")
     p.add_argument("--reset-user", action="store_true", help="recreate out/playtest_user from user/")
     p.add_argument("--env", action="append", metavar="KEY=VALUE",
@@ -1199,6 +1452,21 @@ def main(argv=None) -> int:
     p.add_argument("target", help="the test to delete")
     p.add_argument("--yes", action="store_true", help="delete without confirming")
     p.set_defaults(func=cmd_remove)
+    p = sub.add_parser("report", help="one table across the suite: status + metrics + Δ vs baseline")
+    p.add_argument("--suite", help="all tests of tests/<suite>/ (e.g. bugs), or 'all' (default: every test)")
+    p.set_defaults(func=cmd_report)
+    p = sub.add_parser("ab", help="run a test under two --env settings and diff metrics + image quality")
+    p.add_argument("target", help="the test to A/B")
+    p.add_argument("--a", action="append", metavar="KEY=VALUE", help="side A setting (repeatable)")
+    p.add_argument("--b", action="append", metavar="KEY=VALUE", help="side B setting (repeatable)")
+    p.add_argument("--min-ssim", type=float, default=0.98, help="flag paired dumps below this SSIM (default 0.98)")
+    p.add_argument("--keep-raw", action="store_true")
+    p.add_argument("--reset-user", action="store_true")
+    p.set_defaults(func=cmd_ab)
+    p = sub.add_parser("lib-sync", help="commit the playtest library (and --push if it has a remote)")
+    p.add_argument("-m", "--message", help="commit message")
+    p.add_argument("--push", action="store_true", help="push to the library's remote after committing")
+    p.set_defaults(func=cmd_lib_sync)
     args = ap.parse_args(argv)
     return args.func(args)
 

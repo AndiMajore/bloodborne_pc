@@ -465,6 +465,103 @@ class WizardTests(unittest.TestCase):
             self.assertEqual(pt.cmd_record(args), ev.EXIT_INVALID)
 
 
+class GateAndQualityTests(unittest.TestCase):
+    """Baseline regression gate, repeat aggregation, image-quality metrics, report, A/B."""
+
+    def _result(self, busy, p99, labels=None, status="pass"):
+        return {"commit": "c", "status": status, "reasons": [],
+                "gpu_profile": {"busy_ms_median": busy, "labels": labels or {}},
+                "frames": {"p99_ms": p99}}
+
+    def test_check_baseline(self):
+        base = {"busy_ms": 10.0, "p99_ms": 20.0, "labels": {"ssgi": {"ms_median": 1.0, "per_call_us_median": None}}}
+        self.assertEqual(ev.check_baseline({"busy_ms": 10.2, "p99_ms": 20.0,
+                                            "labels": {"ssgi": {"ms_median": 1.02}}}, base, 5), [])
+        bad = ev.check_baseline({"busy_ms": 12.0, "p99_ms": 20.0,
+                                 "labels": {"ssgi": {"ms_median": 1.3}}}, base, 5)
+        self.assertTrue(any("GPU busy" in r for r in bad))
+        self.assertTrue(any("ssgi" in r for r in bad))
+        # an improvement (faster) never fails
+        self.assertEqual(ev.check_baseline({"busy_ms": 8.0, "p99_ms": 18.0, "labels": {}}, base, 5), [])
+
+    def test_aggregate_metrics_median(self):
+        rs = [self._result(10, 20, {"ssgi": {"ms_median": 1.0, "per_call_us_median": 40}}),
+              self._result(12, 22, {"ssgi": {"ms_median": 2.0, "per_call_us_median": 60}}),
+              self._result(11, 21, {"ssgi": {"ms_median": 1.5, "per_call_us_median": 50}})]
+        m = ev.aggregate_metrics(rs)
+        self.assertEqual((m["busy_ms"], m["p99_ms"]), (11, 21))
+        self.assertEqual(m["labels"]["ssgi"]["ms_median"], 1.5)
+
+    def test_image_quality_psnr_ssim(self):
+        from PIL import Image
+        import numpy as np
+        with tempfile.TemporaryDirectory() as d:
+            arr = np.random.default_rng(0).integers(0, 255, (40, 40, 3)).astype("uint8")
+            a, b, c = (Path(d) / n for n in ("a.png", "b.png", "c.png"))
+            Image.fromarray(arr).save(a)
+            Image.fromarray(arr).save(b)
+            Image.fromarray(np.clip(arr.astype(int) + 40, 0, 255).astype("uint8")).save(c)
+            same = ev.compare_image(a, b)
+            self.assertGreaterEqual(same["ssim"], 0.99)
+            self.assertGreaterEqual(same["psnr"], 98)
+            worse = ev.compare_image(a, c)
+            self.assertLess(worse["ssim"], same["ssim"])
+            self.assertLess(worse["psnr"], 98)
+
+    def test_build_report_marks_regression(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib = Path(d)
+            (lib / "tests").mkdir(); (lib / "baselines").mkdir()
+            (lib / "tests" / "t.toml").write_text('name = "t"\nsave = "s"\n')
+            rd = lib / "results" / "t" / "20260101_000000"
+            rd.mkdir(parents=True)
+            (rd / "result.json").write_text(json.dumps(self._result(13.0, 25.0)))
+            (lib / "baselines" / "t.json").write_text(json.dumps({"busy_ms": 10.0, "p99_ms": 20.0, "labels": {}}))
+            md, any_fail = pt.build_report(lib, [lib / "tests" / "t.toml"])
+            self.assertTrue(any_fail)
+            self.assertIn("REGRESSED", md)
+            self.assertIn("+30%", md)   # busy 10 -> 13
+
+    def test_run_suite_skips_routeless_and_continues(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib = Path(d)
+            (lib / "tests" / "bugs").mkdir(parents=True)
+            (lib / "env").mkdir()
+            (lib / "env" / "default.env").write_text("BB_HDR=1\n")
+            (lib / "tests" / "a.toml").write_text('name = "a"\nsave = "s"\nroute = "ra"\n')
+            (lib / "tests" / "b.toml").write_text('name = "b"\nsave = "s"\nroute = "rb"\n')
+            orig_lib, orig_fg = pt.library, pt.foreign_game_running
+            pt.library = lambda x: lib
+            pt.foreign_game_running = lambda: None
+            self.addCleanup(lambda: (setattr(pt, "library", orig_lib),
+                                     setattr(pt, "foreign_game_running", orig_fg)))
+            args = type("A", (), {"lib": None, "suite": "all", "tests": [], "repeat": 1,
+                                  "accept_goldens": False, "accept_baseline": False,
+                                  "keep_raw": False, "reset_user": False, "env": None})()
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = pt.cmd_run(args)                # no game launches: both raise 'route not recorded'
+            self.assertEqual(rc, ev.EXIT_INVALID)    # skipped, not aborted
+            self.assertEqual(buf.getvalue().upper().count("SKIPPED"), 2)
+
+    def test_set_ini_override(self):
+        base = "effect_ssao=1\neffect_ssr=0\nupscaler=fsr3\n"
+        out = pt.set_ini(base, "effect_ssr", "1")
+        self.assertIn("effect_ssr=1", out)
+        self.assertNotIn("effect_ssr=0", out)
+        self.assertIn("effect_ssao=1", out)        # other settings untouched
+        self.assertIn("upscaler=fsr3", out)
+        self.assertEqual(pt.set_ini("", "effect_ssr", "1"), "effect_ssr=1\n")   # append to empty
+
+    def test_format_ab_metrics_diff(self):
+        a = self._result(10.0, 20.0, {"ssgi": {"ms_median": 1.0}})
+        b = self._result(12.0, 20.0, {"ssgi": {"ms_median": 1.5}})
+        args = type("A", (), {"a": ["BB_RTAO=1"], "b": ["BB_RTAO=0"], "min_ssim": 0.98})()
+        md, degraded = pt.format_ab("t", args, {"A": (a, Path("/x")), "B": (b, Path("/y"))}, {"dumps": []})
+        self.assertFalse(degraded)                 # no dumps -> no image check
+        self.assertIn("| busy ms | 10.0 | 12.0 | 2.0 | +20% |", md)
+
+
 class LauncherEnvTests(unittest.TestCase):
     """launcher_env() reads the launcher's live settings (or returns None to fall back)."""
 
@@ -667,6 +764,22 @@ class EditRemoveTests(unittest.TestCase):
             self.assertEqual(calls, [])             # nothing launched
             # the save field was still written; the route is flagged out of sync by the message
             self.assertEqual(ev.load_test(lib / "tests" / "foo.toml")["save"], "stakes")
+
+    def test_find_and_remove_by_name_field(self):
+        # A bug test filed as tests/bugs/<ticket>-<name>.toml: the summary shows the `name` field,
+        # which differs from the file stem; find_test (and so remove) must resolve by that name.
+        with tempfile.TemporaryDirectory() as d:
+            lib = self._lib(d)
+            (lib / "tests" / "bugs" / "rt-x-shadow-flicker.toml").write_text(
+                'name = "shadow-flicker"\nsave = "lamp"\nroute = "shadow-flicker"\n')
+            for ext in ("pad", "camera", "toml", "env"):
+                (lib / "routes" / f"shadow-flicker.{ext}").write_text("x")
+            self.assertEqual(pt.find_test(lib, "shadow-flicker").name, "rt-x-shadow-flicker.toml")
+            orig = pt.library; pt.library = lambda x: lib; self.addCleanup(lambda: setattr(pt, "library", orig))
+            iso = pt._isatty; pt._isatty = lambda: False; self.addCleanup(lambda: setattr(pt, "_isatty", iso))
+            rc = pt.cmd_remove(self._args(lib, target="shadow-flicker", yes=True))
+            self.assertEqual(rc, ev.EXIT_PASS)
+            self.assertFalse((lib / "tests" / "bugs" / "rt-x-shadow-flicker.toml").exists())
 
     def test_remove_keeps_shared_route_and_save(self):
         with tempfile.TemporaryDirectory() as d:
