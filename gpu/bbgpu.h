@@ -57,6 +57,9 @@ void bbgpu_add_pad_filter(BbGpuPadFilter filter);
 void bbgpu_filter_pad(uint32_t *buttons, const uint8_t *sticks);
 /* The shown frame's width / height (the display buffer's; the window letterboxes it). */
 float bbgpu_frame_aspect(void);
+/* Cumulative counters for a scene-loaded check (runtime_pad.c): frames presented and total draws.
+ * Both are monotonic; the caller takes per-second deltas to get draws/frame. */
+void bbgpu_frame_counters(uint64_t *frames, uint64_t *draws);
 /* A line of text over the game, near the bottom, until called with NULL (any thread). */
 void bbgpu_overlay_banner(const char *utf8);
 /* Trophies (gpu/shim/bbport_trophies.cpp): setup takes the game's sce_sys folder and the user

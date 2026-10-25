@@ -1077,6 +1077,8 @@ static void sample_host(PadData *d) {
 static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; } injected={0,{-1,-1,-1,-1},-1,{0,0}};
 static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
+static uint64_t replay_finished_us; /* when the replay ended (us); drives BB_PAD_REPLAY_END */
+static void replay_end_tick(void);
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
     if (!checked) { path=getenv("BB_PAD_FILE"); checked=1; }
@@ -1125,6 +1127,16 @@ typedef struct { uint32_t ms, buttons; uint8_t axes[4], l2, r2; } PadSample;
 static FILE *record_file;
 static uint64_t record_start;
 static PadSample record_last;
+static void record_open(void) {    /* open BB_PAD_RECORD for writing (F9 or autostart); mono anchors the camera track */
+    static const char *path; static int checked;
+    if (!checked) { path=getenv("BB_PAD_RECORD"); checked=1; }
+    if (!path || !*path || record_file) return;
+    if ((record_file=fopen(path,"w"))) {
+        record_start=now_us();
+        memset(&record_last,0xff,sizeof(record_last));
+        printf("Runtime: pad recording started (%s, F9 stops; mono %.3f s)\n",path,now_us()/1e6);
+    }
+}
 static void record_sample(const PadData *d) {
     static const char *path; static int checked, f9_was_down;
     if (!checked) { path=getenv("BB_PAD_RECORD"); checked=1; }
@@ -1135,11 +1147,7 @@ static void record_sample(const PadData *d) {
         if (record_file) {
             fclose(record_file); record_file=NULL;
             printf("Runtime: pad recording stopped (%s)\n",path);
-        } else if ((record_file=fopen(path,"w"))) {
-            record_start=now_us();
-            memset(&record_last,0xff,sizeof(record_last));
-            printf("Runtime: pad recording started (%s, F9 stops)\n",path);
-        }
+        } else record_open();
     }
     f9_was_down=f9;
     if (!record_file) return;
@@ -1172,12 +1180,14 @@ static void replay_sample(PadData *d) {
         }
         replay_start=now_us();
         replay_next=0;
+        printf("Runtime: pad replay started (mono %.3f s)\n",replay_start/1e6);
     }
     const uint32_t ms=(uint32_t)((now_us()-replay_start)/1000);
     while (replay_next<replay_count && replay[replay_next].ms<=ms) ++replay_next;
     if (!replay_next) return;
     if (replay_next==replay_count && ms>replay[replay_count-1].ms+500) {
-        if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; }
+        if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; replay_finished_us=now_us(); }
+        replay_end_tick();
         return;
     }
     const PadSample *s=&replay[replay_next-1];
@@ -1200,9 +1210,59 @@ static void touch_ids(PadData *d) {
     else if (!since) since=d->timestamp;
     d->touch_held_time=d->touch_count ? (uint32_t)(d->timestamp-since) : 0;
 }
+/* Playtest replay autostart (tools/playtest.py): once the scene has loaded, arm a BB_PAD_REPLAY
+ * replay by itself (no "replay" token) and optionally quit at the end, so a run needs no hand
+ * timing. "Scene loaded" = two consecutive ~1 s windows over BB_PAD_SCENE_DRAWS draws/frame (the
+ * threshold tools/restart.sh polls, the same counter the frame-stats line reports). Recording is
+ * deliberately F9-started (the player controls when it begins), not autostarted. */
+static int scene_loaded(uint64_t now) {
+    static uint64_t last_sample, last_frames, last_draws; static int ok, threshold=-1;
+    if (threshold<0) { const char *v=getenv("BB_PAD_SCENE_DRAWS"); threshold=v && *v ? atoi(v) : 600; }
+    if (last_sample && now-last_sample<1000000) return ok>=2;
+    uint64_t frames=0, draws=0; bbgpu_frame_counters(&frames,&draws);
+    if (last_sample) {
+        const uint64_t df=frames-last_frames;
+        const double dpf=df ? (double)(draws-last_draws)/(double)df : 0.0;
+        if (dpf>threshold) { if (ok<2) ++ok; } else ok=0;
+    }
+    last_sample=now; last_frames=frames; last_draws=draws;
+    return ok>=2;
+}
+static void pad_autostart_at(uint64_t now) {
+    static int checked, want_replay, done; static unsigned delay; static uint64_t ready_at;
+    if (!checked) {
+        checked=1;
+        const char *r=getenv("BB_PAD_REPLAY_AUTOSTART"); want_replay=r && *r=='1';
+        const char *rd=getenv("BB_PAD_REPLAY_DELAY_MS"); delay=rd && *rd ? (unsigned)atoi(rd) : 3000;
+    }
+    if (!want_replay || done) return;
+    if (!scene_loaded(now)) return;
+    if (!ready_at) ready_at=now;
+    const unsigned waited=(unsigned)((now-ready_at)/1000);
+    if (waited>=delay) {
+        done=1;
+        if (replay_armed!=1) { replay_armed=1; replay_start=0;
+            printf("Runtime: pad replay armed (autostart, %u ms after scene load)\n",waited); }
+    }
+}
+static void pad_autostart(void) { pad_autostart_at(now_us()); }
+static void replay_end_tick(void) {  /* BB_PAD_REPLAY_END=quit[:hold_s]: quit the game a while after the replay ends */
+    static int checked, want_quit, quit_sent; static unsigned hold_ms;
+    if (!checked) {
+        checked=1;
+        const char *v=getenv("BB_PAD_REPLAY_END");
+        if (v && !strncmp(v,"quit",4)) { want_quit=1; const char *c=strchr(v,':'); hold_ms=c ? (unsigned)(atof(c+1)*1000) : 5000; }
+    }
+    if (!want_quit || quit_sent || !replay_finished_us) return;
+    if ((now_us()-replay_finished_us)/1000 < hold_ms) return;
+    quit_sent=1;
+    SDL_Event quit={0}; quit.type=SDL_EVENT_QUIT; SDL_PushEvent(&quit);
+    puts("Runtime: pad replay end: quit requested");
+}
 static void sample(PadData *d) {
     sample_host(d);
     if (bbgpu_overlay_captures_input()) return;
+    pad_autostart();
     record_sample(d);
     read_inject();
     replay_sample(d);

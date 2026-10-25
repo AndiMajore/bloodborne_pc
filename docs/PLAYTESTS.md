@@ -1,0 +1,169 @@
+# Replay playtests
+
+Reproducible test runs of the game: a frozen save, a recorded pad route, the port's own logging,
+frame dumps, and an evaluator that turns them into pass / fail / invalid. The runner and the
+engine switches live here; the saves, routes, test definitions and golden images live in a
+separate private library (`--lib`, `$BB_PLAYTESTS`, default `../bbport-playtests`), because they
+are the player's own game data.
+
+```
+tools/playtest.py run <test> [--repeat N] [--accept-goldens] [--suite bugs|all] [--env KEY=VALUE]
+tools/playtest.py eval <results-dir>        evaluate a run again
+tools/playtest.py compare <test> [--last N] medians of the last runs by commit
+tools/playtest.py record [<name>]           create a playtest, or record a test's route (wizard)
+tools/playtest.py edit <name>               change a playtest's save/description/ticket/env/delay
+tools/playtest.py remove <name>             delete a playtest (keeps the frozen save)
+tools/playtest.py saves                      list the frozen saves and where they are
+tools/playtest.py list
+tools/playtest_eval.py <results-dir> --test <toml> [--lib <dir>]
+```
+
+## How a run works
+
+1. The runner refuses when a `bb-probe` it did not start is running (the player's session), and
+   takes `out/playtest.lock`.
+2. `out/playtest_user/` is the player's `user/` without its saves (made once, so the shader and
+   pipeline caches stay warm); the test's frozen save is copied into it before every run and the
+   test's `[settings.*]` tables are written into its live files (`rtao.txt`, `ssgi.txt`,
+   `rtlighting.txt`, `rtreflect.txt`, `rtprobes.txt`). The player's `user/` is never touched.
+3. The environment, outermost last: the **reproduction point** — `routes/<route>.env`, the launcher
+   settings captured when the route was recorded (fullscreen, HDR, mods, patches, shader packs), so a
+   replay matches what was recorded; a test with no such snapshot (older or stand tests) falls back to
+   `env/<env_base>.env` windowed as before. Then the measurement instrumentation (`BB_FRAME_STATS=1
+   BB_GPU_PROFILE=1 BB_CAMERA_LOG=1 BB_FAULT_WAIT=0 BB_SAVE_LOG=0`, `BB_FRAME_LOG` into the results
+   folder, `BB_TIMEOUT` as a hard cap) — logging only, nothing that changes rendering — then the
+   replay variables, then the test's `[env]`, then any `--env KEY=VALUE` overrides. So the default is
+   an exact reproduction, and `[env]`/`--env` are for investigating with settings changed on purpose.
+4. `tools/restart.sh` starts the game, presses cross at the title and returns when the level has
+   loaded (`Frame stats` with more than 600 draws a frame, plus 10 s).
+5. The replay. With the engine switches below the engine arms it itself after the level and
+   quits itself after the route; with an older engine the runner sends the `replay` token through
+   `BB_PAD_FILE`, touches the dump triggers by wall time and stops the game with `tools/stop_own.sh`
+   (`end_mode: legacy` in `run.json`; the clean-end criterion is then not applied).
+6. `results/<test>/<stamp>/`: `session.log`, `frames.csv`, `run.json` (commit, branch, dirty,
+   environment, timing), `dumps/<name>.png` (raw dumps converted with `magick`), `result.json`,
+   `summary.md`.
+
+## What the evaluator reads
+
+- `GPU profile:` blocks (every 5 s): the median per label and the busy time (total minus the
+  `submission gaps`) over the replay window (the blocks after the replay started, minus the first).
+  Labels are matched by text or by a unique substring; shader hashes without their zero padding
+  (`cs 3d5ebf4e`). `per_call` labels get µs per dispatch (ms/frame ÷ dispatches/frame), and with
+  `split_ms` a before/after median and their ratio (5 s per block from the replay start).
+- `Frame pacing`, `Frame stats` (FPS, shader compiles: more than `max_compiles` during the replay
+  means cold caches and an invalid run), `frames.csv` (median, p95, p99, max of `frame_ms`).
+- `Camera:` lines against the route's `.camera` track at the test's checkpoints: a distance over the
+  tolerance makes the run invalid (off-route), never a failure.
+- `RT reflections: N passes in 600 frames`, `RT reflections: first pass`, `RT governor: level`,
+  `Runtime: pad replay …`, `Final dump`, `Window: closed` + `Exit: GPU work finished` (clean end),
+  error lines (`Fault (signal`, `Device lost`, `STOP`, `Assertion`, `Unimplemented PM4`).
+- Dumps against `golden/<test>/<name>.png`: mean absolute difference per channel and the fraction
+  of pixels with any channel off by more than 8, outside the `[masks]` rectangles (HUD).
+
+Exit codes: 0 pass, 1 fail or crash, 2 invalid, 3 tool error.
+
+## Test definition (`tests/<name>.toml` in the library)
+
+```toml
+name = "cathedral-walk"          # default: the file name
+description = "..."
+ticket = "..."                   # bug tests: the issue this guards
+save = "cathedral"               # saves/<save>/savedata
+route = "cathedral-there-back"   # routes/<route>.pad (+ .camera, .env); omitted: stand for duration_s
+env_base = "default"             # env/<env_base>.env
+duration_s = 90                  # the route's length
+delay_ms = 10000                 # replay start after the level
+hold_s = 5                       # seconds after the route before the quit
+loop = 0                         # extra replays of the route (soak)
+[env]                            # BB_* overrides
+[settings.rtao]                  # live settings files of the scratch user
+[measure]  gpu_labels = [...]  per_call = [...]  split_ms = 25000
+[[checkpoints]]  at_ms = 30000  tolerance_m = 1.5
+[[dumps]]        at_ms = 30000  kind = "final"  name = "cp1"
+[masks]  hud = [x, y, w, h]      # fractions of the output
+[criteria]  crash_free  clean_end  max_busy_ms  max_p99_ms  max_label_ms = {label = ms}
+            per_call_ratio_max = {label = ratio}  min_reflection_passes  require_reflections_first_pass
+            no_error_lines  image_mad_max  image_diff_frac_max  max_compiles  regression_pct
+```
+
+## Engine switches (`src/runtime_pad.c`)
+
+Recording and replay: `BB_PAD_RECORD=<file>` (F9 starts and stops; lines `ms buttons lx ly rx ry l2
+r2`), `BB_PAD_REPLAY=<file>` (started by the token `replay` in `BB_PAD_FILE`), `BB_PAD_FILE` tokens,
+`BB_CAMERA_LOG=1` (`Camera:` every 100 ms), `BB_FINAL_DUMP_TRIGGER` / `BB_PRESENT_DUMP_TRIGGER`
+(a file the engine removes when it dumps the next frame into `BB_DUMP_DIR`).
+
+Replay autostart (so a run needs no `replay` token and quits by itself) arms once the scene has
+loaded — **two consecutive seconds with more than `BB_PAD_SCENE_DRAWS` (default 600) draws a
+frame** — plus a short settle:
+- `BB_PAD_REPLAY_AUTOSTART=1` + `BB_PAD_REPLAY_DELAY_MS` (default **3000**): arms the replay; prints
+  `Runtime: pad replay armed (…)` then `Runtime: pad replay started (mono %.3f s)`.
+- `BB_PAD_REPLAY_END=quit[:hold_s]` (default hold 5): after the route (and `hold_s`), one SDL quit,
+  so the run ends on `Window: closed (quit)` / `Exit: GPU work finished` (a clean end).
+
+Recording is **F9-started** (press F9 to start, F9 again to stop): the player controls when it
+begins, so nothing is missed while getting set at the spawn. The `recording started` line carries
+`mono %.3f s` so a recording's `.camera` track and a later replay's share one anchor. There is no
+record autostart — an autostart timer would fire before the player was ready and drop early inputs.
+
+The runner also passes `BB_LEVEL_SETTLE` (default 3) to `tools/restart.sh` to shorten its own
+post-level settle, since the engine's scene-load check now governs when the replay/recording begins;
+together these bring the start to roughly five seconds after the level loads. Older engines without
+these switches still work — the runner falls back to the `replay` token and stops the game itself.
+
+Still planned (ticket 03): `BB_PAD_REPLAY_LOOP=N`, `BB_PAD_REPLAY_DUMPS=ms,…` +
+`BB_PAD_REPLAY_DUMP_KIND=final|present`, `BB_CAMERA_LOG_MS`, and the `mono`/`frame` fields on the
+`Camera:` line.
+
+## Creating a playtest (the wizard)
+
+Run `tools/playtest.py record` with no arguments at a terminal and it guides you through the whole
+thing:
+
+1. **Name** the playtest (lower-case, digits, dashes). It becomes the test and route name.
+2. **Pick a save** from a numbered menu — each frozen save is shown with where it is (`saves` prints
+   the same list). Option `0` is **"current game state"**: save in-game (a lamp, or quit to the main
+   menu), fully close the game, and it freezes your live `user/savedata` into the library as a new
+   save, writing its `NOTES.md` for you.
+3. **Record the route**: the game starts on that save and enters the level by itself, **using your
+   current launcher settings** (fullscreen, HDR, mods, patches, shader packs — read live from
+   `bbport_launcher.py --print-env`), so you see the issue exactly as you normally would. When you
+   are oriented and ready, press **F9 to start recording** (nothing is recorded before that — take
+   your time getting set at the spawn), play the route with 2 s pauses at the checkpoints, come back
+   to the start, stand 2 s, and press **F9 again to stop**. (If the launcher can't be queried, it
+   falls back to `env/<base>.env` and says so.)
+4. **Describe** it in one line, and optionally give a **bug ticket** (which files the test under
+   `tests/bugs/<ticket>-<name>.toml`).
+
+It writes `routes/<name>.{pad,camera,toml,env}` (`.env` = the launcher settings used, the reproduction point) and a runnable `tests/<name>.toml` — `crash_free` and
+`clean_end` are on, and the measurement labels and checkpoints are left as commented TODOs (with the
+recorded checkpoint candidates) for you to fill in. Then `tools/playtest.py run <name>`.
+
+Keep routes short (60 to 90 s): the simulation runs on real time and positions drift between runs;
+the checkpoints catch a drifted run as invalid.
+
+**Shorter forms.** `record <existing-test>` re-records just that test's route (save and route come
+from its TOML — no wizard). Every step has a flag (`--save`, `--description`, `--ticket`,
+`--env-base`, `--delay-ms`, `--force`) that fills it and skips the prompt; when stdin is not a
+terminal (agents, CI) the flags are required and nothing is ever prompted.
+
+## Editing and removing a playtest
+
+`tools/playtest.py edit <name>` changes a playtest's metadata — save, description, ticket, env base,
+replay delay — in place. At a terminal with no flags it asks each field with the current value as the
+default (press Enter to keep it); the save step is the same menu as `record`, including **"current
+game state"** to freeze a new save and point the test at it. Flags (`--save`, `--description`,
+`--ticket`, `--env-base`, `--delay-ms`) set fields directly and are the only way off a terminal. Any
+hand-edited `[measure]`/`[criteria]`/`[checkpoints]` (and comments) are left untouched.
+
+**Changing the save re-records the route.** A route is played from its save's spawn, so a new save
+leaves the old inputs out of sync. When `edit` changes the save (including a freeze), it launches a
+re-recording of the route on the new save right away (F9 to start/stop, as in `record`) and syncs the
+test's `duration_s` to the new length. Off a terminal, or with a game already running, it refuses and
+tells you to run `record <name> --force` when you can. (A stand test — no route — needs no re-record.)
+To rename a playtest, remove it and record again.
+
+`tools/playtest.py remove <name>` deletes the test TOML, its route files (only when no other test
+uses that route), and its `golden/`/`results/`. The **frozen save is kept** (other tests may share
+it). It confirms first; off a terminal pass `--yes`. `delete` is an alias.

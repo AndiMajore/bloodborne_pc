@@ -11,6 +11,8 @@ void bbgpu_mouse_look_enable(int enabled) { (void)enabled; }
 void bbgpu_mouse_capture(void) {}
 int bbgpu_camera_look(float yaw, float pitch) { (void)yaw; (void)pitch; return 0; }
 void bbgpu_filter_pad(uint32_t *buttons, const uint8_t *sticks) { (void)buttons; (void)sticks; }
+static uint64_t t_frames, t_draws;   /* scripted scene counters for the autostart test */
+void bbgpu_frame_counters(uint64_t *frames, uint64_t *draws) { if (frames) *frames=t_frames; if (draws) *draws=t_draws; }
 int bbgpu_pointer_wanted(void) { return 0; }
 int bbgpu_free_camera(void) { return 0; }
 void runtime_re_watch_tick(const void *pad_buffer, uint64_t reads) { (void)pad_buffer; (void)reads; }
@@ -44,6 +46,12 @@ int main(void) {
     assert(write(config_fd,controls,sizeof(controls)-1)==(ssize_t)(sizeof(controls)-1));
     close(config_fd);
     setenv("BB_CONFIG",config,1);
+    /* Playtest replay autostart, exercised at the end of main; set before the first pad read so
+     * pad_autostart() caches these. The scripted counters stay 0 until then, so nothing arms. */
+    setenv("BB_PAD_SCENE_DRAWS","600",1);
+    setenv("BB_PAD_REPLAY_AUTOSTART","1",1);
+    setenv("BB_PAD_REPLAY_DELAY_MS","1000",1);
+    setenv("BB_PAD_REPLAY_END","quit:0",1);
     setenv("SDL_VIDEODRIVER","dummy",1);
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
@@ -125,6 +133,23 @@ int main(void) {
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
+
+    /* Playtest replay autostart: the scene-loaded dwell (two ~1 s windows over 600 draws/frame),
+     * then the replay arms after the 1 s delay; BB_PAD_REPLAY_END=quit pushes one SDL quit.
+     * Counters come from the stub; the clock is injected via pad_autostart_at. */
+    replay_armed=0; t_frames=0; t_draws=0;
+    uint64_t ts=1000000000000000ull;   /* far above any real monotonic time, so every call resamples */
+    for (int i=0;i<2;++i) { t_frames+=120; t_draws+=120*700; ts+=1000001; pad_autostart_at(ts);
+                            assert(!replay_armed); }
+    t_frames+=120; t_draws+=120*700; ts+=1000001; pad_autostart_at(ts);   /* waited >= 1000 ms */
+    assert(replay_armed==1);
+    SDL_FlushEvent(SDL_EVENT_QUIT);
+    replay_finished_us=now_us();
+    replay_end_tick();
+    SDL_Event qev; int got_quit=0;
+    while (SDL_PollEvent(&qev)) if (qev.type==SDL_EVENT_QUIT) got_quit=1;
+    assert(got_quit);
+
     SDL_Quit();
     unlink(path);
     unlink(config);
@@ -150,5 +175,5 @@ int main(void) {
     assert(!mouse_key_down(MOUSE_WHEEL_DOWN));
     mouse_wheel_step(1140000,0,0);
     assert(mouse_key_down(MOUSE_WHEEL_DOWN) && wheel_pending[1]==0);
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls, mouse");
+    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls, mouse, autostart");
 }

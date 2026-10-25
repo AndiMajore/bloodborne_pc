@@ -344,6 +344,15 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
+extern "C" void bbgpu_frame_counters(uint64_t* frames, uint64_t* draws) {
+    if (frames) {
+        *frames = BbStats::frame_number.load(std::memory_order_relaxed);
+    }
+    if (draws) {
+        *draws = BbStats::draws.load(std::memory_order_relaxed);
+    }
+}
+
 extern "C" void bbgpu_mouse_take(double* dx, double* dy, int* wheel_up, int* wheel_down) {
     double x = 0, y = 0;
     int up = 0, down = 0;

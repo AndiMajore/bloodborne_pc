@@ -1,0 +1,1207 @@
+#!/usr/bin/env python3
+"""Replay playtests: runs the game on a frozen save with a recorded pad route, collects the log,
+the per-frame CSV and frame dumps, and evaluates them (tools/playtest_eval.py).
+
+  tools/playtest.py run <test> [--repeat N] [--accept-goldens] [--keep-raw] [--lib DIR]
+  tools/playtest.py eval <results-dir>
+  tools/playtest.py compare <test> [--last N]
+  tools/playtest.py record <route> --save <spot> [--delay-ms 3000]
+  tools/playtest.py list
+
+The library (saves, routes, tests, golden images, results) is a separate, private directory:
+--lib, $BB_PLAYTESTS, or ../bbport-playtests next to the port. Its layout:
+  env/<name>.env  saves/<spot>/savedata/  routes/<r>.pad|.camera|.toml  tests/<t>.toml
+  tests/bugs/<ticket>-<slug>.toml  golden/<t>/<dump>.png  results/<t>/<stamp>/
+The game runs on a scratch copy (out/playtest_user: the player's user/ without its saves, so the
+shader caches stay warm) with the frozen save copied in before every run. A game these tools did
+not start (the player's session) is never touched: the run is refused.
+
+Engine support, used when present and replaced by the runner's own timing when not:
+  BB_PAD_REPLAY_AUTOSTART / BB_PAD_REPLAY_DELAY_MS  the replay starts by itself after the level
+  BB_PAD_REPLAY_END=quit:<hold>                     the game ends by itself after the route
+  BB_PAD_REPLAY_DUMPS=<ms,...>                      frame dumps at replay times
+Without them: the `replay` token in BB_PAD_FILE, dump triggers touched by wall time, SIGTERM.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import playtest_eval as ev  # noqa: E402
+
+PORT = Path(__file__).resolve().parent.parent
+OUT = PORT / "out"
+SETTINGS_FILES = ("rtao", "ssgi", "rtlighting", "rtreflect", "rtprobes")
+# BB_HDR is NOT forced here: forcing SDR made the game skip its SSAO pass (the one RTAO hooks,
+# pixel shader 0xc45c51cb), so RTAO never engaged. The display config comes from env/<base>.env
+# and the test, matching the player's real run. BB_FULLSCREEN=0 keeps the test window from taking
+# over a screen; it does not change the render path.
+# Invisible instrumentation layered on top of the reproduction settings for a measured run: logging
+# and automation only, nothing that changes what is rendered. restart.sh settles briefly after the
+# level (BB_LEVEL_SETTLE); the engine's scene-load check + BB_PAD_REPLAY_DELAY_MS then govern timing.
+MEASURE_ENV = {"BB_FRAME_STATS": "1", "BB_GPU_PROFILE": "1", "BB_CAMERA_LOG": "1", "BB_FAULT_WAIT": "0",
+               "BB_SAVE_LOG": "0", "BB_SKIP_NETWORK_CHOICE": "1", "BB_LEVEL_SETTLE": "3"}
+# Keys dropped when saving a recording's launcher snapshot (routes/<route>.env): session/path
+# specifics and instrumentation, which the runner sets itself. What stays is the visual/effect/perf
+# settings — the actual reproduction point (fullscreen, HDR, mods, patches, shader packs, …).
+REPRO_SKIP = {"BB_USER_DIR", "BB_PAD_FILE", "BB_PAD_RECORD", "BB_PAD_REPLAY", "BB_DUMP_DIR",
+              "BB_FINAL_DUMP_TRIGGER", "BB_PRESENT_DUMP_TRIGGER", "BB_CAPTURE_TRIGGER",
+              "BB_CAPTURE_DIR", "BB_FRAME_LOG", "BB_FRAME_STATS", "BB_GPU_PROFILE", "BB_SAVE_LOG",
+              "BB_FAULT_WAIT", "BB_CAMERA_LOG", "BB_CAMERA_LOG_MS", "BB_LEVEL_SETTLE"}
+RE_DUMP_FILE = re.compile(r"f(\d+)_(final|present)_(\d+)x(\d+)_(rgba|bgra)\.raw$")
+_SENTINEL = object()   # "no argument given", where None is a meaningful value
+
+
+def library(arg: str | None) -> Path:
+    lib = Path(arg or os.environ.get("BB_PLAYTESTS") or PORT.parent / "bbport-playtests").expanduser()
+    if not (lib / "tests").is_dir():
+        raise SystemExit(f"playtest library not found at {lib} (--lib or BB_PLAYTESTS)")
+    return lib
+
+
+def find_test(lib: Path, name: str) -> Path:
+    for cand in (Path(name), lib / "tests" / f"{name}.toml", lib / "tests" / "bugs" / f"{name}.toml",
+                 lib / "tests" / name, lib / "tests" / "bugs" / name):
+        if cand.is_file():
+            return cand
+    raise SystemExit(f"test {name} not found under {lib / 'tests'}")
+
+
+def read_env_file(path: Path) -> dict:
+    env = {}
+    try:
+        text = path.read_text()
+    except OSError:
+        raise SystemExit(f"env file {path} missing")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:]
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        env[k.strip()] = v
+    return env
+
+
+def resolve_repro_env(lib: Path, test: dict) -> tuple:
+    """The base environment for a measured run: the recording's launcher snapshot
+    (routes/<route>.env, the reproduction point) when it exists, else env/<base>.env windowed as
+    before; then the invisible measurement instrumentation on top. The caller still layers the
+    replay/dump variables and, last, the test's [env] and any --env overrides. Returns (env, source)
+    where source is the snapshot path when one was used, else None."""
+    env = dict(os.environ)
+    route = test.get("route")
+    repro = (lib / "routes" / f"{route}.env") if route else None
+    if repro and repro.is_file():
+        env.update(read_env_file(repro))
+        source = f"routes/{route}.env"
+    else:
+        env.update(read_env_file(lib / "env" / f"{test.get('env_base', 'default')}.env"))
+        env["BB_FULLSCREEN"] = "0"   # legacy harness default (windowed) when there is no snapshot
+        source = None
+    env.update(MEASURE_ENV)
+    return env, source
+
+
+def launcher_env() -> dict | None:
+    """The environment the launcher would use right now (its bbport.ini settings), via
+    `bbport_launcher.py --print-env`. So a recording matches what the player normally sees —
+    fullscreen, HDR, the current mods/patches/shader packs — rather than a stale library snapshot.
+    Returns None if the launcher can't be queried (then the caller falls back to env/<base>.env)."""
+    launcher = PORT / "launcher" / "bbport_launcher.py"
+    if not launcher.is_file():
+        return None
+    try:
+        r = subprocess.run([sys.executable, str(launcher), "--print-env"],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    env = {}
+    for line in r.stdout.splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v
+    return env or None
+
+
+def write_live_settings(path: Path, values: dict):
+    """Updates key=value lines of a live settings file, keeping other keys (as the launcher)."""
+    lines = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        pass
+
+    def fmt(v):
+        return f"{v:g}" if isinstance(v, float) else str(v)
+    seen, out = set(), []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in values:
+            out.append(f"{key}={fmt(values[key])}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for key, value in values.items():
+        if key not in seen:
+            out.append(f"{key}={fmt(value)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def foreign_game_running() -> list[int]:
+    """bb-probe pids these tools did not start."""
+    try:
+        pids = [int(p) for p in subprocess.run(["pgrep", "-x", "bb-probe"], capture_output=True, text=True).stdout.split()]
+    except (OSError, ValueError):
+        return []
+    try:
+        own = int((OUT / "tools_game.pid").read_text().strip())
+    except (OSError, ValueError):
+        own = -1
+    return [p for p in pids if p != own]
+
+
+def prepare_user(lib: Path, save: str, settings: dict, user_dir: Path, reset: bool = False) -> None:
+    """out/playtest_user: the player's user/ without saves (once), the frozen save copied in,
+    the live settings written. Never the player's user/ itself."""
+    src = lib / "saves" / save / "savedata"
+    if not src.is_dir():
+        raise SystemExit(f"save {save} not found at {src}")
+    if reset and user_dir.exists():
+        shutil.rmtree(user_dir)
+    if not user_dir.exists():
+        player = PORT / "user"
+        user_dir.mkdir(parents=True)
+        if player.is_dir():
+            for entry in player.iterdir():
+                if entry.name.startswith("savedata"):
+                    continue
+                if entry.is_dir():
+                    shutil.copytree(entry, user_dir / entry.name, symlinks=True)
+                else:
+                    shutil.copy2(entry, user_dir / entry.name)
+    dst = user_dir / "savedata"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    for name, values in settings.items():
+        if name not in SETTINGS_FILES:
+            raise SystemExit(f"unknown settings file [settings.{name}] (one of {', '.join(SETTINGS_FILES)})")
+        write_live_settings(user_dir / f"{name}.txt", values)
+
+
+def git_info() -> dict:
+    def run(*args):
+        try:
+            return subprocess.run(["git", *args], cwd=PORT, capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    return {"commit": run("rev-parse", "HEAD"), "branch": run("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(run("status", "--porcelain", "--untracked-files=no"))}
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        return (Path(f"/proc/{pid}/comm").read_text().strip() == "bb-probe")
+    except OSError:
+        return False
+
+
+def own_pid() -> int:
+    try:
+        return int((OUT / "tools_game.pid").read_text().strip())
+    except (OSError, ValueError):
+        return -1
+
+
+def press(tokens: str, hold: float = 0.3):
+    subprocess.run(["bash", str(PORT / "tools" / "press.sh"), tokens, str(hold)], check=False)
+
+
+def stop_own():
+    subprocess.run(["bash", str(PORT / "tools" / "stop_own.sh")], check=False)
+
+
+RE_DRAWS_LINE = re.compile(r"^Frame stats: .*?(\d+) draws/frame")
+LEVEL_DRAWS = 600   # restart.sh's own threshold for "the level has loaded"
+TITLE_DRAWS = 150   # at or below this the game is still in the title menu; above it is loading
+
+
+def latest_draws(lines) -> int | None:
+    for line in reversed(lines):
+        m = RE_DRAWS_LINE.match(line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def start_game(env: dict, name: str, watch: "LogWatch", timing: dict):
+    """tools/restart.sh in the background, watched from here: since 0.6 the port no longer skips
+    the title by itself, so restart.sh's single cross only reaches the main menu; the runner
+    presses cross again while the draw count stays at menu level. The game dying ends the wait at
+    once. Returns (pid, level_reached, restart.sh's output)."""
+    session = OUT / "session.log"
+    session.write_text("")
+    watch.pos = 0
+    if not pid_alive(own_pid()):  # a previous run's pid file: not this game's
+        (OUT / "tools_game.pid").unlink(missing_ok=True)
+    proc = subprocess.Popen(["bash", str(PORT / "tools" / "restart.sh")], env=env, cwd=PORT,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    t0 = time.time()
+    pid, level, seen_presses, extra, last_press = -1, False, 0, 0, None
+    while True:
+        watch.poll()
+        if pid < 0:
+            cand = own_pid()
+            if cand > 0 and pid_alive(cand):  # restart.sh wrote this game's pid
+                pid = cand
+        draws = latest_draws(watch.lines)
+        if draws is not None and draws > LEVEL_DRAWS:
+            level = True
+        presses = watch.count("Runtime: pad file: buttons 0x4000")
+        if presses > seen_presses:
+            seen_presses, last_press = presses, time.time()
+        # Press cross again only while the draw count is still at title-menu level: a higher count
+        # means the level is already loading, and a cross there would open the in-game menu.
+        if (pid > 0 and not level and last_press and time.time() - last_press > 8 and extra < 3
+                and draws is not None and draws <= TITLE_DRAWS):
+            extra += 1
+            print(f"[{name}] still in the title menu ({draws} draws/frame): cross again ({extra})")
+            press("cross")
+            last_press = time.time()
+        if proc.poll() is not None:
+            break
+        if pid > 0 and not pid_alive(pid) and time.time() - t0 > 15:
+            timing["note"] = "the game ended before the level loaded"
+            proc.kill()
+            break
+        if time.time() - t0 > 900:
+            timing["note"] = "restart.sh did not return in 15 minutes"
+            proc.kill()
+            break
+        time.sleep(0.5)
+    out = ""
+    try:
+        out = proc.stdout.read() if proc.stdout else ""
+    except OSError:
+        pass
+    watch.poll()
+    draws = latest_draws(watch.lines)
+    level = level or (draws is not None and draws > LEVEL_DRAWS)
+    return pid, level, out
+
+
+class LogWatch:
+    """Reads out/session.log incrementally and remembers the first line matching each marker."""
+
+    def __init__(self, path: Path):
+        self.path, self.pos, self.lines = path, 0, []
+
+    def poll(self):
+        try:
+            with self.path.open("rb") as f:
+                f.seek(self.pos)
+                data = f.read()
+                self.pos = f.tell()
+        except OSError:
+            return
+        if data:
+            self.lines.extend(data.decode(errors="replace").splitlines())
+
+    def has(self, prefix: str) -> bool:
+        return any(line.startswith(prefix) for line in self.lines)
+
+    def count(self, prefix: str) -> int:
+        return sum(1 for line in self.lines if line.startswith(prefix))
+
+
+def convert_dumps(raw_dir: Path, results: Path, names: list[str], keep_raw: bool):
+    """Raw frame dumps (fNNN_final_WxH_fmt.raw) in dump order -> results/dumps/<name>.png."""
+    dumps = results / "dumps"
+    dumps.mkdir(exist_ok=True)
+    raws = sorted(p for p in raw_dir.glob("f*_*.raw") if RE_DUMP_FILE.search(p.name))
+    produced = []
+    for i, raw in enumerate(raws):
+        m = RE_DUMP_FILE.search(raw.name)
+        name = names[i] if i < len(names) else f"dump{i}"
+        png = dumps / f"{name}.png"
+        size, fmt = f"{m.group(3)}x{m.group(4)}", m.group(5)
+        r = subprocess.run(["magick", "-size", size, "-depth", "8", f"{fmt}:{raw}", "-alpha", "off", str(png)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            produced.append(png)
+            if not keep_raw:
+                raw.unlink(missing_ok=True)
+        else:
+            print(f"magick failed for {raw.name}: {r.stderr.strip()}", file=sys.stderr)
+            shutil.move(str(raw), dumps / raw.name)
+    return produced
+
+
+def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
+    test = ev.load_test(test_path)
+    name = test["name"]
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    results = lib / "results" / name / stamp
+    results.mkdir(parents=True)
+    (results / "dumps").mkdir()
+
+    # Environment, outermost last: the reproduction point <- measurement instrumentation <-
+    # replay/dump variables <- the test's [env] <- --env overrides. The reproduction point is the
+    # launcher snapshot captured at record time (routes/<route>.env) so a replay matches what was
+    # recorded; without one (older or stand tests) it falls back to env/<base>.env windowed, as before.
+    env, repro_src = resolve_repro_env(lib, test)
+    if repro_src:
+        print(f"[{name}] reproduction point: {repro_src} (recorded launcher settings)")
+    route = test.get("route")
+    delay_ms = int(test.get("delay_ms", 3000))
+    duration_s = float(test.get("duration_s", 60))
+    hold_s = float(test.get("hold_s", 5))
+    loop = int(test.get("loop", 0))
+    dumps = test.get("dumps", [])
+    if route:
+        pad = lib / "routes" / f"{route}.pad"
+        if not pad.is_file():
+            print(f"test {name}: route '{route}' is not recorded yet ({pad} missing).\n"
+                  f"record it first:  tools/playtest.py record {route} --save {test['save']}",
+                  file=sys.stderr)
+            raise SystemExit(ev.EXIT_INVALID)
+        env["BB_PAD_REPLAY"] = str(pad)
+        env["BB_PAD_REPLAY_AUTOSTART"] = "1"
+        env["BB_PAD_REPLAY_DELAY_MS"] = str(delay_ms)
+        env["BB_PAD_REPLAY_END"] = f"quit:{hold_s:g}"
+        if loop:
+            env["BB_PAD_REPLAY_LOOP"] = str(loop)
+        if dumps:
+            env["BB_PAD_REPLAY_DUMPS"] = ",".join(str(int(d["at_ms"])) for d in dumps)
+            env["BB_PAD_REPLAY_DUMP_KIND"] = dumps[0].get("kind", "final")
+    env["BB_DUMP_DIR"] = str(results / "dumps_raw")
+    env["BB_FINAL_DUMP_TRIGGER"] = str(results / "final_trigger")
+    env["BB_PRESENT_DUMP_TRIGGER"] = str(results / "present_trigger")
+    env["BB_FRAME_LOG"] = str(results / "frames.csv")
+    env["BB_TIMEOUT"] = str(int(delay_ms / 1000 + duration_s * (loop + 1) + hold_s + 240))
+    for k, v in (test.get("env") or {}).items():      # persistent per-test selective changes
+        env[k] = str(v)
+    for kv in (getattr(args, "env", None) or []):      # ad-hoc selective changes for investigation
+        k, _, v = kv.partition("=")
+        env[k.strip()] = v
+    user_dir = OUT / "playtest_user"
+    prepare_user(lib, test["save"], test.get("settings", {}), user_dir, reset=args.reset_user)
+    env["BB_USER_DIR"] = str(user_dir)
+    (results / "dumps_raw").mkdir()
+    # Today's restart.sh hard-sets BB_DUMP_DIR=out/present and the triggers to out/*_trigger,
+    # overriding the env above. So the legacy dump path fires those files and collects from
+    # out/present; clear it first so only this run's frames are picked up. (Ticket 03.9 lets the
+    # results paths win; until then these are the real locations.)
+    present = OUT / "present"
+    present.mkdir(exist_ok=True)
+    for old in present.glob("f*_*.raw"):
+        old.unlink(missing_ok=True)
+    legacy_final = OUT / "final_trigger"
+    legacy_present = OUT / "present_trigger"
+
+    run = {**git_info(), "test": name, "test_file": str(test_path), "stamp": stamp, "lib": str(lib),
+           "env": {k: v for k, v in env.items() if k.startswith("BB_")},
+           "timing": {"started": time.time(), "end_mode": "engine"}}
+    (results / "run.json").write_text(json.dumps(run, indent=1) + "\n")
+    print(f"[{name}] {stamp}: save {test['save']}, route {route or '(none)'}, results {results}")
+
+    session = OUT / "session.log"
+    t0 = time.time()
+    watch = LogWatch(session)
+    timing = run["timing"]
+    pid, level, out = start_game(env, name, watch, timing)
+    if pid < 0 or not level or not pid_alive(pid):
+        timing.setdefault("note", "level not reached: " + out.strip()[-300:])
+        timing["process_ended"] = True
+        timing["stopped_by_runner"] = True
+        stop_own()
+        return finish(lib, test, test_path, results, run, watch, args, status_hint="level not reached")
+    print(f"[{name}] level reached after {time.time() - t0:.0f} s (pid {pid}); {out.strip()[-120:]}")
+
+    # The replay. The engine arms it by itself (Phase 1); otherwise the runner sends the token.
+    replay_wall = None
+    legacy_dumps_fired: set[int] = set()
+    deadline_start = time.time() + delay_ms / 1000 + 10
+    while route and replay_wall is None:
+        watch.poll()
+        if watch.has("Runtime: pad replay of") or watch.has("Runtime: pad replay started"):
+            replay_wall = time.time()
+            timing["replay_started_s"] = replay_wall - t0
+            break
+        if not pid_alive(pid):
+            break
+        if time.time() > deadline_start and not watch.has("Runtime: pad replay armed"):
+            if "BB_PAD_REPLAY_AUTOSTART_SENT" not in timing:
+                print(f"[{name}] no autostart in the engine: sending the replay token")
+                timing["BB_PAD_REPLAY_AUTOSTART_SENT"] = True
+                press("replay")
+                deadline_start = time.time() + 15
+            elif time.time() > deadline_start:
+                break
+        time.sleep(0.5)
+    if route and replay_wall is None:
+        timing["note"] = "the replay did not start"
+    if not route:
+        replay_wall = time.time()
+        timing["replay_started_s"] = replay_wall - t0
+
+    # Wait for the finish, firing legacy dumps if the engine does not report its own.
+    total_route_s = duration_s * (loop + 1)
+    finished = False
+    deadline = replay_wall + total_route_s + 60 if replay_wall else time.time() + 30
+    while True:
+        watch.poll()
+        now = time.time()
+        if route and watch.has("Runtime: pad replay finished"):
+            finished = True
+            timing["replay_finished_s"] = now - t0
+            break
+        if not route and now - replay_wall >= duration_s:
+            finished = True
+            timing["replay_finished_s"] = now - t0
+            break
+        if not pid_alive(pid):
+            timing["process_ended"] = True
+            break
+        if replay_wall and not watch.has("Runtime: pad replay dump at"):
+            for i, d in enumerate(dumps):
+                if i not in legacy_dumps_fired and now - replay_wall >= d["at_ms"] / 1000:
+                    legacy_dumps_fired.add(i)
+                    (legacy_final if d.get("kind", "final") == "final" else legacy_present).touch()
+        if now > deadline:
+            timing["note"] = "the replay did not finish in time"
+            break
+        time.sleep(0.5)
+
+    # The end: the engine quits by itself when it knows BB_PAD_REPLAY_END; otherwise we stop it.
+    if pid_alive(pid):
+        engine_end = watch.has("Runtime: pad replay armed") or watch.has("Runtime: pad replay started")
+        wait_until = time.time() + (hold_s + 30 if engine_end and finished else 2)
+        while pid_alive(pid) and time.time() < wait_until:
+            time.sleep(0.5)
+            watch.poll()
+            if watch.has("Exit: GPU work finished"):
+                break
+        if pid_alive(pid):
+            if engine_end and finished:
+                timing["note"] = "no clean end: stopped by the runner"
+            else:
+                timing["end_mode"] = "legacy"
+            timing["stopped_by_runner"] = True
+            stop_own()
+            for _ in range(20):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.5)
+    timing["process_ended"] = True
+    timing["ended_s"] = time.time() - t0
+    return finish(lib, test, test_path, results, run, watch, args)
+
+
+def finish(lib, test, test_path, results: Path, run: dict, watch: LogWatch, args, status_hint=None) -> int:
+    name = test["name"]
+    time.sleep(1.0)
+    session = OUT / "session.log"
+    if session.exists():
+        shutil.copy2(session, results / "session.log")
+    (results / "run.json").write_text(json.dumps(run, indent=1) + "\n")
+    names = [d.get("name", f"dump{i}") for i, d in enumerate(test.get("dumps", []))]
+    raw_dir = results / "dumps_raw"
+    raw_dir.mkdir(exist_ok=True)
+    if not any(raw_dir.glob("f*_*.raw")):
+        # Today's restart.sh forces BB_DUMP_DIR=out/present: take the dumps made since this run began.
+        started = run.get("timing", {}).get("started", 0)
+        for raw in (OUT / "present").glob("f*_*.raw"):
+            if raw.stat().st_mtime >= started - 1:
+                shutil.move(str(raw), raw_dir / raw.name)
+    convert_dumps(raw_dir, results, names, args.keep_raw)
+    try:
+        raw_dir.rmdir()
+    except OSError:
+        pass
+    for trig in ("final_trigger", "present_trigger"):
+        (results / trig).unlink(missing_ok=True)
+    result = ev.evaluate(results, test, lib)
+    if status_hint and result["status"] != "crash":
+        result["invalid_reasons"].insert(0, status_hint)
+        if result["status"] == "pass":
+            result["status"], result["exit_code"] = "invalid", ev.EXIT_INVALID
+    ev.write_results(results, result)
+    if args.accept_goldens and test.get("dumps"):
+        golden = lib / "golden" / name
+        golden.mkdir(parents=True, exist_ok=True)
+        for png in (results / "dumps").glob("*.png"):
+            shutil.copy2(png, golden / png.name)
+            print(f"[{name}] golden accepted: {golden / png.name}")
+    print(ev.summary_markdown(result), end="")
+    print(f"[{name}] {result['status']} -> {results}")
+    return result["exit_code"], result["status"]
+
+
+def cmd_run(args) -> int:
+    lib = library(args.lib)
+    if args.suite:
+        tests = sorted((lib / "tests" / args.suite).glob("*.toml")) if args.suite != "all" else \
+            sorted(list((lib / "tests").glob("*.toml")) + list((lib / "tests" / "bugs").glob("*.toml")))
+    else:
+        tests = [find_test(lib, t) for t in args.tests]
+    if not tests:
+        raise SystemExit("no tests given")
+    OUT.mkdir(exist_ok=True)
+    lock = (OUT / "playtest.lock").open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another playtest runner holds out/playtest.lock", file=sys.stderr)
+        return ev.EXIT_TOOL
+    worst = ev.EXIT_PASS
+    roll: list[tuple[str, str]] = []
+    for test_path in tests:
+        name = ev.load_test(test_path)["name"]
+        for _ in range(args.repeat):
+            foreign = foreign_game_running()
+            if foreign:
+                print(f"a game these tools did not start is running (pid {foreign}): no playtest", file=sys.stderr)
+                return ev.EXIT_TOOL
+            code, status = run_once(lib, test_path, args)
+            roll.append((name, status))
+            worst = max(worst, code) if code != ev.EXIT_TOOL else ev.EXIT_TOOL
+    if len(roll) > 1:
+        passed = sum(1 for _, s in roll if s == "pass")
+        print("\n=== playtest summary ===")
+        for n, s in roll:
+            print(f"  {'PASS' if s == 'pass' else s.upper():7} {n}")
+        verdict = "all passed" if passed == len(roll) else f"{len(roll) - passed} not passing"
+        print(f"{passed}/{len(roll)} passed — {verdict}")
+    return worst
+
+
+def cmd_eval(args) -> int:
+    lib = None
+    try:
+        lib = library(args.lib)
+    except SystemExit:
+        pass
+    results = Path(args.results_dir)
+    test_path = Path(args.test) if args.test else None
+    if test_path is None:
+        run = json.loads((results / "run.json").read_text())
+        test_path = Path(run["test_file"])
+    test = ev.load_test(test_path)
+    result = ev.evaluate(results, test, lib)
+    ev.write_results(results, result)
+    print(ev.summary_markdown(result), end="")
+    return result["exit_code"]
+
+
+def cmd_compare(args) -> int:
+    lib = library(args.lib)
+    test = ev.load_test(find_test(lib, args.test))
+    pct = float(test.get("criteria", {}).get("regression_pct", 5.0))
+    table, flags = ev.compare_runs(lib / "results", test["name"], args.last, pct)
+    print(ev.format_compare(table, flags), end="")
+    return ev.EXIT_FAIL if flags else ev.EXIT_PASS
+
+
+def cmd_list(args) -> int:
+    lib = library(args.lib)
+    width = max(60, shutil.get_terminal_size((100, 24)).columns)
+
+    def route_exists(test) -> bool:
+        r = test.get("route")
+        return bool(r) and (lib / "routes" / f"{r}.pad").exists()
+
+    rows = []  # (suite, stem, test-or-None, last-status)
+    for sub in ("tests", "tests/bugs"):
+        for t in sorted((lib / sub).glob("*.toml")):
+            try:
+                test = ev.load_test(t)
+            except Exception as e:  # noqa: BLE001
+                rows.append((sub, t.stem, None, f"unreadable ({e})"))
+                continue
+            runs = sorted((lib / "results" / test["name"]).glob("*/result.json"))
+            last = "never run"
+            if not route_exists(test):
+                last = "no route yet"
+            if runs:
+                try:
+                    r = json.loads(runs[-1].read_text())
+                    last = f"{r.get('status')} ({r.get('stamp')})"
+                except (OSError, ValueError):
+                    pass
+            rows.append((sub, t.stem, test, last))
+
+    print("run a test:  tools/playtest.py run <name>        (names below; --repeat N for A/B/A)")
+    namew = max((len(stem) for _, stem, _, _ in rows), default=4)
+    savew = max((len(str((tst or {}).get("save", "-"))) for _, _, tst, _ in rows), default=4)
+    rtew = max((len(str((tst or {}).get("route", "-"))) for _, _, tst, _ in rows), default=5)
+    cur = None
+    for sub, stem, test, last in rows:
+        if sub != cur:
+            print(f"\n{sub}/")
+            cur = sub
+        if test is None:
+            print(f"  {stem:<{namew}}  {last}")
+            continue
+        save = str(test.get("save", "-"))
+        route = str(test.get("route", "-"))
+        print(f"  {stem:<{namew}}  save {save:<{savew}}  route {route:<{rtew}}  last: {last}")
+        desc = " ".join(str(test.get("description", "")).split())
+        if desc:
+            for line in textwrap.wrap(desc, width - 6):
+                print(f"      {line}")
+
+    print(f"\nroutes: " + ", ".join(sorted(p.stem for p in (lib / "routes").glob("*.pad"))))
+    print("saves:  " + ", ".join(sorted(p.name for p in (lib / "saves").iterdir() if p.is_dir())))
+    print("\nrun all:  tools/playtest.py run --suite all      only the bug suite:  run --suite bugs")
+    print("record a test's route:  tools/playtest.py record <name>   (save + route come from the test)")
+    print("edit / delete a playtest:  tools/playtest.py edit <name>   |   remove <name>")
+    return 0
+
+
+def save_where(lib: Path, name: str) -> str:
+    """The 'Where:' line of a save's NOTES.md (a one-line human description), or ''."""
+    try:
+        for line in (lib / "saves" / name / "NOTES.md").read_text().splitlines():
+            s = line.strip()
+            if s.lower().startswith("where:"):
+                return s[len("where:"):].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def list_saves(lib: Path, stream=sys.stderr, header: str = "available saves (pass one as --save):") -> list:
+    saves = [d.name for d in sorted((lib / "saves").iterdir()) if (d / "savedata").is_dir()]
+    if header:
+        print(header, file=stream)
+    for s in saves:
+        print(f"  {s:<16} {save_where(lib, s)}", file=stream)
+    return saves
+
+
+# --- small interactive helpers (used only when stdin is a TTY) ------------------------------------
+
+def _isatty() -> bool:
+    return sys.stdin.isatty()
+
+
+def prompt(text: str, default: str | None = None) -> str:
+    """Ask the player a question. When stdin is not a TTY, return the default (or stop with a hint)."""
+    if not _isatty():
+        if default is not None:
+            return default
+        raise SystemExit(f"'{text}' needs a terminal; pass the matching flag instead")
+    suffix = f" [{default}]" if default else ""
+    try:
+        answer = input(f"{text}{suffix}: ").strip()
+    except EOFError:
+        answer = ""
+    return answer or (default or "")
+
+
+def confirm(text: str, default: bool = False) -> bool:
+    answer = prompt(f"{text} ({'Y/n' if default else 'y/N'})", "y" if default else "n").lower()
+    return answer.startswith("y")
+
+
+def choose(text: str, options: list, default=_SENTINEL) -> object:
+    """A numbered menu. `options` is a list of (label, value); returns the chosen value. With a
+    default, an empty answer returns it (used by edit to keep the current value)."""
+    print(text)
+    for i, (label, _) in enumerate(options):
+        print(f"  {i}) {label}")
+    while True:
+        answer = prompt("choice")
+        if answer == "" and default is not _SENTINEL:
+            return default
+        if answer.isdigit() and 0 <= int(answer) < len(options):
+            return options[int(answer)][1]
+        print("  please enter a number from the list")
+
+
+def freeze_current_save(lib: Path, spot: str, where: str, interactive: bool = True) -> str:
+    """Copy the live user/savedata into the library as a frozen save. The game must be closed."""
+    if foreign_game_running():
+        raise SystemExit("a game is running; save in-game, close it, then freeze")
+    src = PORT / "user" / "savedata"
+    if not src.is_dir():
+        raise SystemExit(f"no live save found at {src}")
+    dst = lib / "saves" / spot
+    if (dst / "savedata").exists():
+        if not (interactive and confirm(f"save '{spot}' already exists; overwrite it?")):
+            raise SystemExit(f"save '{spot}' already exists")
+        shutil.rmtree(dst / "savedata")
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst / "savedata")
+    info = git_info()
+    (dst / "NOTES.md").write_text(
+        f"# {spot}\n\n"
+        f"Where: {where or '(describe this spot)'}\n"
+        f"Source: live user/savedata, frozen {dt.date.today()} (the sound-hack byte is already set).\n"
+        f"Engine at freeze: {info['branch']} {info['commit'][:10]}.\n"
+        "Never run the game on this folder: the runner copies it into "
+        "bbport/out/playtest_user/savedata for every run.\n")
+    print(f"froze current game state as save '{spot}' ({dst / 'savedata'})")
+    return spot
+
+
+def wizard_pick_save(lib: Path, default_spot: str, keep=_SENTINEL) -> tuple:
+    """Numbered save menu with a 'freeze what I'm in now' option. Returns (save_name, froze): froze is
+    True when the save was just (re)frozen from the live game, so the caller re-records even if the
+    name is unchanged (a same-named freeze still replaced the save's contents). With `keep` (edit) an
+    empty answer keeps that current save and the menu marks it."""
+    saves = [d.name for d in sorted((lib / "saves").iterdir()) if (d / "savedata").is_dir()]
+    options = [("current game state (freeze what you're in right now)", None)]
+    options += [(f"{s}  —  {save_where(lib, s)}" + ("  (current)" if s == keep else ""), s) for s in saves]
+    prompt_text = "\nselect a save point to spawn on:"
+    if keep is not _SENTINEL:
+        prompt_text += f" (Enter keeps '{keep}')"
+    choice = choose(prompt_text, options, default=keep)
+    if choice is not None:
+        return choice, False
+    spot = prompt("name for this new save point", default_spot)
+    where = prompt("one line: where is this? (e.g. 'Oedon Chapel lamp')")
+    print("\nnow, in the game: save (sit at a lamp or quit to the main menu), then FULLY CLOSE it.")
+    prompt("press Enter once the game is closed")
+    return freeze_current_save(lib, spot, where), True
+
+
+def scaffold_test(path: Path, f: dict, candidates: list) -> None:
+    """Write a minimal, runnable tests/<name>.toml with the measure/checkpoint parts as TODO comments."""
+    def clean(s: str) -> str:
+        return str(s).replace('"', "'").strip()
+    cand = "".join(f"#   {int(ms)} {x:.2f} {y:.2f} {z:.2f}\n" for ms, x, y, z in candidates) or "#   (none)\n"
+    ticket_line = f'ticket = "{clean(f["ticket"])}"\n' if f.get("ticket") else ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'name = "{clean(f["name"])}"\n'
+        f'description = "{clean(f["description"])}"\n'
+        f"{ticket_line}"
+        f'save = "{clean(f["save"])}"\n'
+        f'route = "{clean(f["route"])}"\n'
+        f'env_base = "{clean(f["env_base"])}"\n'
+        f"duration_s = {f['duration_s']}\n"
+        "delay_ms = 3000\n"
+        "hold_s = 5\n\n"
+        "# Fill these in to measure more — see docs/PLAYTESTS.md:\n"
+        "# [measure]\n"
+        '# gpu_labels = ["ssgi", "rtao trace", "cs 3d5ebf4e"]\n'
+        '# per_call   = ["cs 3d5ebf4e"]\n'
+        "# Checkpoint candidates recorded for this route (ms x y z):\n"
+        f"{cand}"
+        "# [[checkpoints]]\n"
+        "# at_ms = 30000\n"
+        "# tolerance_m = 3.0\n\n"
+        "[criteria]\n"
+        "crash_free = true\n"
+        "clean_end = true\n"
+        "# max_busy_ms = 15.5\n"
+        "# max_p99_ms = 25\n")
+
+
+def record_route(lib: Path, route: str, save: str, args, interactive: bool):
+    """Drive one recording: launch on `save`, let the player play and press F9, write
+    routes/<route>.{pad,camera,toml}. Returns (cams, length_ms, samples) or an int exit code."""
+    if not (lib / "saves" / save / "savedata").is_dir():
+        print(f"\nsave '{save}' does not exist.\n", file=sys.stderr)
+        list_saves(lib)
+        return ev.EXIT_INVALID
+    pad = lib / "routes" / f"{route}.pad"
+    if pad.exists() and not args.force:
+        if interactive:
+            if not confirm(f"route '{route}' is already recorded; overwrite it?"):
+                return ev.EXIT_INVALID
+        else:
+            print(f"route '{route}' is already recorded ({pad}); pass --force to overwrite it, "
+                  f"or record under a different route name", file=sys.stderr)
+            return ev.EXIT_INVALID
+    # A recording must look exactly like the player's normal game (fullscreen, HDR, the current
+    # mods/patches/shader packs), or they cannot tell whether the route triggers the issue. So the
+    # base is the live launcher environment, not the harness constants or a stale library snapshot;
+    # only invisible instrumentation (the camera track) and the frozen save are added on top.
+    env = dict(os.environ)
+    base = launcher_env()
+    if base:
+        env.update(base)
+        print("recording with your current launcher settings (fullscreen/HDR/mods/patches/shaders "
+              "as you play) — so you see the issue exactly as normal")
+    else:
+        base = read_env_file(lib / "env" / f"{args.env_base}.env")
+        env.update(base)
+        print(f"could not read the launcher settings; using env/{args.env_base}.env, which may "
+              f"differ from your launcher", file=sys.stderr)
+    repro_snapshot = {k: v for k, v in base.items() if k not in REPRO_SKIP}  # saved as the reproduction point
+    env["BB_CAMERA_LOG"] = "1"
+    env["BB_CAMERA_LOG_MS"] = "50"
+    env["BB_LEVEL_SETTLE"] = env.get("BB_LEVEL_SETTLE", "3")
+    env["BB_PAD_RECORD"] = str(pad)
+    # Recording is F9-started on purpose: you decide when to begin (autostart would arm on a timer
+    # a few seconds after the level and miss the inputs you make before it fires). Replay autostarts;
+    # recording does not.
+    user_dir = OUT / "playtest_user"
+    prepare_user(lib, save, {}, user_dir)
+    env["BB_USER_DIR"] = str(user_dir)
+    info = git_info()
+    print(f"spawning on save '{save}'; the game starts and enters the level by itself")
+    watch = LogWatch(OUT / "session.log")
+    timing: dict = {}
+    pid, level, out = start_game(env, route, watch, timing)
+    if pid < 0 or not level or not pid_alive(pid):
+        print(f"the level was not reached: {timing.get('note', out.strip()[-300:])}", file=sys.stderr)
+        stop_own()
+        return ev.EXIT_TOOL
+    print("\nlevel reached — how to record:")
+    print("  1) Get set at the spawn (nothing is recorded yet), then press F9 to START.")
+    print("  2) Play the route, pausing 2 s at each checkpoint; come back and stand 2 s.")
+    print("  3) Press F9 again to STOP.\n")
+    started = None
+    while pid_alive(pid):
+        watch.poll()
+        if started is None and watch.has("Runtime: pad recording started"):
+            started = True
+            print("recording started")
+        if watch.has("Runtime: pad recording stopped"):
+            print("recording stopped; closing the game in 5 s (or quit it yourself)")
+            time.sleep(5)
+            if pid_alive(pid):
+                stop_own()
+            break
+        time.sleep(0.5)
+    time.sleep(1)
+    watch.poll()
+    lines = watch.lines
+    markers = ev.parse_markers(lines)
+    start = markers.get("recording_started")
+    if start is None or not pad.exists():
+        print("no recording was made", file=sys.stderr)
+        return ev.EXIT_INVALID
+    m = re.search(r"mono ([\d.]+)", lines[start])
+    mono_start = float(m.group(1)) if m else None
+    cams = []
+    first_t = None
+    for i, line in enumerate(lines):
+        if i <= start:
+            continue
+        cm = ev.RE_CAMERA.match(line)
+        if not cm:
+            continue
+        t, x, y, z = (float(cm.group(k)) for k in range(1, 5))
+        mono = float(cm.group(5)) if cm.group(5) else None
+        if mono_start is not None and mono is not None:
+            ms = (mono - mono_start) * 1000
+        else:
+            first_t = t if first_t is None else first_t
+            ms = (t - first_t) * 1000
+        if ms >= 0:
+            cams.append((ms, x, y, z))
+    samples = sum(1 for l in pad.read_text().splitlines() if l.strip() and not l.startswith("#"))
+    length_ms = int(cams[-1][0]) if cams else 0
+    (lib / "routes" / f"{route}.camera").write_text(
+        "# ms x y z (camera position, ms since the recording started)\n" +
+        "".join(f"{int(ms)} {x:.3f} {y:.3f} {z:.3f}\n" for ms, x, y, z in cams))
+    (lib / "routes" / f"{route}.toml").write_text(
+        f'save = "{save}"\nrecorded_commit = "{info["commit"]}"\nrecorded = "{dt.date.today()}"\n'
+        f"length_ms = {length_ms}\nsamples = {samples}\nnotes = \"\"\n")
+    (lib / "routes" / f"{route}.env").write_text(
+        "# The launcher settings this route was recorded with — the reproduction point a run replays\n"
+        "# under. Edit to change what a replay reproduces, or override per run with --env / [env].\n" +
+        "".join(f"{k}={v}\n" for k, v in sorted(repro_snapshot.items())))
+    print(f"{pad}: {samples} samples, {length_ms / 1000:.1f} s, {len(cams)} camera samples; "
+          f"saved {len(repro_snapshot)} launcher settings as the reproduction point")
+    return cams, length_ms, samples
+
+
+def checkpoint_candidates(cams: list) -> list:
+    """The camera position near each 10 s mark, as (ms, x, y, z) tuples for the scaffold comments."""
+    return [(ms, x, y, z) for ms, x, y, z in cams if int(ms) % 10000 < 60]
+
+
+def cmd_saves(args) -> int:
+    lib = library(args.lib)
+    saves = list_saves(lib, sys.stdout, "frozen saves:")
+    if not saves:
+        print("  (none yet — create one with: tools/playtest.py record)")
+    return 0
+
+
+def all_test_paths(lib: Path) -> list:
+    return sorted(list((lib / "tests").glob("*.toml")) + list((lib / "tests" / "bugs").glob("*.toml")))
+
+
+def set_scalar(text: str, key: str, value) -> str:
+    """Replace, insert, or remove a top-level `key = ...` line in a test TOML, leaving the comments,
+    [measure]/[criteria]/[checkpoints] and everything else untouched. value None/'' removes the line;
+    an int is written bare, a str quoted."""
+    line_re = re.compile(rf"(?m)^{re.escape(key)} *=.*\n")
+    if value is None or value == "":
+        return line_re.sub("", text, count=1)
+    rendered = str(value) if isinstance(value, int) else '"' + str(value).replace('"', "'") + '"'
+    newline = f"{key} = {rendered}\n"
+    if line_re.search(text):
+        return line_re.sub(lambda m: newline, text, count=1)
+    anchor = re.search(r"(?m)^(description|name) *=.*\n", text)   # insert new keys near the top
+    return text[:anchor.end()] + newline + text[anchor.end():] if anchor else newline + text
+
+
+def cmd_edit(args) -> int:
+    """Change a playtest's metadata in place (save, description, ticket, env, delay). The route, the
+    recording and any hand-edited [measure]/[criteria]/[checkpoints] are left untouched. With no flag
+    at a terminal it asks each field with the current value as the default; flags set fields directly
+    (and are the only way off a terminal). To re-record use `record <name> --force`."""
+    lib = library(args.lib)
+    test_path = find_test(lib, args.target)
+    test = ev.load_test(test_path)
+    text = test_path.read_text()
+    cur = {"save": str(test.get("save", "")), "description": str(test.get("description", "")),
+           "ticket": str(test.get("ticket", "")), "env_base": str(test.get("env_base", "default")),
+           "delay_ms": int(test.get("delay_ms", 3000))}
+    flags = {"save": args.save, "description": args.description, "ticket": args.ticket,
+             "env_base": args.env_base, "delay_ms": args.delay_ms}
+    new = dict(cur)
+    froze = False
+    if any(v is not None for v in flags.values()):
+        for k, v in flags.items():
+            if v is not None:
+                new[k] = v
+    elif _isatty():
+        new["save"], froze = wizard_pick_save(lib, cur["save"], keep=cur["save"])
+        new["description"] = prompt("description", cur["description"])
+        new["ticket"] = prompt("bug ticket (blank for none)", cur["ticket"])
+        new["env_base"] = prompt("env base", cur["env_base"])
+        new["delay_ms"] = int(prompt("replay delay ms", str(cur["delay_ms"])) or cur["delay_ms"])
+    else:
+        print(f"nothing to change: pass a field flag (e.g. --description) or edit at a terminal",
+              file=sys.stderr)
+        return ev.EXIT_INVALID
+
+    if new["save"] and not (lib / "saves" / new["save"] / "savedata").is_dir():
+        print(f"save '{new['save']}' does not exist.\n", file=sys.stderr)
+        list_saves(lib)
+        return ev.EXIT_INVALID
+    for k in ("save", "description", "env_base"):
+        text = set_scalar(text, k, new[k])
+    text = set_scalar(text, "delay_ms", int(new["delay_ms"]))
+    text = set_scalar(text, "ticket", new["ticket"] or None)
+    test_path.write_text(text)
+    ev.load_test(test_path)   # it still parses
+    changed = [k for k in cur if str(cur[k]) != str(new[k])]
+    if not changed and not froze:
+        print(f"{test_path}: no change")
+        return ev.EXIT_PASS
+    if froze:
+        print(f"re-froze save '{new['save']}' from the current game state")
+    if changed:
+        print(f"updated {test_path}:")
+    for k in changed:
+        print(f"  {k}: {cur[k] or '(none)'} -> {new[k] or '(none)'}")
+
+    # A changed save point — a different save, or the same name just re-frozen from the live game —
+    # leaves the recorded route out of sync (it was played from the old spawn), so re-record it now.
+    # Stand tests (no route) need nothing.
+    route = test.get("route")
+    if (froze or new["save"] != cur["save"]) and route:
+        if not _isatty():
+            print(f"the save changed: re-record the route at a terminal with "
+                  f"'tools/playtest.py record {args.target} --force'", file=sys.stderr)
+            return ev.EXIT_INVALID
+        if foreign_game_running():
+            print(f"the save changed, but a game these tools did not start is running; re-record "
+                  f"later with 'tools/playtest.py record {args.target} --force'", file=sys.stderr)
+            return ev.EXIT_TOOL
+        print("\nthe save point changed — re-recording the route on the new save (the old inputs "
+              "no longer match it). The game launches now.")
+        rr = type("A", (), {"env_base": new["env_base"], "delay_ms": int(new["delay_ms"]), "force": True})()
+        result = record_route(lib, route, new["save"], rr, True)
+        if isinstance(result, int):
+            print("the route was NOT re-recorded; it is out of sync with the new save until you run "
+                  f"'tools/playtest.py record {args.target} --force'", file=sys.stderr)
+            return result
+        _, length_ms, _ = result
+        test_path.write_text(set_scalar(test_path.read_text(), "duration_s", max(1, round(length_ms / 1000))))
+        print(f"re-recorded route '{route}' on save '{new['save']}'.")
+    return ev.EXIT_PASS
+
+
+def cmd_remove(args) -> int:
+    """Delete a playtest: its test TOML, its route (.pad/.camera/.toml) when no other test uses it,
+    and its golden/results. The frozen save is kept (other tests may share it)."""
+    lib = library(args.lib)
+    test_path = find_test(lib, args.target)
+    test = ev.load_test(test_path)
+    name = test["name"]
+    route = test.get("route")
+    targets = [test_path]
+    route_shared = False
+    if route:
+        route_shared = any(p != test_path and ev.load_test(p).get("route") == route
+                           for p in all_test_paths(lib))
+        if not route_shared:
+            targets += [p for ext in ("pad", "camera", "toml", "env")
+                        if (p := lib / "routes" / f"{route}.{ext}").exists()]
+    targets += [d for d in (lib / "golden" / name, lib / "results" / name) if d.is_dir()]
+
+    print(f"remove playtest '{name}' — will delete:")
+    for t in targets:
+        print(f"  {t.relative_to(lib) if t.is_relative_to(lib) else t}")
+    print("  (the frozen save is kept)")
+    if route and route_shared:
+        print(f"  (route '{route}' is kept: another test uses it)")
+    if not (args.yes or (_isatty() and confirm("delete these?"))):
+        print("cancelled — pass --yes or confirm at a terminal", file=sys.stderr)
+        return ev.EXIT_INVALID
+    for t in targets:
+        shutil.rmtree(t) if t.is_dir() else t.unlink()
+    print(f"removed {name}")
+    return ev.EXIT_PASS
+
+
+def cmd_record(args) -> int:
+    """Record a route, or create a whole new playtest interactively.
+
+    With an existing test name, records that test's route (save + route from its TOML). With a new
+    name, or no name at a terminal, it runs a wizard: name the playtest, pick or freeze a save,
+    record the route, describe it, and write a runnable tests/<name>.toml (measures/checkpoints as
+    TODO comments). Flags fill their step and are required when stdin is not a terminal."""
+    lib = library(args.lib)
+    if foreign_game_running():
+        print("a game these tools did not start is running: no recording", file=sys.stderr)
+        return ev.EXIT_TOOL
+    interactive = _isatty()
+    target = args.target
+
+    # Existing test -> record its route (no new test is scaffolded).
+    test_path = next((c for c in (lib / "tests" / f"{target}.toml",
+                                  lib / "tests" / "bugs" / f"{target}.toml") if target and c.is_file()),
+                     None)
+    if test_path:
+        test = ev.load_test(test_path)
+        route = test.get("route") or target
+        save = args.save or test.get("save")
+        print(f"recording the route for test '{test['name']}': spawn on save '{save}', "
+              f"write route '{route}'.")
+        result = record_route(lib, route, save, args, interactive)
+        return result if isinstance(result, int) else ev.EXIT_PASS
+
+    # New playtest.
+    name = target
+    if not name:
+        if not interactive:
+            print("give a profile name (tools/playtest.py record <name>) or an existing test name",
+                  file=sys.stderr)
+            return ev.EXIT_INVALID
+        name = prompt("profile name for this new playtest")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name or ""):
+        print(f"name '{name}' must be lower-case letters, digits and dashes", file=sys.stderr)
+        return ev.EXIT_INVALID
+
+    save = args.save
+    if not save:
+        if interactive:
+            save, _ = wizard_pick_save(lib, name)
+        else:
+            print("\nchoose a save with --save <spot>.\n", file=sys.stderr)
+            list_saves(lib)
+            return ev.EXIT_INVALID
+
+    route = name
+    description = args.description if args.description is not None else (
+        prompt("one-line description of this playtest") if interactive else "")
+    ticket = args.ticket if args.ticket is not None else (
+        prompt("bug ticket this guards (blank for none)") if interactive else "")
+
+    result = record_route(lib, route, save, args, interactive)
+    if isinstance(result, int):
+        return result
+    cams, length_ms, _ = result
+
+    test_file = (lib / "tests" / "bugs" / f"{ticket}-{name}.toml") if ticket else (lib / "tests" / f"{name}.toml")
+    scaffold_test(test_file, {
+        "name": name, "description": description, "ticket": ticket, "save": save,
+        "route": route, "env_base": args.env_base, "duration_s": max(1, round(length_ms / 1000)),
+    }, checkpoint_candidates(cams))
+    print(f"\nwrote {test_file}")
+    print(f"next:  tools/playtest.py run {name}")
+    print(f"       then edit {test_file.name} to measure more (the TODO comments + docs/PLAYTESTS.md)")
+    return ev.EXIT_PASS
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--lib", help="the playtest library (default $BB_PLAYTESTS or ../bbport-playtests)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("run", help="run one or more tests")
+    p.add_argument("tests", nargs="*")
+    p.add_argument("--suite", help="all tests of tests/<suite>/ (e.g. bugs), or 'all'")
+    p.add_argument("--repeat", type=int, default=1)
+    p.add_argument("--accept-goldens", action="store_true", help="store this run's dumps as the golden images")
+    p.add_argument("--keep-raw", action="store_true")
+    p.add_argument("--reset-user", action="store_true", help="recreate out/playtest_user from user/")
+    p.add_argument("--env", action="append", metavar="KEY=VALUE",
+                   help="override one setting for this run (repeatable), e.g. --env BB_RTAO=0; "
+                        "investigate without changing the recorded reproduction point")
+    p.set_defaults(func=cmd_run)
+    p = sub.add_parser("eval", help="evaluate a results directory again")
+    p.add_argument("results_dir")
+    p.add_argument("--test")
+    p.set_defaults(func=cmd_eval)
+    p = sub.add_parser("compare", help="medians of the last runs by commit")
+    p.add_argument("test")
+    p.add_argument("--last", type=int, default=5)
+    p.set_defaults(func=cmd_compare)
+    p = sub.add_parser("list", help="tests, routes and saves of the library")
+    p.set_defaults(func=cmd_list)
+    p = sub.add_parser("record", help="create a playtest or record a route (a guided wizard at a terminal)")
+    p.add_argument("target", nargs="?", metavar="name",
+                   help="an existing test (records its route), or a new playtest name. "
+                        "Omit at a terminal to be asked for one")
+    p.add_argument("--save", help="which frozen save to spawn on; omit to pick from a menu "
+                                  "(or 'saves' to list them). Inferred when the target is a test")
+    p.add_argument("--description", help="the new playtest's one-line description (skips that prompt)")
+    p.add_argument("--ticket", help="bug ticket the new playtest guards; puts it under tests/bugs/")
+    p.add_argument("--delay-ms", type=int, default=3000,
+                   help="recording auto-starts this long after the level loads (default 3000)")
+    p.add_argument("--env-base", default="default", help="env/<name>.env to load (default 'default')")
+    p.add_argument("--force", action="store_true", help="overwrite the route if it already exists")
+    p.set_defaults(func=cmd_record)
+    p = sub.add_parser("saves", help="list the frozen saves with their location")
+    p.set_defaults(func=cmd_saves)
+    p = sub.add_parser("edit", help="change a playtest's save/description/ticket/env/delay (wizard or flags)")
+    p.add_argument("target", help="the test to edit (its name)")
+    p.add_argument("--save", help="spawn save")
+    p.add_argument("--description", help="one-line description")
+    p.add_argument("--ticket", help="bug ticket (empty string clears it)")
+    p.add_argument("--env-base", help="env/<name>.env")
+    p.add_argument("--delay-ms", type=int, help="replay start delay after the level")
+    p.set_defaults(func=cmd_edit)
+    p = sub.add_parser("remove", aliases=["delete"], help="delete a playtest (its test + route; keeps the save)")
+    p.add_argument("target", help="the test to delete")
+    p.add_argument("--yes", action="store_true", help="delete without confirming")
+    p.set_defaults(func=cmd_remove)
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
