@@ -384,6 +384,11 @@ def convert_dumps(raw_dir: Path, results: Path, names, keep_raw: bool):
         name = kind_names[i] if i < len(kind_names) else (f"dump{i}" if kind == "final" else f"present{i}")
         png = dumps / f"{name}.png"
         size, fmt = f"{m.group(3)}x{m.group(4)}", m.group(5)
+        if kind == "present" and fmt == "rgba":
+            # The game's display buffer holds BGRA bytes in an image the engine labels rgba (its
+            # format is the guest's, the swizzle is in the view): golden candles came out blue.
+            # The final (swapchain) dumps are labelled right. Engine label fix: playtests ticket 03.8.
+            fmt = "bgra"
         r = subprocess.run(["magick", "-size", size, "-depth", "8", f"{fmt}:{raw}", "-alpha", "off", str(png)],
                            capture_output=True, text=True)
         if r.returncode == 0:
@@ -461,7 +466,12 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         k, _, v = kv.partition("=")
         env[k.strip()] = v
     user_dir = OUT / "playtest_user"
-    prepare_user(lib, test["save"], test.get("settings", {}), user_dir, reset=args.reset_user)
+    settings = {k: dict(v) for k, v in (test.get("settings") or {}).items()}
+    for kv in (getattr(args, "setting", None) or []):   # ad-hoc live-settings changes, e.g. rtreflect.soften=0
+        key, _, v = kv.partition("=")
+        file, _, k = key.partition(".")
+        settings.setdefault(file.strip(), {})[k.strip()] = v.strip()
+    prepare_user(lib, test["save"], settings, user_dir, reset=args.reset_user)
     env["BB_USER_DIR"] = str(user_dir)
     # The test's [effects] (e.g. ssr = 1) are game-effect toggles that live only in bbport.ini — no
     # env var sets them. Copy the real bbport.ini, apply the overrides, and point BB_CONFIG at the
@@ -1470,6 +1480,9 @@ def main(argv=None) -> int:
     p.add_argument("--env", action="append", metavar="KEY=VALUE",
                    help="override one setting for this run (repeatable), e.g. --env BB_RTAO=0; "
                         "investigate without changing the recorded reproduction point")
+    p.add_argument("--setting", action="append", metavar="FILE.KEY=VALUE",
+                   help="override one live setting for this run (repeatable), e.g. --setting rtreflect.soften=0 "
+                        "(user/<FILE>.txt in the scratch user folder)")
     p.add_argument("--effect", action="append", metavar="NAME=0|1",
                    help="override one game effect for this run (repeatable), e.g. --effect motion_blur=0 "
                         "(the effect_* keys of bbport.ini, applied through a scratch copy)")

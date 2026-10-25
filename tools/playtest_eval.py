@@ -410,6 +410,32 @@ def mean_luma(path: Path, masks=None, reduce: int = 4):
     return float(a[keep].mean()) if keep.any() else float(a.mean())
 
 
+def shimmer(paths: list, region, threshold: float = 15.0):
+    """Sparkle in a still view: the mean share (%) of the region's pixels whose luma jumps by more
+    than threshold between consecutive frames. region = [x, y, w, h] as fractions. None if fewer
+    than two frames load."""
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError:  # pragma: no cover
+        return None
+    prev, shares = None, []
+    for path in paths:
+        try:
+            img = Image.open(path).convert("RGB")
+        except OSError:
+            prev = None
+            continue
+        w, h = img.size
+        x0, y0 = int(region[0] * w), int(region[1] * h)
+        box = (x0, y0, x0 + max(1, int(region[2] * w)), y0 + max(1, int(region[3] * h)))
+        lum = np.asarray(img.crop(box), dtype=np.float32) @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        if prev is not None and prev.shape == lum.shape:
+            shares.append(float((np.abs(lum - prev) > threshold).mean()) * 100.0)
+        prev = lum
+    return round(statistics.mean(shares), 4) if shares else None
+
+
 def black_frames(lumas: list, black_luma: float = 3.0, black_rel: float = 0.25, drop_rel: float = 0.5,
                  drop_span: int = 4) -> list[int]:
     """Indices of the frames of a burst that are (near) black or drop out: below black_luma, below
@@ -538,6 +564,8 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
                                  float(criteria.get("drop_rel", 0.5)), int(criteria.get("drop_span", 4)))
             entry = {"name": name, "burst": count, "frames": got, "black": black,
                      "luma": [None if v is None else round(v, 2) for v in lumas], "ok": not black}
+            if dump.get("region"):
+                entry["shimmer_pct"] = shimmer(pngs, dump["region"], float(dump.get("shimmer_threshold", 15)))
             if got < count:
                 invalid.append(f"burst {name}: {got} of {count} frames dumped")
             images.append(entry)
@@ -610,6 +638,13 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
         detail = ", ".join(f"{k}: {v}" for k, v in markers["asserts"].items())
         reasons.append(f"{total_asserts} continued asserts > {criteria['max_asserts']} ({detail})")
 
+    if "max_shimmer_pct" in criteria:
+        for im in images:
+            v = im.get("shimmer_pct")
+            if v is None and im.get("burst"):
+                invalid.append(f"burst {im['name']}: no shimmer measure (region missing or too few frames)")
+            elif v is not None and v > float(criteria["max_shimmer_pct"]):
+                reasons.append(f"burst {im['name']}: shimmer {v} % of the region's pixels a frame > {criteria['max_shimmer_pct']}")
     if "max_black_frames" in criteria:
         bursts = [im for im in images if im.get("burst")]
         if not bursts:
@@ -689,7 +724,8 @@ def summary_markdown(result: dict) -> str:
             lumas = [v for v in im["luma"] if v is not None]
             span = f"luma {min(lumas)} .. {max(lumas)}" if lumas else "no frames"
             out.append(f"Burst {im['name']}: {im['frames']} of {im['burst']} frames, {span}; "
-                       f"dark or dropped frames: {im['black'] or 'none'}.")
+                       f"dark or dropped frames: {im['black'] or 'none'}"
+                       + (f"; shimmer {im['shimmer_pct']} % of the region's pixels a frame." if im.get("shimmer_pct") is not None else "."))
     stills = [im for im in result["images"] if not im.get("burst")]
     if stills:
         out += ["", "| image | mad | diff | psnr | ssim | ok |", "|---|---|---|---|---|---|"]

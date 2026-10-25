@@ -663,6 +663,21 @@ class BurstAndEnvPathTests(unittest.TestCase):
         self.assertAlmostEqual(pt.replay_start_wall(lines, now_wall=1000.0, now_mono=81330.319), 987.0, places=3)
         self.assertEqual(pt.replay_start_wall(["no stamp"], now_wall=5.0, now_mono=1.0), 5.0)
 
+    def test_shimmer(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for j in range(4):
+                img = Image.new("RGB", (40, 40), (50, 50, 50))
+                if j % 2:   # 4 sparkling pixels inside the region's 20x20 = 1 %
+                    for x in range(4):
+                        img.putpixel((x, 0), (250, 250, 250))
+                paths.append(Path(d) / f"s_{j}.png")
+                img.save(paths[-1])
+            self.assertAlmostEqual(ev.shimmer(paths, [0, 0, 0.5, 0.5]), 1.0, places=3)
+            self.assertEqual(ev.shimmer(paths, [0.5, 0.5, 0.5, 0.5]), 0.0)
+            self.assertIsNone(ev.shimmer(paths[:1], [0, 0, 1, 1]))
+
     def test_env_path_problems(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "mods.json").write_text("{}")
