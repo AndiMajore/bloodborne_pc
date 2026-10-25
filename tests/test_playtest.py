@@ -617,6 +617,8 @@ class BurstAndEnvPathTests(unittest.TestCase):
 
     def test_black_frames(self):
         self.assertEqual(ev.black_frames([40, 42, 1.0, 39, 9, 41]), [2, 4])     # 9 < 0.25 * median 39.5
+        self.assertEqual(ev.black_frames([20, 20, 6, 18, 19]), [2])             # the 81 dip: a third of its neighbours
+        self.assertEqual(ev.black_frames([20, 14, 10, 7, 6]), [])               # a fade is not a drop
         self.assertEqual(ev.black_frames([6, 5, 6, 5]), [])                     # a dark scene stays dark
         self.assertEqual(ev.black_frames([None, 2.0, 30, 30]), [1])
         self.assertEqual(ev.black_frames([]), [])
@@ -633,7 +635,7 @@ class BurstAndEnvPathTests(unittest.TestCase):
             r = ev.evaluate(results, test, lib)
             self.assertEqual(r["status"], "fail")
             self.assertEqual(r["images"][0]["black"], [1])
-            self.assertIn("1 black frames", " ".join(r["reasons"]))
+            self.assertIn("1 dark or dropped frames", " ".join(r["reasons"]))
             self.assertIn("Burst gate: 3 of 3 frames", ev.summary_markdown(r))
 
     def test_burst_missing_frames_is_invalid(self):

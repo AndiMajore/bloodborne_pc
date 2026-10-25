@@ -402,14 +402,24 @@ def mean_luma(path: Path, masks=None, reduce: int = 4):
     return float(a[keep].mean()) if keep.any() else float(a.mean())
 
 
-def black_frames(lumas: list, black_luma: float = 3.0, black_rel: float = 0.25) -> list[int]:
-    """Indices of the frames of a burst that are (near) black: below black_luma, or below black_rel
-    of the burst's median (a dark scene stays dark; a frame the post pass blanked drops out)."""
+def black_frames(lumas: list, black_luma: float = 3.0, black_rel: float = 0.25, drop_rel: float = 0.5) -> list[int]:
+    """Indices of the frames of a burst that are (near) black or drop out: below black_luma, below
+    black_rel of the burst's median, or below drop_rel of both neighbours (ticket 81's flicker is a
+    single frame whose scene falls to about a third of its brightness while the HUD stays)."""
     vals = [v for v in lumas if v is not None]
     if not vals:
         return []
     limit = max(black_luma, black_rel * statistics.median(vals))
-    return [i for i, v in enumerate(lumas) if v is not None and v < limit]
+    out = []
+    for i, v in enumerate(lumas):
+        if v is None:
+            continue
+        prev = lumas[i - 1] if i > 0 else None
+        nxt = lumas[i + 1] if i + 1 < len(lumas) else None
+        near = [n for n in (prev, nxt) if n is not None]
+        if v < limit or (near and all(v < drop_rel * n for n in near)):
+            out.append(i)
+    return out
 
 
 def _ssim(aa, bb, keep, win: int = 7):
@@ -510,7 +520,8 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
             pngs = [results_dir / "dumps" / f"{name}_{j:03d}.png" for j in range(count)]
             lumas = [mean_luma(f, test.get("masks")) if f.exists() else None for f in pngs]
             got = sum(v is not None for v in lumas)
-            black = black_frames(lumas, float(criteria.get("black_luma", 3.0)), float(criteria.get("black_rel", 0.25)))
+            black = black_frames(lumas, float(criteria.get("black_luma", 3.0)), float(criteria.get("black_rel", 0.25)),
+                                 float(criteria.get("drop_rel", 0.5)))
             entry = {"name": name, "burst": count, "frames": got, "black": black,
                      "luma": [None if v is None else round(v, 2) for v in lumas], "ok": not black}
             if got < count:
@@ -591,7 +602,7 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
             invalid.append("max_black_frames set but no burst dump ([[dumps]] with count > 1, kind present)")
         for im in bursts:
             if len(im["black"]) > int(criteria["max_black_frames"]):
-                reasons.append(f"burst {im['name']}: {len(im['black'])} black frames > {criteria['max_black_frames']} "
+                reasons.append(f"burst {im['name']}: {len(im['black'])} dark or dropped frames > {criteria['max_black_frames']} "
                                f"(frames {im['black'][:12]})")
 
     if crashed:
@@ -664,7 +675,7 @@ def summary_markdown(result: dict) -> str:
             lumas = [v for v in im["luma"] if v is not None]
             span = f"luma {min(lumas)} .. {max(lumas)}" if lumas else "no frames"
             out.append(f"Burst {im['name']}: {im['frames']} of {im['burst']} frames, {span}; "
-                       f"black frames: {im['black'] or 'none'}.")
+                       f"dark or dropped frames: {im['black'] or 'none'}.")
     stills = [im for im in result["images"] if not im.get("burst")]
     if stills:
         out += ["", "| image | mad | diff | psnr | ssim | ok |", "|---|---|---|---|---|---|"]
