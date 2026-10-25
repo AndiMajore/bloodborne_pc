@@ -657,6 +657,12 @@ class BurstAndEnvPathTests(unittest.TestCase):
             r = ev.evaluate(results, test, lib)
             self.assertIn("burst gate: 0 of 3 frames dumped", r["invalid_reasons"])
 
+    def test_replay_start_from_mono_stamp(self):
+        lines = ["Runtime: pad replay armed (autostart, 5016 ms after scene load)",
+                 "Runtime: pad replay started (mono 81317.319 s)"]
+        self.assertAlmostEqual(pt.replay_start_wall(lines, now_wall=1000.0, now_mono=81330.319), 987.0, places=3)
+        self.assertEqual(pt.replay_start_wall(["no stamp"], now_wall=5.0, now_mono=1.0), 5.0)
+
     def test_env_path_problems(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "mods.json").write_text("{}")

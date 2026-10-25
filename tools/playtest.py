@@ -62,6 +62,7 @@ REPRO_SKIP = {"BB_USER_DIR", "BB_PAD_FILE", "BB_PAD_RECORD", "BB_PAD_REPLAY", "B
               "BB_FINAL_DUMP_TRIGGER", "BB_PRESENT_DUMP_TRIGGER", "BB_CAPTURE_TRIGGER",
               "BB_CAPTURE_DIR", "BB_FRAME_LOG", "BB_FRAME_STATS", "BB_GPU_PROFILE", "BB_SAVE_LOG",
               "BB_FAULT_WAIT", "BB_CAMERA_LOG", "BB_CAMERA_LOG_MS", "BB_LEVEL_SETTLE"}
+RE_REPLAY_MONO = re.compile(r"Runtime: pad replay started \(mono ([0-9.]+) s\)")
 RE_DUMP_FILE = re.compile(r"f(\d+)_(final|present)_(\d+)x(\d+)_(rgba|bgra)\.raw$")
 _SENTINEL = object()   # "no argument given", where None is a meaningful value
 
@@ -395,6 +396,19 @@ def convert_dumps(raw_dir: Path, results: Path, names, keep_raw: bool):
     return produced
 
 
+def replay_start_wall(lines, now_wall=None, now_mono=None) -> float:
+    """Wall time of the replay's start. The engine stamps it on CLOCK_MONOTONIC ("pad replay started
+    (mono S s)"), the clock of time.monotonic(); the runner may see the line many seconds late (it
+    waits for the level beside the engine), and timed dumps must count from the real start."""
+    now_wall = time.time() if now_wall is None else now_wall
+    now_mono = time.monotonic() if now_mono is None else now_mono
+    for line in lines:
+        m = RE_REPLAY_MONO.search(line)
+        if m:
+            return now_wall - (now_mono - float(m.group(1)))
+    return now_wall
+
+
 def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
     test = ev.load_test(test_path)
     name = test["name"]
@@ -508,7 +522,7 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
     while route and replay_wall is None:
         watch.poll()
         if watch.has("Runtime: pad replay of") or watch.has("Runtime: pad replay started"):
-            replay_wall = time.time()
+            replay_wall = replay_start_wall(watch.lines)
             timing["replay_started_s"] = replay_wall - t0
             break
         if not pid_alive(pid):
@@ -536,9 +550,12 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         watch.poll()
         now = time.time()
         if route and watch.has("Runtime: pad replay finished"):
-            finished = True
-            timing["replay_finished_s"] = now - t0
-            break
+            if not finished:
+                finished = True
+                timing["replay_finished_s"] = now - t0
+            # timed dumps may fall into the hold after the last input (the engine quits after it)
+            if not any("at_ms" in d and i not in legacy_dumps_fired for i, d in enumerate(dumps)):
+                break
         if not route and now - replay_wall >= duration_s:
             finished = True
             timing["replay_finished_s"] = now - t0
