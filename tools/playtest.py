@@ -216,9 +216,18 @@ def prepare_user(lib: Path, save: str, settings: dict, user_dir: Path, reset: bo
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
-    for name, values in settings.items():
+    for name in settings:
         if name not in SETTINGS_FILES:
             raise SystemExit(f"unknown settings file [settings.{name}] (one of {', '.join(SETTINGS_FILES)})")
+    # Every run starts from the player's live settings again: a run's own values (the test's or
+    # --setting) would otherwise stay in the scratch files and carry into the next run.
+    for name in SETTINGS_FILES:
+        own, player = user_dir / f"{name}.txt", PORT / "user" / f"{name}.txt"
+        if player.is_file():
+            shutil.copy2(player, own)
+        else:
+            own.unlink(missing_ok=True)
+    for name, values in settings.items():
         write_live_settings(user_dir / f"{name}.txt", values)
 
 

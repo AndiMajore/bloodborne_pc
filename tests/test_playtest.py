@@ -306,6 +306,8 @@ class RunnerTests(unittest.TestCase):
                 (scratch / "savedata" / "1" / "T" / "S" / "userdata0000").write_bytes(b"moved by the game")
                 pt.prepare_user(lib, "spot", {}, scratch)
                 self.assertEqual((scratch / "savedata" / "1" / "T" / "S" / "userdata0000").read_bytes(), b"frozen")
+                # ... and starts again from the player's settings, without the last run's values
+                self.assertEqual((scratch / "rtao.txt").read_text(), "rays=2\n")
                 with self.assertRaises(SystemExit):
                     pt.prepare_user(lib, "spot", {"nonsense": {}}, scratch)
                 with self.assertRaises(SystemExit):
