@@ -480,14 +480,20 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
     for kv in (getattr(args, "effect", None) or []):   # ad-hoc effect changes, e.g. motion_blur=0
         k, _, v = kv.partition("=")
         effects[k.strip().removeprefix("effect_")] = v.strip()
-    if effects:
+    ini = {k: str(v) for k, v in (test.get("ini") or {}).items()}
+    for kv in (getattr(args, "ini", None) or []):        # ad-hoc bbport.ini keys, e.g. upscaler=fsr3
+        k, _, v = kv.partition("=")
+        ini[k.strip()] = v.strip()
+    if effects or ini:
         base_ini = Path(env.get("BB_CONFIG") or (PORT / "bbport.ini"))
         text = base_ini.read_text() if base_ini.is_file() else ""
         for k, v in effects.items():
             text = set_ini(text, f"effect_{k}", "1" if str(v).lower() in ("1", "true", "on") else "0")
+        for k, v in ini.items():
+            text = set_ini(text, k, v)
         (user_dir / "bbport.ini").write_text(text)
         env["BB_CONFIG"] = str(user_dir / "bbport.ini")
-        print(f"[{name}] effects: " + ", ".join(f"{k}={v}" for k, v in effects.items())
+        print(f"[{name}] effects/ini: " + ", ".join(f"{k}={v}" for k, v in {**effects, **ini}.items())
               + " (scratch bbport.ini)")
     problems = env_path_problems(env)
     if problems:
@@ -1483,6 +1489,9 @@ def main(argv=None) -> int:
     p.add_argument("--setting", action="append", metavar="FILE.KEY=VALUE",
                    help="override one live setting for this run (repeatable), e.g. --setting rtreflect.soften=0 "
                         "(user/<FILE>.txt in the scratch user folder)")
+    p.add_argument("--ini", action="append", metavar="KEY=VALUE",
+                   help="override one bbport.ini key for this run (repeatable), e.g. --ini upscaler=fsr3 "
+                        "(applied through a scratch copy)")
     p.add_argument("--effect", action="append", metavar="NAME=0|1",
                    help="override one game effect for this run (repeatable), e.g. --effect motion_blur=0 "
                         "(the effect_* keys of bbport.ini, applied through a scratch copy)")
