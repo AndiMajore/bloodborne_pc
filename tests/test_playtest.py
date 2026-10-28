@@ -709,12 +709,13 @@ class ReproEnvTests(unittest.TestCase):
             self.assertEqual(env["BB_GPU_PROFILE"], "1")         # measurement instrumentation layered on
             self.assertEqual(env["BB_FAULT_WAIT"], "0")
 
-    def test_falls_back_windowed_without_snapshot(self):
+    def test_falls_back_to_default_env_fullscreen_on_screen_1(self):
         with tempfile.TemporaryDirectory() as d:
             lib = self._lib(d)
             env, src = pt.resolve_repro_env(lib, {"route": "r", "env_base": "default"})
             self.assertIsNone(src)
-            self.assertEqual(env["BB_FULLSCREEN"], "0")          # legacy windowed default preserved
+            self.assertEqual(env["BB_FULLSCREEN"], "1")          # always fullscreen on screen 1:
+            self.assertEqual(env["BB_DISPLAY"], "1")             # a window lands on any screen (Wayland)
             self.assertEqual(env["BB_HDR"], "1")                 # from env/default.env
 
 

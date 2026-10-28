@@ -46,8 +46,8 @@ OUT = PORT / "out"
 SETTINGS_FILES = ("rtao", "ssgi", "rtlighting", "rtreflect", "rtprobes")
 # BB_HDR is NOT forced here: forcing SDR made the game skip its SSAO pass (the one RTAO hooks,
 # pixel shader 0xc45c51cb), so RTAO never engaged. The display config comes from env/<base>.env
-# and the test, matching the player's real run. BB_FULLSCREEN=0 keeps the test window from taking
-# over a screen; it does not change the render path.
+# and the test, matching the player's real run. The test game always runs fullscreen on screen 1
+# (BB_DISPLAY=1; resolve_repro_env).
 # Invisible instrumentation layered on top of the reproduction settings for a measured run: logging
 # and automation only, nothing that changes what is rendered. restart.sh settles briefly after the
 # level (BB_LEVEL_SETTLE); the engine's scene-load check + BB_PAD_REPLAY_DELAY_MS then govern timing.
@@ -126,8 +126,11 @@ def resolve_repro_env(lib: Path, test: dict) -> tuple:
         source = f"routes/{route}.env"
     else:
         env.update(read_env_file(lib / "env" / f"{test.get('env_base', 'default')}.env"))
-        env["BB_FULLSCREEN"] = "0"   # legacy harness default (windowed) when there is no snapshot
         source = None
+    # The test game always runs fullscreen on screen 1 (Andreas's main, HDR monitor). A window can't
+    # be placed on Wayland: KWin opened the windowed test game on the second screen.
+    env["BB_FULLSCREEN"] = "1"
+    env["BB_DISPLAY"] = "1"
     env.update(MEASURE_ENV)
     return env, source
 
