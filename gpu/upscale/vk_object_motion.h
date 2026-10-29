@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 bbport contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: object motion vectors for temporal upscaling (docs/ROADMAP.md, step 1).
 //
@@ -31,7 +32,8 @@ public:
 
     using DrawInfo = Motion::Draw;
     /// bbport: `allocation` (optional) receives this draw's allocation, empty when none.
-    u32 PrepareDraw(const DrawInfo& draw, Motion::History::Allocation* allocation = nullptr);
+    u32 PrepareDraw(const DrawInfo& draw, Motion::Anchor anchor = {},
+                    Motion::History::Allocation* allocation = nullptr);
     /// bbport: the ray-traced AO's capture. Set at start when BB_RTAO is set, ray queries are
     /// supported and object motion is on; otherwise nothing below exists and nothing changes.
     [[nodiscard]] static bool RtaoCapture() noexcept {
@@ -53,8 +55,8 @@ public:
         return 1 + 2ull * (PositionsPerFrame + capture_per_frame);
     }
     /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
-    bool Moving(const Motion::History::GateKey& key, u64 palette) {
-        return history.Moving(key, palette);
+    bool Moving(const Motion::History::GateKey& key, u64 palette, Motion::Anchor anchor = {}) {
+        return history.Moving(key, palette, anchor);
     }
     /// Index range and topology hash of an indexed draw, reused across frames.
     template <class Scan>
@@ -68,6 +70,8 @@ public:
 
     /// Start of a frame (display pass).
     void OnFrameStart();
+    /// BB_MOTION_TRACE=<file> (diagnostics): the frame after the file appears prints its motion draws.
+    [[nodiscard]] bool Tracing() const noexcept { return tracing; }
     void InvalidateHistory() { history.NextFrame(); history.NextFrame(); }
 
     /// The motion image for the compose pass (layout General after this call) and whether it
@@ -83,6 +87,11 @@ public:
     }
 
 private:
+    /// The params (host) and positions (device) buffers; at last session's addresses when the
+    /// device can replay them.
+    bool CreateBuffers(vk::DeviceSize params_size, vk::DeviceSize positions_size, void*& mapped,
+                       u64& params_address, u64& positions_address);
+
     /// bbport: a motion image per render-target size. Scenes with G-buffer passes at two sizes
     /// (a reduced proxy and the full target) shared one image: every switch recreated it after
     /// a full GPU wait (Scheduler::Finish), twice a frame — ~70% of the draw recording thread's
@@ -118,7 +127,9 @@ private:
     static constexpr u32 FrameSlots = 4;
     static constexpr u32 ParamsPerFrame = 8192;
     // Positions (device local): two halves (current/previous frame) of vec4; element 0 is reserved.
-    static constexpr u32 PositionsPerFrame = 4u << 20;
+    // 4 Mi; 1 Mi on cards with 4 GB or less (128 MiB of VRAM there, 32: a scene draws ~1.3 Mi, the
+    // rest falls back to camera motion). BB_MOTION_VERTICES_MI=N: N Mi.
+    const u32 PositionsPerFrame;
     Motion::History history{PositionsPerFrame};
     // bbport: the RTAO capture, after the motion halves: two halves of its own and a block of
     // parameters after the motion ones in each frame slot (none without the capture).
@@ -134,8 +145,12 @@ private:
     u32* params_mapped{};
     vk::Buffer positions_buffer{};
     VmaAllocation positions_allocation{};
+    /// With buffer address replay (Instance::HasBufferAddressReplay) the two buffers have their
+    /// own memory instead of VMA allocations.
+    VkDeviceMemory params_memory{}, positions_memory{};
 
     u64 frame = 0;
+    bool tracing = false;
     u32 params_used = 0;
     std::array<Target, MaxTargets> targets;
     const Target* read_target = nullptr; ///< of the last PrepareRead

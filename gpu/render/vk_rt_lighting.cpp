@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_rt_lighting.h"
+#include "shim/bb_env.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -21,7 +22,7 @@ RtLighting::RtLighting(const Instance& instance, Scheduler& scheduler, VideoCore
                                           settings);
     emission = std::make_unique<RtEmission>(instance, scheduler, texture_cache, runtime, camera_motion, rtao, *lights,
                                             settings);
-    if (const char* file = std::getenv("BB_RTLIGHTING_FILE"); file && *file) {
+    if (const char* file = bb_env("BB_RTLIGHTING_FILE"); file && *file) {
         settings_path = file;
     } else {
         settings_path = (Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "rtlighting.txt").string();

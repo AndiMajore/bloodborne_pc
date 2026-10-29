@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 bbport contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: the game's trophy data without the system around it (bbport_trophies.cpp; the layout
 // and the key scheme as shadPS4's trp.cpp and np_trophy.cpp have them). trophy00.trp in

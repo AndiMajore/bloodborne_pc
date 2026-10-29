@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "shim/bb_env.h"
 #include <array>
 #include <condition_variable>
 #include <cstddef>
@@ -176,11 +177,11 @@ struct PassInputs {
     vk::Buffer surface_parts_handle, surface_cache_handle;
 };
 inline float EnvFloat(const char* name, float fallback) {
-    const char* value = std::getenv(name);
+    const char* value = bb_env(name);
     return value ? std::strtof(value, nullptr) : fallback;
 }
 inline u32 EnvU32(const char* name, u32 fallback) {
-    const char* value = std::getenv(name);
+    const char* value = bb_env(name);
     return value ? u32(std::strtoul(value, nullptr, 10)) : fallback;
 }
 constexpr auto AsBuild = vk::PipelineStageFlagBits2::eAccelerationStructureBuildKHR;

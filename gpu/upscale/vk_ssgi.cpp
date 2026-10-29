@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "upscale/vk_ssgi.h"
+#include "shim/bb_env.h"
 #include "render/vk_rt_lighting.h"
 
 #include <cstdio>
@@ -140,11 +141,11 @@ void MakeImage(const Instance& instance, VideoCore::HostImage& image, vk::Unique
     }));
 }
 float EnvFloat(const char* name, float fallback) {
-    const char* value = std::getenv(name);
+    const char* value = bb_env(name);
     return value ? std::strtof(value, nullptr) : fallback;
 }
 u32 EnvU32(const char* name, u32 fallback) {
-    const char* value = std::getenv(name);
+    const char* value = bb_env(name);
     return value ? u32(std::strtoul(value, nullptr, 10)) : fallback;
 }
 } // namespace
@@ -154,8 +155,7 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
                              CameraMotion& camera_motion_, SceneTargets& scene_targets_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
       runtime{runtime_}, camera_motion{camera_motion_}, scene_targets{scene_targets_} {
-    const char* env = std::getenv("BB_SSGI");
-    enabled = env && env[0] == '1' && camera_motion.Enabled();
+    enabled = bb_env_on("BB_SSGI") && camera_motion.Enabled();
     if (!enabled) {
         return;
     }
@@ -170,7 +170,7 @@ ScreenSpaceGI::ScreenSpaceGI(const Instance& instance_, Scheduler& scheduler_,
     adaptive = std::max(EnvFloat("BB_SSGI_ADAPTIVE", 4.0f), 0.0f);
     std::printf("SSGI: on, strength %.2f, radius %.2f, %u directions x %u steps, history %.2f%s\n",
                 strength, radius, directions, steps, history, debug ? ", debug view" : "");
-    if (const char* file = std::getenv("BB_SSGI_FILE")) {
+    if (const char* file = bb_env("BB_SSGI_FILE")) {
         settings_path = file;
     } else {
         settings_path = (Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "ssgi.txt").string();

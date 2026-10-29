@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 bbport contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: GPU-side check failures stop the port with exit code 23.
 #include <cstdio>
@@ -14,7 +15,12 @@ extern "C" __attribute__((weak)) volatile int runtime_restarting; // absent in t
 // bb-probe (probe.c): BB_FAULT_WAIT=1 keeps the process alive for a debugger (tools/debug_attach.sh).
 extern "C" __attribute__((weak)) void bb_fault_wait(const char* what);
 
+bool g_bb_assert_throws = false;
+
 void assert_fail_impl() {
+    if (g_bb_assert_throws) {
+        throw std::runtime_error("assertion failed");
+    }
     if (&runtime_restarting && runtime_restarting) {
         for (;;) {
             pause();

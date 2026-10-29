@@ -172,7 +172,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     enabled = true;
     std::printf("RTAO: on, %u rays, denoiser %u, radius %.2f, strength %.2f, up to %u triangles%s\n",
                 settings.rays, settings.denoise, settings.radius, settings.strength, max_triangles, settings.debug ? ", debug view" : "");
-    if (const char* file = std::getenv("BB_RTAO_FILE")) {
+    if (const char* file = bb_env("BB_RTAO_FILE")) {
         settings_path = file;
     } else {
         settings_path = (Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "rtao.txt").string();

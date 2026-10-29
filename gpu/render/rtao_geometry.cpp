@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/rtao_geometry.h"
+#include "shim/bb_env.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,10 +11,7 @@
 namespace Rtao {
 
 bool Requested() {
-    static const bool requested = [] {
-        const char* env = std::getenv("BB_RTAO");
-        return env && env[0] == '1';
-    }();
+    static const bool requested = bb_env_on("BB_RTAO");
     return requested;
 }
 

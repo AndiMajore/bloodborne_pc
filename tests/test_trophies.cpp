@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 bbport contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The trophy data without the game (gpu/shim/bbport_trophy_data.h): the package's entries, the NP
 // communication ID, the padding, the XML, the platinum rule, the key's text. Synthetic data only:

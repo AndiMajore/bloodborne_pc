@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_rt_reflect.h"
+#include "shim/bb_env.h"
 #include "render/vk_rt_lighting.h"
 
 #include <algorithm>
@@ -57,7 +58,7 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
                              const RtLighting& lighting_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_},
       camera_motion{camera_motion_}, rtao{rtao_}, lighting{lighting_} {
-    const char* env = std::getenv("BB_RT_REFLECT");
+    const char* env = bb_env("BB_RT_REFLECT");
     enabled = env && env[0] == '1' && rtao.Enabled() && instance.IsRayQuerySupported() &&
               instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize >=
                   sizeof(TraceConstants);
@@ -68,7 +69,7 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
         }
         return;
     }
-    if (const char* file = std::getenv("BB_RT_REFLECT_FILE")) {
+    if (const char* file = bb_env("BB_RT_REFLECT_FILE")) {
         settings_path = file;
     } else {
         settings_path =

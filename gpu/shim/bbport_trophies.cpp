@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 bbport contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: trophies (the runtime's sceNpTrophy calls, src/runtime_services.c). The game's unlocks
 // are kept in <user>/trophy/<NP communication ID>/unlocked.txt and announced over the frame
@@ -10,6 +11,7 @@
 // after the start, nothing recorded (to see the look).
 
 #include <algorithm>
+#include "shim/bb_env.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +40,12 @@ fs::path folder;                          // <user>/trophy/<NP communication ID>
 std::vector<BbTrophy::Trophy> trophies;   // empty: names unknown (no key or no package)
 std::set<int> unlocked;
 
+// A path for the log, UTF-8 (on Windows path::c_str() is wide).
+std::string Text(const fs::path& path) {
+    const std::u8string utf8 = path.u8string();
+    return std::string(utf8.begin(), utf8.end());
+}
+
 std::vector<std::uint8_t> ReadFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
     return file ? std::vector<std::uint8_t>(std::istreambuf_iterator<char>(file), {}) : std::vector<std::uint8_t>{};
@@ -46,7 +54,7 @@ std::vector<std::uint8_t> ReadFile(const fs::path& path) {
 // BB_TROPHY_KEY from the environment, else from the .env file in the working directory (the
 // port's folder, where run.sh starts the game).
 std::optional<std::vector<std::uint8_t>> TrophyKey() {
-    if (const char* env = std::getenv("BB_TROPHY_KEY"); env && *env) {
+    if (const char* env = bb_env("BB_TROPHY_KEY"); env && *env) {
         return BbTrophy::ParseKey(env);
     }
     std::ifstream file(".env");
@@ -77,7 +85,7 @@ bool Extract(const fs::path& trp_path, const std::string& np_comm_id, const std:
     const auto trp = ReadFile(trp_path);
     const auto entries = BbTrophy::ReadTrpEntries(trp);
     if (entries.empty()) {
-        std::printf("Trophies: %s is not a trophy package\n", trp_path.c_str());
+        std::printf("Trophies: %s is not a trophy package\n", Text(trp_path).c_str());
         return false;
     }
     std::uint8_t id[16] = {}, file_key[16] = {};
@@ -116,7 +124,8 @@ bool Extract(const fs::path& trp_path, const std::string& np_comm_id, const std:
         std::ofstream(folder / name, std::ios::binary).write(out.data(), std::streamsize(out.size()));
         ++written;
     }
-    std::printf("Trophies: %u files of %s decrypted into %s\n", written, trp_path.filename().c_str(), folder.c_str());
+    std::printf("Trophies: %u files of %s decrypted into %s\n", written, Text(trp_path.filename()).c_str(),
+                Text(folder).c_str());
     return fs::exists(folder / "TROP.XML");
 }
 #endif
@@ -124,7 +133,7 @@ bool Extract(const fs::path& trp_path, const std::string& np_comm_id, const std:
 // TROP_XX.XML of the game's language (BB_LANGUAGE, the PS4 numbers the runtime reports: 1 English
 // US, 8 Russian; 0 .. 30), else TROP.XML.
 fs::path LanguageFile() {
-    const char* env = std::getenv("BB_LANGUAGE");
+    const char* env = bb_env("BB_LANGUAGE");
     const int language = env ? std::atoi(env) : 1;
     char xx[16];
     std::snprintf(xx, sizeof(xx), "TROP_%02d.XML", language);
@@ -180,9 +189,9 @@ void SetUp(const char* sce_sys, const char* user_dir) {
     const auto xml = ReadFile(LanguageFile());
     trophies = BbTrophy::ParseTrophies(std::string_view(reinterpret_cast<const char*>(xml.data()), xml.size()));
     std::printf("Trophies: %s, %zu known, %zu unlocked here (%s)\n", np_comm_id.value_or("no NP ID").c_str(),
-                trophies.size(), unlocked.size(), folder.c_str());
+                trophies.size(), unlocked.size(), Text(folder).c_str());
     // BB_TROPHY_TEST=<id>: that trophy's announcement once, nothing recorded (to see the look).
-    if (const char* test = std::getenv("BB_TROPHY_TEST"); test && *test) {
+    if (const char* test = bb_env("BB_TROPHY_TEST"); test && *test) {
         const int id = std::atoi(test);
         const auto it = std::find_if(trophies.begin(), trophies.end(), [id](const auto& t) { return t.id == id; });
         BbOverlay::ShowTrophy(it != trophies.end() ? it->grade : '?',
