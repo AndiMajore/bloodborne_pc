@@ -278,6 +278,14 @@ static void replay_sample(PadData *d) {
     while (replay_next<replay_count && replay[replay_next].ms<=ms) ++replay_next;
     if (!replay_next) return;
     if (replay_next==replay_count && ms>replay[replay_count-1].ms+500) {
+        /* BB_PAD_REPLAY_LOOP=N: the route N more times (a soak test walks it there and back). */
+        static int loops_left=-1;
+        if (loops_left<0) loops_left=(int)bb_env_int("BB_PAD_REPLAY_LOOP",0);
+        if (replay_armed==1 && loops_left>0) {
+            --loops_left; replay_running=0;
+            printf("Runtime: pad replay looped (%d more)\n",loops_left);
+            return;
+        }
         if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; replay_finished_us=now_us(); }
         replay_end_tick();
         return;
