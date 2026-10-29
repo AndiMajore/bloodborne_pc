@@ -21,8 +21,13 @@
 #include "bbgpu/shaders/ffx_of_v5_fast.h"
 #include "bbgpu/shaders/ffx_of_v5_hdr_fast.h"
 
-extern "C" bool (*ffxVkShaderOverride)(uint32_t effect, uint32_t pass, uint32_t permutationOptions,
-                                       const uint32_t** words, size_t* size);
+// bbport (fork build fix): 0.7's FFX Vulkan backend patch that defines and calls this hook is not in
+// gpu/patches/fsr-vulkan, so the tree did not link. Defined here; the unpatched backend never calls
+// it, so the packaged frame generation passes run.
+extern "C" {
+bool (*ffxVkShaderOverride)(uint32_t effect, uint32_t pass, uint32_t permutationOptions,
+                            const uint32_t** words, size_t* size) = nullptr;
+}
 
 namespace FfxShaders {
 

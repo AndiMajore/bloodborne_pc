@@ -11,7 +11,11 @@
 
 #include "vulkan/instance.h"
 
-extern "C" void (*ffxVkJobMark)(uint32_t x, uint32_t y, uint32_t z);
+// bbport (fork build fix): defined here, see ffxVkShaderOverride in ffx_shaders.cpp; the unpatched
+// backend never calls it (no per-pass frame generation timings).
+extern "C" {
+void (*ffxVkJobMark)(uint32_t x, uint32_t y, uint32_t z) = nullptr;
+}
 
 namespace FgProfile {
 
