@@ -417,8 +417,12 @@ static void mouse_auto_rotation_hold(int hold) {
     }
     held=hold;
 }
+/* 1 while a BB_PAD_REPLAY recording plays (sample.c): its sticks turn the camera, so the game's
+ * auto-rotation stays as it was when the route was recorded, whether or not the window holds the
+ * mouse (the replay went off its route in some runs and not in others). */
+static int pad_replay_playing;
 static void apply_mouse_look(PadData *d, double dx, double dy, uint64_t now, int captured) {
-    mouse_auto_rotation_hold(mouse_look && captured && !bbgpu_free_camera());
+    mouse_auto_rotation_hold(mouse_look && captured && !bbgpu_free_camera() && !pad_replay_playing);
     /* The free camera (patch) takes the mouse through the right stick below. */
     if (captured && (dx!=0 || dy!=0) && !bbgpu_free_camera()) {
         const float k=MOUSE_RAD_PER_PIXEL*mouse_sensitivity;

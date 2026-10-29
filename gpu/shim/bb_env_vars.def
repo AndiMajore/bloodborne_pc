@@ -497,6 +497,7 @@ BB_ENV(BB_PAD_RECORD, DEBUG, "=file: F9 starts and stops recording the pad state
 BB_ENV(BB_PAD_REPLAY, DEBUG, "=file: plays a BB_PAD_RECORD recording")
 BB_ENV(BB_PAD_REPLAY_AUTOSTART, DEBUG, "=1: arms the BB_PAD_REPLAY replay by itself once the scene has loaded (playtests)")
 BB_ENV(BB_PAD_REPLAY_DELAY_MS, DEBUG, "=ms (default 3000): the autostarted replay's wait after the scene loaded")
+BB_ENV(BB_PAD_REPLAY_LEAD, DEBUG, "=keep: the replay starts at the file's start, its standing lead included (routes recorded before 0.7)")
 BB_ENV(BB_PAD_REPLAY_END, DEBUG, "=quit[:s]: quits the game that long (default 5 s) after the replay ended")
 BB_ENV(BB_PAD_SCENE_DRAWS, DEBUG, "=N (default 600): draws/frame over two seconds that count as a loaded scene for autostart")
 BB_ENV(BB_PAD_TAP_TEST, DEBUG, "=ms: the right stick fully right for that long (#325)")
