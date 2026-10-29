@@ -293,8 +293,8 @@ class RunnerTests(unittest.TestCase):
             (user / "savedata" / "1").mkdir(parents=True)
             (user / "savedata" / "1" / "player").write_bytes(b"mine")
             (user / "rtao.txt").write_text("rays=2\n")
-            old_port = pt.PORT
-            pt.PORT = Path(d)
+            old_port, old_home = pt.PORT, pt.HOME
+            pt.PORT = pt.HOME = Path(d)
             try:
                 scratch = Path(d) / "out" / "playtest_user"
                 pt.prepare_user(lib, "spot", {"rtao": {"rays": 1}}, scratch)
@@ -313,7 +313,7 @@ class RunnerTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     pt.prepare_user(lib, "nowhere", {}, scratch)
             finally:
-                pt.PORT = old_port
+                pt.PORT, pt.HOME = old_port, old_home
 
     def test_latest_draws(self):
         lines = ["Frame stats: 60.0 FPS, worst frame 18 ms (vblank 60 Hz); 0 shader/pipeline compiles, 0.0 ms; GPU thread 5 us/draw, 24 draws/frame",
@@ -414,11 +414,11 @@ class WizardTests(unittest.TestCase):
             port = Path(d) / "port"
             (port / "user" / "savedata").mkdir(parents=True)
             (port / "user" / "savedata" / "userdata0010").write_text("x")
-            orig_port, orig_fgr, orig_git = pt.PORT, pt.foreign_game_running, pt.git_info
-            pt.PORT = port
+            orig_port, orig_home, orig_fgr, orig_git = pt.PORT, pt.HOME, pt.foreign_game_running, pt.git_info
+            pt.PORT = pt.HOME = port
             pt.foreign_game_running = lambda: None
             pt.git_info = lambda: {"commit": "abc1234567", "branch": "rt", "dirty": False}
-            self.addCleanup(lambda: (setattr(pt, "PORT", orig_port),
+            self.addCleanup(lambda: (setattr(pt, "PORT", orig_port), setattr(pt, "HOME", orig_home),
                                      setattr(pt, "foreign_game_running", orig_fgr),
                                      setattr(pt, "git_info", orig_git)))
             pt.freeze_current_save(lib, "spot", "Oedon Chapel lamp", interactive=False)

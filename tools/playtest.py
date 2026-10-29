@@ -41,7 +41,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import playtest_eval as ev  # noqa: E402
 
-PORT = Path(__file__).resolve().parent.parent
+# HOME: this checkout, whose user/ and bbport.ini are the player's. PORT: the checkout whose build
+# runs (BB_PLAYTEST_PORT, e.g. a worktree of another branch for an A/B between builds).
+HOME = Path(__file__).resolve().parent.parent
+PORT = Path(os.environ.get("BB_PLAYTEST_PORT") or HOME).expanduser().resolve()
 OUT = PORT / "out"
 SETTINGS_FILES = ("rtao", "ssgi", "rtlighting", "rtreflect", "rtprobes")
 # BB_HDR is NOT forced here: forcing SDR made the game skip its SSAO pass (the one RTAO hooks,
@@ -205,7 +208,7 @@ def prepare_user(lib: Path, save: str, settings: dict, user_dir: Path, reset: bo
     if reset and user_dir.exists():
         shutil.rmtree(user_dir)
     if not user_dir.exists():
-        player = PORT / "user"
+        player = HOME / "user"
         user_dir.mkdir(parents=True)
         if player.is_dir():
             for entry in player.iterdir():
@@ -225,7 +228,7 @@ def prepare_user(lib: Path, save: str, settings: dict, user_dir: Path, reset: bo
     # Every run starts from the player's live settings again: a run's own values (the test's or
     # --setting) would otherwise stay in the scratch files and carry into the next run.
     for name in SETTINGS_FILES:
-        own, player = user_dir / f"{name}.txt", PORT / "user" / f"{name}.txt"
+        own, player = user_dir / f"{name}.txt", HOME / "user" / f"{name}.txt"
         if player.is_file():
             shutil.copy2(player, own)
         else:
@@ -497,7 +500,7 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         k, _, v = kv.partition("=")
         ini[k.strip()] = v.strip()
     if effects or ini:
-        base_ini = Path(env.get("BB_CONFIG") or (PORT / "bbport.ini"))
+        base_ini = Path(env.get("BB_CONFIG") or (HOME / "bbport.ini"))
         text = base_ini.read_text() if base_ini.is_file() else ""
         for k, v in effects.items():
             text = set_ini(text, f"effect_{k}", "1" if str(v).lower() in ("1", "true", "on") else "0")
@@ -1070,7 +1073,7 @@ def freeze_current_save(lib: Path, spot: str, where: str, interactive: bool = Tr
     """Copy the live user/savedata into the library as a frozen save. The game must be closed."""
     if foreign_game_running():
         raise SystemExit("a game is running; save in-game, close it, then freeze")
-    src = PORT / "user" / "savedata"
+    src = HOME / "user" / "savedata"
     if not src.is_dir():
         raise SystemExit(f"no live save found at {src}")
     dst = lib / "saves" / spot
