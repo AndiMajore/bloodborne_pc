@@ -528,7 +528,11 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
 
     # The run's end.
     end_mode = timing.get("end_mode", "engine")
-    clean_end = markers["window_closed"] is not None and markers["exit_done"] is not None
+    # 0.7 no longer prints the "Exit:" line after a requested quit: a quit the replay asked for that
+    # closed the window is a clean end too.
+    clean_end = markers["window_closed"] is not None and (
+        markers["exit_done"] is not None
+        or (markers["quit_requested"] is not None and markers["quit_requested"] < markers["window_closed"]))
     crashed = bool(markers["errors"]) or (timing.get("process_ended") and not clean_end and end_mode == "engine"
                                           and not timing.get("stopped_by_runner"))
     if timing.get("crashed"):
