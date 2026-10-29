@@ -499,15 +499,19 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
     for kv in (getattr(args, "ini", None) or []):        # ad-hoc bbport.ini keys, e.g. upscaler=fsr3
         k, _, v = kv.partition("=")
         ini[k.strip()] = v.strip()
+    # Every run reads a scratch copy of the player's bbport.ini (never the file itself: the in-game
+    # menu writes to it). Without one a build in another checkout (BB_PLAYTEST_PORT) read that
+    # checkout's missing bbport.ini and ran on defaults (0.7: output_res=auto -> 2560x1440 on a
+    # scaled 4K desktop).
+    base_ini = Path(env.get("BB_CONFIG") or (HOME / "bbport.ini"))
+    text = base_ini.read_text() if base_ini.is_file() else ""
+    for k, v in effects.items():
+        text = set_ini(text, f"effect_{k}", "1" if str(v).lower() in ("1", "true", "on") else "0")
+    for k, v in ini.items():
+        text = set_ini(text, k, v)
+    (user_dir / "bbport.ini").write_text(text)
+    env["BB_CONFIG"] = str(user_dir / "bbport.ini")
     if effects or ini:
-        base_ini = Path(env.get("BB_CONFIG") or (HOME / "bbport.ini"))
-        text = base_ini.read_text() if base_ini.is_file() else ""
-        for k, v in effects.items():
-            text = set_ini(text, f"effect_{k}", "1" if str(v).lower() in ("1", "true", "on") else "0")
-        for k, v in ini.items():
-            text = set_ini(text, k, v)
-        (user_dir / "bbport.ini").write_text(text)
-        env["BB_CONFIG"] = str(user_dir / "bbport.ini")
         print(f"[{name}] effects/ini: " + ", ".join(f"{k}={v}" for k, v in {**effects, **ini}.items())
               + " (scratch bbport.ini)")
     problems = env_path_problems(env)
