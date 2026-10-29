@@ -134,6 +134,11 @@ def resolve_repro_env(lib: Path, test: dict) -> tuple:
     # be placed on Wayland: KWin opened the windowed test game on the second screen.
     env["BB_FULLSCREEN"] = "1"
     env["BB_DISPLAY"] = "1"
+    # A build from another checkout (BB_PLAYTEST_PORT) takes its own patches/: 0.7 skips the built-in
+    # patches/Bloodborne.xml only in its own checkout and applied every default-on patch of this
+    # checkout's copy as an external file (a 21:9 resolution patch among them).
+    if PORT != HOME and Path(env.get("BB_PATCHES_DIR", "")).resolve() == (HOME / "patches").resolve():
+        env["BB_PATCHES_DIR"] = str(PORT / "patches")
     env.update(MEASURE_ENV)
     return env, source
 
