@@ -423,6 +423,9 @@ static void mouse_auto_rotation_hold(int hold) {
 static int pad_replay_playing;
 static void apply_mouse_look(PadData *d, double dx, double dy, uint64_t now, int captured) {
     mouse_auto_rotation_hold(mouse_look && captured && !bbgpu_free_camera() && !pad_replay_playing);
+    /* A replay's camera is its recorded right stick only: the window taking the mouse (relative
+     * mode at start, a warp) must not turn it (routes went off their way at ~7 s now and then). */
+    if (pad_replay_playing) dx=dy=0;
     /* The free camera (patch) takes the mouse through the right stick below. */
     if (captured && (dx!=0 || dy!=0) && !bbgpu_free_camera()) {
         const float k=MOUSE_RAD_PER_PIXEL*mouse_sensitivity;

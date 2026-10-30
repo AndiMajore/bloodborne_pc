@@ -377,6 +377,7 @@ BB_ENV(BB_CAMERA_INVERSE, DEBUG, "=own: motion vectors from the inverse of the v
 BB_ENV(BB_CAMERA_LOG, DEBUG, "set: camera position every 100 ms")
 BB_ENV(BB_CAMERA_Y, DEBUG, "=up / down: force the camera's y direction for motion vectors")
 BB_ENV(BB_CAMLOG, DEBUG, "set: camera yaw when it changes (#325)")
+BB_ENV(BB_CAPTURE_CONSTANTS, DEBUG, "=0: frame captures without the constant buffers (near real time; ticket 84)")
 BB_ENV(BB_CAPTURE_COUNT, DEBUG, "=N (default 1): a capture records N consecutive frames, frame_000.txt .. (ticket 84)")
 BB_ENV(BB_CAPTURE_DIR, DEBUG, "folder for frame captures (BB_CAPTURE_TRIGGER)")
 BB_ENV(BB_CAPTURE_TRIGGER, DEBUG, "=file: creating that file records the next frame for the frame analyzer")

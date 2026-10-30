@@ -273,6 +273,12 @@ void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
 }
 
 void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size) {
+    // BB_CAPTURE_CONSTANTS=0: passes, targets, shaders and textures only, ~real time (the constants
+    // are ~7 MB and ~0.4 s a frame: a burst slowed the game below its route's pace, ticket 84).
+    static const bool constants = !bb_env_off("BB_CAPTURE_CONSTANTS");
+    if (!constants) {
+        return;
+    }
     const u64 bytes = std::min<u64>(size, 1024) & ~u64(3);
     std::string out = std::format("  buffer stage {:016x} slot {} at {:#x} size {}:", stage_hash,
                                   slot, address, size);

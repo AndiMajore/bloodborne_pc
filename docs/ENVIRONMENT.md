@@ -367,7 +367,7 @@ Defaults to change on a machine where they misbehave, workarounds, and switches 
 | `BB_VULKANINFO` | path of vulkaninfo for the launcher |
 | `BB_WORK_RETIRED` | =0: the recording thread and fences do not wait for retired work |
 
-## Diagnostics (294)
+## Diagnostics (295)
 
 Logs, dumps, traces, probes and experiments, for finding bugs. Most cost frame time; none is meant for playing.
 
@@ -390,6 +390,7 @@ Logs, dumps, traces, probes and experiments, for finding bugs. Most cost frame t
 | `BB_CAMERA_LOG` | set: camera position every 100 ms |
 | `BB_CAMERA_Y` | =up / down: force the camera's y direction for motion vectors |
 | `BB_CAMLOG` | set: camera yaw when it changes (#325) |
+| `BB_CAPTURE_CONSTANTS` | =0: frame captures without the constant buffers (near real time; ticket 84) |
 | `BB_CAPTURE_COUNT` | =N (default 1): a capture records N consecutive frames, frame_000.txt .. (ticket 84) |
 | `BB_CAPTURE_DIR` | folder for frame captures (BB_CAPTURE_TRIGGER) |
 | `BB_CAPTURE_TRIGGER` | =file: creating that file records the next frame for the frame analyzer |
