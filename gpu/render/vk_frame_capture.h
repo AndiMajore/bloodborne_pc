@@ -42,11 +42,13 @@ public:
     /// GPU thread, at every draw/dispatch: starts or ends a recording at frame boundaries.
     static void Poll();
 
+    /// depth_id: the depth target's texture-cache image (0: unknown), named in the capture.
     static void BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_colors,
-                          const VideoCore::ImageInfo* depth);
+                          const VideoCore::ImageInfo* depth, u32 depth_id = 0);
     static void Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_instances);
     static void Dispatch(u64 cs_hash, u32 x, u32 y, u32 z);
-    static void Sampled(const VideoCore::ImageInfo& info, bool storage);
+    /// id: the texture-cache image sampled (0: unknown): two images at one address tell apart.
+    static void Sampled(const VideoCore::ImageInfo& info, bool storage, u32 id = 0);
     /// Contents of a bound buffer (first 1 KiB), kept for small passes and a pass's first draw.
     static void Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size);
     static void Note(const char* text);

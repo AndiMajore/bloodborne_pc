@@ -21,6 +21,7 @@ struct Target {
     VAddr address{};
     vk::Format format{};
     u32 width{}, height{};
+    u32 id{}; ///< the texture-cache image (+1; 0: not given)
     bool operator==(const Target&) const = default;
 };
 
@@ -80,7 +81,9 @@ std::string Describe(const Target& t) {
     if (!t.address) {
         return "-";
     }
-    return std::format("{:#x} {} {}x{}", t.address, vk::to_string(t.format), t.width, t.height);
+    return t.id ? std::format("{:#x} {} {}x{} image {}", t.address, vk::to_string(t.format), t.width,
+                              t.height, t.id - 1)
+                : std::format("{:#x} {} {}x{}", t.address, vk::to_string(t.format), t.width, t.height);
 }
 
 void AddSampled(Entry& entry) {
@@ -193,7 +196,7 @@ void FrameCapture::AddDisplayBuffer(VAddr address) {
 }
 
 void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_colors,
-                             const VideoCore::ImageInfo* depth) {
+                             const VideoCore::ImageInfo* depth, u32 depth_id) {
     std::vector<Target> targets;
     bool display = false;
     {
@@ -231,7 +234,10 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
         pending_buffers.clear();
         return;
     }
-    const Target d = depth ? ToTarget(*depth) : Target{};
+    Target d = depth ? ToTarget(*depth) : Target{};
+    if (depth && depth_id) {
+        d.id = depth_id;
+    }
     if (pass_open && !entries.empty() && !entries.back().compute &&
         entries.back().colors == targets && entries.back().depth == d) {
         return;
@@ -292,9 +298,11 @@ void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* d
     pending_buffers.push_back(std::move(out));
 }
 
-void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage) {
+void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage, u32 id) {
     if (pending_sampled.size() < 64) {
-        pending_sampled.emplace_back(ToTarget(info), storage);
+        Target t = ToTarget(info);
+        t.id = id;
+        pending_sampled.emplace_back(t, storage);
     }
 }
 

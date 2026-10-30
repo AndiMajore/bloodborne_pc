@@ -729,7 +729,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             }
         }
         const auto* depth = db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
-        FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
+        FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth,
+                                db_desc.first ? db_desc.first.index + 1 : 0);
     }
     if (key.motion_vectors == 1) { // not the RTAO capture's (2)
         object_motion->Attach(state, state.width, state.height); // the G-buffer's motion target

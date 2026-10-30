@@ -488,7 +488,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
             if (FrameCapture::Active()) {
-                FrameCapture::Sampled(image.info, is_storage);
+                FrameCapture::Sampled(image.info, is_storage, image_id.index + 1);
                 const auto& range = desc.view_info.range;
                 if (image.info.resources.layers > 1 || range.base.layer ||
                     desc.view_info.type != Gcn::ImageType::Color2D) {
