@@ -236,6 +236,7 @@ static void record_sample(const PadData *d) {
 }
 static PadSample *replay; static size_t replay_count, replay_next;
 static void replay_sample(PadData *d) {
+    pad_replay_playing=replay_armed==1;
     if (!replay_armed) return;
     if (!replay_running) {
         static int loaded;
@@ -253,10 +254,15 @@ static void replay_sample(PadData *d) {
             /* From the first input that is not neutral: the recording started (F9) a moment the replay
              * cannot know, while the player stood. */
             size_t lead=0;
+            /* BB_PAD_REPLAY_LEAD=keep: from the file's start, standing lead included (as before 0.7;
+             * routes recorded then were timed from it). */
+            const char *keep_lead=bb_env("BB_PAD_REPLAY_LEAD");
+            if (keep_lead && !strcmp(keep_lead,"keep")) lead=replay_count;
             while (lead<replay_count && !replay[lead].buttons && replay[lead].l2<8 && replay[lead].r2<8 &&
                    abs(replay[lead].axes[0]-128)<24 && abs(replay[lead].axes[1]-128)<24 &&
                    abs(replay[lead].axes[2]-128)<24 && abs(replay[lead].axes[3]-128)<24) ++lead;
-            if (lead<replay_count) {
+            if (lead>=replay_count) lead=0;
+            else {
                 const uint32_t t0=replay[lead].ms;
                 for (size_t i=lead;i<replay_count;++i) replay[i-lead]=replay[i], replay[i-lead].ms-=t0;
                 replay_count-=lead;
@@ -272,6 +278,14 @@ static void replay_sample(PadData *d) {
     while (replay_next<replay_count && replay[replay_next].ms<=ms) ++replay_next;
     if (!replay_next) return;
     if (replay_next==replay_count && ms>replay[replay_count-1].ms+500) {
+        /* BB_PAD_REPLAY_LOOP=N: the route N more times (a soak test walks it there and back). */
+        static int loops_left=-1;
+        if (loops_left<0) loops_left=(int)bb_env_int("BB_PAD_REPLAY_LOOP",0);
+        if (replay_armed==1 && loops_left>0) {
+            --loops_left; replay_running=0;
+            printf("Runtime: pad replay looped (%d more)\n",loops_left);
+            return;
+        }
         if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; replay_finished_us=now_us(); }
         replay_end_tick();
         return;
