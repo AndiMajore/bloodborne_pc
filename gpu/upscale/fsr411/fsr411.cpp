@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <string_view>
 #include <vector>
 
@@ -297,6 +298,22 @@ bool Reflect(const std::vector<uint32_t>& words, Reflection& out, std::string& e
 
 } // namespace
 
+/// "FSR 4.1.2" from a set's version file (tools/fsr4cap/extract.py writes the version of the DLL
+/// that ran the recording), or null for a set built before it had one. Interned: the pointer stays
+/// valid (the menu keeps it).
+static const char* ReadVersion(const std::string& path) {
+    std::ifstream f(path);
+    std::string v;
+    if (!(f >> v) || v.empty() || v.size() > 16 || v.find_first_not_of("0123456789.") != std::string::npos) {
+        return nullptr;
+    }
+    static std::mutex mutex;   // sets load on the build thread and the recording thread
+    std::scoped_lock lock{mutex};
+    static std::map<std::string, std::string> interned;
+    auto [it, _] = interned.try_emplace(v, "FSR " + v);
+    return it->second.c_str();
+}
+
 bool Built(const std::string& dir, const Rules& r) {
     return bool(std::ifstream(dir + "/" + r.folder + "t1080_m0/initializer.bin"));
 }
@@ -315,12 +332,9 @@ const Rules* Choose(const std::string& dir, const Features& f) {
     if (wanted == "navi2" && Built(dir, kNavi2)) return &kNavi2;
     if (wanted == "lite" && Built(dir, kLite)) return &kLite;
     if (wanted == "int8" && Built(dir, kInt8)) return &kInt8;
-    // Auto (or a model not built): FP8 with FP8 matrices; a discrete GPU without matrix cores (RDNA2:
-    // no cooperative matrices at all) the RDNA2 model when it is built, as AMD's driver and SDK 2.4
-    // pick it; else INT8. (Not the Lite model by itself: it drew garbage on a Steam Deck,
-    // 2026-10-23; the menu picks it.)
+    // Auto (or a model not built): FP8 with FP8 matrices, else INT8. (Not yet the 4.1.2 models as
+    // AMD's driver picks them: the Lite model drew garbage on a Steam Deck, 2026-10-23.)
     if (fp8) return &kFp8;
-    if (!f.fp16_matrices && !f.integrated && Built(dir, kNavi2)) return &kNavi2;
     if (!Built(dir, kInt8)) {
         for (const Rules* r : {&kNavi2, &kLite}) {
             if (Built(dir, *r)) return r;
@@ -341,8 +355,9 @@ struct Upscaler::Impl {
     VkDeviceSize ubo_align = 256;
     PFN_vkCmdPushDescriptorSetKHR push_descriptors = nullptr;
 
-    // Current set and sizes.
+    // Current set and sizes; the FSR version the set was recorded from (its "version" file).
     std::string set;
+    const char* version = nullptr;
     uint32_t out_w = 0, out_h = 0;
     bool ready = false;
     bool uploaded = false;
@@ -658,6 +673,7 @@ struct Upscaler::Impl {
                 return false;
             }
         }
+        version = ReadVersion(dir + "/" + rules->folder + set + "/version");
         const std::string weights = dir + "/" + rules->folder + set + "/initializer.bin";
         if (!ReadFile(weights, initializer_data) || initializer_data.size() != rules->initializer_size) {
             error = "missing or wrong " + weights;
@@ -1015,6 +1031,10 @@ const char* Upscaler::ModelName() const {
 }
 
 const char* Upscaler::VersionName() const {
+    if (impl->version) {
+        return impl->version;
+    }
+    // Sets built before they recorded their version: the 4.1.2 models only came from 4.1.2.
     return impl->rules == &kNavi2 || impl->rules == &kLite ? "FSR 4.1.2" : "FSR 4.1.1";
 }
 

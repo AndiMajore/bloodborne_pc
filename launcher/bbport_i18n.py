@@ -113,8 +113,9 @@ EN = {
     "Ослабление на светлых поверхностях": "Damping on bright surfaces",
     "0 — везде одинаково; 4 — яркие сцены почти без изменений":
         "0: the same everywhere; 4: bright scenes almost unchanged",
+    "Модели FSR 4.1.2 (INT8 RDNA2, INT8 Lite)": "FSR 4.1.2's models (INT8 RDNA2, INT8 Lite)",
+    "Одна amd_fidelityfx_upscaler_dx12.dll из AMD FSR SDK 2.4 или DLL 4.1.x вместе с драйверным amdxcffx64.dll (Adrenalin 26.10.1+, или его установщик .exe); ~4 минуты. Модель выбирается в меню игры": "AMD FSR SDK 2.4's amd_fidelityfx_upscaler_dx12.dll alone, or a 4.1.x DLL together with the driver's amdxcffx64.dll (Adrenalin 26.10.1+, or its .exe installer); ~4 minutes. The model is chosen in the game's menu",
     "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "AMD FSR SDK 2.4's DLL (amd_fidelityfx_upscaler_dx12.dll 4.1.2), the Adrenalin installer (.exe) or amdxcffx64.dll",
-    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "The INT8 RDNA2 and INT8 Lite models: amd_fidelityfx_upscaler_dx12.dll 4.1.2 from AMD FSR SDK 2.4 (it holds every model), or the AMD Adrenalin 26.10.1+ installer (.exe) / amdxcffx64.dll together with an FSR 4.1.x DLL; ~4 minutes. Without FP8 and matrix cores (RDNA2) Auto takes INT8 RDNA2",
     "Качество изображения": "Image quality",
     "Библиотеки AMD и NVIDIA": "AMD and NVIDIA libraries",
     "Свои файлы AMD и NVIDIA: порт их не распространяет": "Your own AMD and NVIDIA files: the port does not ship them",
@@ -316,7 +317,7 @@ EN = {
     "Ассеты для выбранного режима найдены": "Assets for the selected mode found",
     "{}. Соберите FSR 4.1.1 из своей DLL кнопкой «Выбрать DLL…» ниже":
         "{}. Build FSR 4.1.1 from your own DLL with the “Choose DLL…” button below",
-    "FSR 4.1.1 из своей DLL AMD": "FSR 4.1.1 from your own AMD DLL",
+    "FSR 4.1.x из своей DLL AMD": "FSR 4.1.x from your own AMD DLL",
     "Отменить": "Cancel",
     "Выбрать DLL…": "Choose DLL…",
     "DLL апскейлера AMD (amd_fidelityfx_upscaler_dx12.dll)": "AMD upscaler DLL (amd_fidelityfx_upscaler_dx12.dll)",
@@ -443,7 +444,6 @@ EN = {
     "С апскейлером сглаживание игры выключено: оно только мылит его вход": "With an upscaler the game's anti-aliasing is off: it only blurs the upscaler's input",
     "Собственное игры": "The game's own",
     "FXAA2_GS (игры)": "FXAA2_GS (the game's)",
-    "FSR 4.1.2 из драйвера AMD": "FSR 4.1.2 from AMD's driver",
     "Модели INT8 RDNA2 и INT8 Lite: установщик AMD Adrenalin 26.10.1+ (.exe) или amdxcffx64.dll из него. Нужна и DLL FSR 4.1.x (как для FSR 4.1.1); ~4 минуты. Модель выбирается в меню игры": "The INT8 RDNA2 and INT8 Lite models: the AMD Adrenalin 26.10.1+ installer (.exe) or amdxcffx64.dll from it. The FSR 4.1.x DLL is needed too (as for FSR 4.1.1); ~4 minutes. The model is chosen in the game's menu",
     "Драйвер AMD: установщик Adrenalin (.exe) или amdxcffx64.dll": "AMD's driver: the Adrenalin installer (.exe) or amdxcffx64.dll",
     "Ещё нужна DLL FSR 4.1.x: выберите amd_fidelityfx_upscaler_dx12.dll": "The FSR 4.1.x DLL is needed too: choose amd_fidelityfx_upscaler_dx12.dll",
@@ -569,8 +569,9 @@ EN = {
 }
 
 PT_BR = {
+    "Модели FSR 4.1.2 (INT8 RDNA2, INT8 Lite)": "Modelos do FSR 4.1.2 (INT8 RDNA2, INT8 Lite)",
+    "Одна amd_fidelityfx_upscaler_dx12.dll из AMD FSR SDK 2.4 или DLL 4.1.x вместе с драйверным amdxcffx64.dll (Adrenalin 26.10.1+, или его установщик .exe); ~4 минуты. Модель выбирается в меню игры": "Só a amd_fidelityfx_upscaler_dx12.dll do AMD FSR SDK 2.4, ou uma DLL 4.1.x junto com a amdxcffx64.dll do driver (Adrenalin 26.10.1+, ou o instalador .exe); ~4 minutos. O modelo é escolhido no menu do jogo",
     "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "DLL do AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), o instalador do Adrenalin (.exe) ou amdxcffx64.dll",
-    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "Modelos INT8 RDNA2 e INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 do AMD FSR SDK 2.4 (contém todos os modelos), ou o instalador do AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll junto com uma DLL do FSR 4.1.x; ~4 minutos. Sem FP8 e núcleos de matriz (RDNA2), o Automático usa INT8 RDNA2",
     "Добавить ещё одну": "Adicionar mais uma",
     "Ярлык создан: {}": "Atalho criado: {}",
     "Не удалось создать ярлык: {}": "Não foi possível criar o atalho: {}",
@@ -740,7 +741,7 @@ PT_BR = {
     "Ассеты для выбранного режима найдены": "Recursos encontrados para o modo selecionado",
     "{}. Соберите FSR 4.1.1 из своей DLL кнопкой «Выбрать DLL…» ниже":
         "{}. Gere o FSR 4.1.1 a partir da sua própria DLL com o botão “Escolher DLL…” abaixo",
-    "FSR 4.1.1 из своей DLL AMD": "FSR 4.1.1 da sua própria DLL da AMD",
+    "FSR 4.1.x из своей DLL AMD": "FSR 4.1.x da sua própria DLL da AMD",
     "Отменить": "Cancelar",
     "Выбрать DLL…": "Escolher DLL…",
     "DLL апскейлера AMD (amd_fidelityfx_upscaler_dx12.dll)": "DLL do upscaler da AMD (amd_fidelityfx_upscaler_dx12.dll)",
@@ -855,8 +856,9 @@ PT_BR = {
 
 
 ZH_CN = {
+    "Модели FSR 4.1.2 (INT8 RDNA2, INT8 Lite)": "FSR 4.1.2 模型（INT8 RDNA2、INT8 Lite）",
+    "Одна amd_fidelityfx_upscaler_dx12.dll из AMD FSR SDK 2.4 или DLL 4.1.x вместе с драйверным amdxcffx64.dll (Adrenalin 26.10.1+, или его установщик .exe); ~4 минуты. Модель выбирается в меню игры": "仅需 AMD FSR SDK 2.4 的 amd_fidelityfx_upscaler_dx12.dll，或 4.1.x DLL 加上驱动的 amdxcffx64.dll（Adrenalin 26.10.1+ 或其 .exe 安装程序）；约 4 分钟。模型在游戏菜单中选择",
     "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "AMD FSR SDK 2.4 的 DLL（amd_fidelityfx_upscaler_dx12.dll 4.1.2）、Adrenalin 安装程序（.exe）或 amdxcffx64.dll",
-    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "INT8 RDNA2 和 INT8 Lite 模型：AMD FSR SDK 2.4 中的 amd_fidelityfx_upscaler_dx12.dll 4.1.2（包含全部模型），或 AMD Adrenalin 26.10.1+ 安装程序（.exe）/ amdxcffx64.dll 加上一个 FSR 4.1.x DLL；约 4 分钟。没有 FP8 和矩阵核心（RDNA2）时，“自动”使用 INT8 RDNA2",
     "Добавить ещё одну": "再添加一个",
     "Ярлык создан: {}": "已创建快捷方式：{}",
     "Не удалось создать ярлык: {}": "无法创建快捷方式：{}",
@@ -1054,7 +1056,7 @@ ZH_CN = {
     "Ассеты для выбранного режима найдены": "已找到所选模式对应的资源文件",
     "{}. Соберите FSR 4.1.1 из своей DLL кнопкой «Выбрать DLL…» ниже":
         "{}。请用下方的「选择 DLL…」按钮，从你自己的 DLL 构建 FSR 4.1.1",
-    "FSR 4.1.1 из своей DLL AMD": "用你自己的 AMD DLL 构建 FSR 4.1.1",
+    "FSR 4.1.x из своей DLL AMD": "用你自己的 AMD DLL 构建 FSR 4.1.x",
     "Отменить": "取消",
     "Выбрать DLL…": "选择 DLL…",
     "DLL апскейлера AMD (amd_fidelityfx_upscaler_dx12.dll)": "AMD 超分辨率 DLL（amd_fidelityfx_upscaler_dx12.dll）",
@@ -1236,8 +1238,9 @@ ZH_CN = {
 
 # New French Translation by @Sarxzer
 FR_FR = {
+    "Модели FSR 4.1.2 (INT8 RDNA2, INT8 Lite)": "Modèles de FSR 4.1.2 (INT8 RDNA2, INT8 Lite)",
+    "Одна amd_fidelityfx_upscaler_dx12.dll из AMD FSR SDK 2.4 или DLL 4.1.x вместе с драйверным amdxcffx64.dll (Adrenalin 26.10.1+, или его установщик .exe); ~4 минуты. Модель выбирается в меню игры": "La seule amd_fidelityfx_upscaler_dx12.dll de l'AMD FSR SDK 2.4, ou une DLL 4.1.x avec l'amdxcffx64.dll du pilote (Adrenalin 26.10.1+, ou son installateur .exe) ; ~4 minutes. Le modèle se choisit dans le menu du jeu",
     "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "La DLL de l'AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), l'installateur Adrenalin (.exe) ou amdxcffx64.dll",
-    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "Modèles INT8 RDNA2 et INT8 Lite : amd_fidelityfx_upscaler_dx12.dll 4.1.2 de l'AMD FSR SDK 2.4 (elle contient tous les modèles), ou l'installateur AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll avec une DLL FSR 4.1.x ; ~4 minutes. Sans FP8 ni cœurs matriciels (RDNA2), Auto prend INT8 RDNA2",
     # Fenêtre, pages, boutons
     "Запустить": "Jouer",
     "Остановить": "Arrêter",
@@ -1405,7 +1408,7 @@ FR_FR = {
     "Ассеты для выбранного режима найдены": "Ressources du mode choisi trouvées",
     "{}. Соберите FSR 4.1.1 из своей DLL кнопкой «Выбрать DLL…» ниже":
         "{}. Construisez FSR 4.1.1 à partir de votre propre DLL avec le bouton « Choisir la DLL… » ci-dessous",
-    "FSR 4.1.1 из своей DLL AMD": "FSR 4.1.1 à partir de votre propre DLL AMD",
+    "FSR 4.1.x из своей DLL AMD": "FSR 4.1.x à partir de votre propre DLL AMD",
     "Отменить": "Annuler",
     "Выбрать DLL…": "Choisir la DLL…",
     "DLL апскейлера AMD (amd_fidelityfx_upscaler_dx12.dll)": "DLL de l'upscaler AMD (amd_fidelityfx_upscaler_dx12.dll)",

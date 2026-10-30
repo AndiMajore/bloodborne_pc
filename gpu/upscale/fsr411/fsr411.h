@@ -83,8 +83,8 @@ public:
     [[nodiscard]] std::string Describe() const;
     /// The model's name ("INT8 (RDNA2)"), static.
     [[nodiscard]] const char* ModelName() const;
-    /// The FSR version the model comes from: "FSR 4.1.2" (INT8 RDNA2, INT8 Lite: AMD's SDK 2.4 or
-    /// driver), else "FSR 4.1.1"; static.
+    /// The FSR version the set was recorded from ("FSR 4.1.2"; its version file, written by
+    /// tools/fsr4cap/extract.py), else by the model (INT8 RDNA2, INT8 Lite: 4.1.2); static.
     [[nodiscard]] const char* VersionName() const;
 
 private:
