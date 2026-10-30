@@ -61,6 +61,11 @@ void AddBuffers(Entry& entry, u64 vs_hash = 0, u64 ps_hash = 0) {
     pending_buffers.clear();
 }
 bool pass_open = false;
+// BB_CAPTURE_COUNT=N (ticket 84): frames still to record after the one being recorded, and the
+// number of the next file (frame_000.txt ..); 0 with a single capture (frame_<time>.txt).
+u32 frames_left = 0;
+u32 frame_number = 0;
+bool numbered = false;
 std::mutex display_mutex;
 std::vector<VAddr> display_buffers;
 // bbport: read on every draw; the game registers a handful of display buffers once.
@@ -97,7 +102,9 @@ void AddShader(Entry& entry, u64 hash) {
 void Write(VAddr presented) {
     const char* dir = bb_env("BB_CAPTURE_DIR");
     const std::string path =
-        std::format("{}/frame_{}.txt", dir ? dir : ".", static_cast<long long>(std::time(nullptr)));
+        numbered ? std::format("{}/frame_{:03}.txt", dir ? dir : ".", frame_number++)
+                 : std::format("{}/frame_{}.txt", dir ? dir : ".",
+                               static_cast<long long>(std::time(nullptr)));
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         std::printf("Frame capture: cannot write %s\n", path.c_str());
@@ -146,8 +153,14 @@ void FrameCapture::OnFlip(VAddr presented_address) {
         std::filesystem::exists(trigger)) {
         std::error_code ec;
         std::filesystem::remove(trigger, ec);
+        // BB_CAPTURE_COUNT=N: N consecutive frames from here, frame_000.txt .. (ticket 84: a burst
+        // the runner lines up with its present-dump burst, to diff one frame with its neighbours).
+        const long long count = bb_env_int("BB_CAPTURE_COUNT", 1);
+        numbered = count > 1;
+        frames_left = numbered ? u32(std::min<long long>(count, 1000)) - 1 : 0;
+        frame_number = 0;
         state.store(Armed, std::memory_order_release);
-        std::printf("Frame capture: armed\n");
+        std::printf("Frame capture: armed (%lld frames)\n", std::max(count, 1ll));
     }
 }
 
@@ -200,8 +213,12 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
             entries.clear();
             pending_sampled.clear();
             pending_buffers.clear();
-            state.store(Idle, std::memory_order_release);
-            return;
+            if (frames_left == 0) {
+                state.store(Idle, std::memory_order_release);
+                return;
+            }
+            --frames_left;   // the next frame starts with this pass
+            pass_open = false;
         }
         entries.clear();
         pending_sampled.clear();

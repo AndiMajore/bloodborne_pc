@@ -426,6 +426,8 @@ def dump_names(dumps: list) -> dict:
     names = {"final": [], "present": []}
     for i, d in enumerate(dumps):
         name, count = d.get("name", f"dump{i}"), int(d.get("count", 1))
+        if d.get("kind", "final") == "capture":   # frame captures (text), not images
+            continue
         names[d.get("kind", "final")].extend([name] if count <= 1 else [f"{name}_{j:03d}" for j in range(count)])
     return names
 
@@ -524,6 +526,12 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
         burst = max((int(d.get("count", 1)) for d in dumps if d.get("kind") == "present"), default=1)
         if burst > 1:   # one present trigger dumps this many consecutive frames
             env["BB_PRESENT_DUMP_COUNT"] = str(burst)
+        captures = [d for d in dumps if d.get("kind") == "capture"]
+        if captures:    # frame captures (vk_frame_capture.cpp): frame_000.txt .. in results/captures
+            (results / "captures").mkdir(exist_ok=True)
+            env["BB_CAPTURE_DIR"] = str(results / "captures")
+            env["BB_CAPTURE_TRIGGER"] = str(results / "capture_trigger")
+            env["BB_CAPTURE_COUNT"] = str(max(int(d.get("count", 1)) for d in captures))
     env["BB_DUMP_DIR"] = str(results / "dumps_raw")
     env["BB_FINAL_DUMP_TRIGGER"] = str(results / "final_trigger")
     env["BB_PRESENT_DUMP_TRIGGER"] = str(results / "present_trigger")
@@ -656,7 +664,9 @@ def run_once(lib: Path, test_path: Path, args) -> tuple[int, str]:
             for i, d in enumerate(dumps):
                 if i in legacy_dumps_fired:
                     continue
-                trig = legacy_final if d.get("kind", "final") == "final" else legacy_present
+                kind = d.get("kind", "final")
+                trig = (legacy_final if kind == "final" else
+                        results / "capture_trigger" if kind == "capture" else legacy_present)
                 if "at_ms" in d and not watch.has("Runtime: pad replay dump at") \
                         and now - replay_wall >= d["at_ms"] / 1000:
                     legacy_dumps_fired.add(i)
@@ -721,7 +731,7 @@ def finish(lib, test, test_path, results: Path, run: dict, watch: LogWatch, args
         raw_dir.rmdir()
     except OSError:
         pass
-    for trig in ("final_trigger", "present_trigger"):
+    for trig in ("final_trigger", "present_trigger", "capture_trigger"):
         (results / trig).unlink(missing_ok=True)
     result = ev.evaluate(results, test, lib)
     if status_hint and result["status"] != "crash":

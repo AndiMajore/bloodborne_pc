@@ -110,6 +110,9 @@ loop = 0                         # extra replays of the route (soak)
 [measure]  gpu_labels = [...]  per_call = [...]  split_ms = 25000
 [[checkpoints]]  at_ms = 30000  tolerance_m = 1.5
 [[dumps]]        at_ms = 30000  kind = "final"  name = "cp1"   # or: on = "YEBIS"  (dump when that log line appears)
+[[dumps]]        at_ms = 11000  kind = "capture"  count = 120   # frame captures (passes, targets, sampled
+                 #   textures, constants) of 120 frames, results/<test>/<stamp>/captures/frame_000.txt ..;
+                 #   at the same at_ms as a present burst, capture n and present dump n are the same frame
 [masks]  hud = [x, y, w, h]      # fractions of the output
 [criteria]  crash_free  clean_end  max_busy_ms  max_p99_ms  max_label_ms = {label = ms}
             per_call_ratio_max = {label = ratio}  min_reflection_passes  require_reflections_first_pass

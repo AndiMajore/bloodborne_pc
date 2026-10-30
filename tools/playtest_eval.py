@@ -560,6 +560,8 @@ def evaluate(results_dir: Path, test: dict, lib: Path | None) -> dict:
     # Images.
     images = []
     for i, dump in enumerate(test.get("dumps", [])):
+        if dump.get("kind") == "capture":   # frame captures (text, results/captures): not images
+            continue
         name = dump.get("name", f"dump{i}")
         count = int(dump.get("count", 1))
         if count > 1:   # a burst of consecutive frames: judged by brightness, not by a golden
