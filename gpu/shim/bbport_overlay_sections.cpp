@@ -186,11 +186,12 @@ bool UpscalerSection(BbSettings::Values& s) {
         } else Hint(BbSettings::MenuText(
             "FP8: RDNA4's model (emulated, slower, on RDNA3). INT8: FSR 4.1 on any GPU. INT8 RDNA2: "
             "FSR 4.1.2's model made for RX 6000. INT8 Lite: FSR 4.1.2's light model (Steam Deck, "
-            "APUs): faster, softer. The 4.1.2 models are built from AMD's driver DLL in the "
-            "launcher.",
+            "APUs): faster, softer. The 4.1.2 models are built in the launcher from AMD's FSR SDK "
+            "2.4 DLL, or a 4.1.x DLL with the driver's amdxcffx64.dll.",
             "FP8: модель RDNA4 (на RDNA3 эмулируется, медленнее). INT8: FSR 4.1 на любой видеокарте. "
             "INT8 RDNA2: модель FSR 4.1.2 для RX 6000. INT8 Lite: лёгкая модель FSR 4.1.2 (Steam "
-            "Deck, APU): быстрее, мягче. Модели 4.1.2 собираются в лаунчере из DLL драйвера AMD."));
+            "Deck, APU): быстрее, мягче. Модели 4.1.2 собираются в лаунчере из DLL AMD FSR SDK 2.4 "
+            "или из DLL 4.1.x с драйверным amdxcffx64.dll."));
     }
     if (s.upscaler == BbSettings::UpscalerDlss) {
         Hint(BbSettings::MenuText(

@@ -175,6 +175,8 @@ class UpscalerFiles:
         alone); the driver's FSR 4 module answers through AMD's upscaler DLL: the one FSR 4.1.1 was
         built from, else chosen now."""
         if Path(driver).name.lower() == "amd_fidelityfx_upscaler_dx12.dll":
+            # build_assets.sh's driver form reads its second file as the upscaler DLL (not a
+            # loader); with BB_FSR412=1 the first is this DLL too: it is both, holding the models.
             self.start_fsr411_build(driver, driver, version="4.1.2", fsr412=True)
             return
         upscaler = self.settings.get("fsr411_dll", "")
@@ -311,5 +313,6 @@ class UpscalerFiles:
             self.alert(self.fsr_text("FSR 4.1.1 не собран"), tr(message).format(status))
 
     def fsr_text(self, text):
-        """A FSR 4.1.1 build message, translated, with the version of this build (4.1.2 models)."""
+        """A FSR 4.1.1 build message, translated, with the version of this build (4.1.2 models).
+        The five build messages' translations must keep the literal "4.1.1" for this."""
         return tr(text).replace("4.1.1", getattr(self, "fsr411_version", "4.1.1"))

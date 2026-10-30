@@ -5,12 +5,13 @@
 # tools/fsr4cap/build_assets.sh <amdxcffx64.dll | AMD Adrenalin installer .exe> [upscaler DLL 4.1.x]
 # BB_FSR412=1 tools/fsr4cap/build_assets.sh <amd_fidelityfx_upscaler_dx12.dll 4.1.2 (FSR SDK 2.4)>
 #
-# The second form adds FSR 4.1.2's models from AMD's driver (Adrenalin 26.10.1 and later): INT8
-# RDNA2 (navi2/) and INT8 Lite (lite/), and the INT8 set (as 4.1.1's) when there is none yet.
-# The driver DLL answers through the upscaler DLL's driver query (vkd3d-proton's amdxc64,
-# FSR4_UPGRADE=1): the 4.1.x upscaler DLL is needed as well (the second argument, or the one the
-# last 4.1.1 build left in the work folder). driver_model.py makes, per model, a copy of the
-# driver DLL that offers only that model; it sits next to fsr4cap.exe for the recording.
+# The second and third forms add FSR 4.1.2's models: INT8 RDNA2 (navi2/) and INT8 Lite (lite/), and
+# the INT8 set (as 4.1.1's) when there is none yet. AMD's FSR SDK 2.4 upscaler DLL (4.1.2) holds the
+# four models itself: then it is the only file needed, and driver_model.py makes, per model, a copy
+# of it that offers only that model (fsr4cap.exe loads it directly). With an older 4.1.x upscaler
+# DLL (the second argument, or the one the last 4.1.1 build left in the work folder) the models come
+# from AMD's driver DLL (Adrenalin 26.10.1+), which answers through the upscaler DLL's driver query
+# (vkd3d-proton's amdxc64, FSR4_UPGRADE=1); then the copies are of the driver DLL.
 # BB_FSR4_DRIVER_MODELS: the models to build (default "navi2 lite", plus int8 without an INT8 set).
 #
 # Builds the FSR 4.1.1 asset set (fsr4_411/: SPIR-V of every pass, model weights) from AMD's
