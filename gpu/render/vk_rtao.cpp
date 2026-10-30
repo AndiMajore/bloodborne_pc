@@ -144,6 +144,14 @@ void RayTracedAO::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId nor
 }
 
 void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
+    // Which gate the game's AO pass meets (ticket 86): once, the first times its shader comes by.
+    static int ao_pass_reports = 0;
+    if (ps_hash == AoUpsampleShader && ao_pass_reports < 3) {
+        ++ao_pass_reports;
+        std::printf("RTAO: the AO upsample shader at a pass: enabled %d, resources %d, color %d, "
+                    "depth %d, candidate %d, active %d\n", int(enabled), int(resources_ready),
+                    int(bool(color)), int(bool(depth_id)), int(bool(mask_candidate)), int(settings.active));
+    }
     if (!enabled || !resources_ready) {
         return;
     }
