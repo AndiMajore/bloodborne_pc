@@ -499,7 +499,7 @@ Logs, dumps, traces, probes and experiments, for finding bugs. Most cost frame t
 | `BB_IMAGE_CLEAR_LOG` | =1: why an image clear went to the real shader, once per reason |
 | `BB_IMAGE_COPY_LOG` | set: also why a large copy shader was not substituted |
 | `BB_IMAGE_SYNC_LOG` | set: images refreshed most per 5 s, with their flags |
-| `BB_IMAGE_WATCH` | =address: what happens to the image at that address |
+| `BB_IMAGE_WATCH` | =address: what happens to the image at that address; =shadow: every D32 image of 2048x2048 or more |
 | `BB_IME_TEXT` | =text: the on-screen keyboard answers with that text at once (tests) |
 | `BB_IMITATE_NVIDIA` | =1 (tests on AMD): the port treats this GPU as NVIDIA's |
 | `BB_IMPORT_LOG` | set: lazy import requests per 10 s |

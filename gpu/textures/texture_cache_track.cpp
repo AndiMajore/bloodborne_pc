@@ -6,6 +6,7 @@
 #include "shim/bb_env.h"
 
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 
 #include <xxhash.h>
@@ -221,17 +222,22 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
 }
 
 void TextureCache::WatchImage(const Image& image, const char* what) {
-    static const u64 watched = [] {
-        const char* env = bb_env("BB_IMAGE_WATCH");
-        return env ? std::strtoull(env, nullptr, 0) : 0ull;
-    }();
-    if (!watched || image.info.guest_address != watched) {
+    static const char* env = bb_env("BB_IMAGE_WATCH");
+    // BB_IMAGE_WATCH=shadow: every 32-bit depth image of 2048x2048 or more (the sun's shadow maps,
+    // whose address changes when the game makes a new one; ticket 84).
+    static const bool shadows = env && std::strcmp(env, "shadow") == 0;
+    static const u64 watched = env && !shadows ? std::strtoull(env, nullptr, 0) : 0ull;
+    if (shadows ? !(image.info.pixel_format == vk::Format::eD32Sfloat && image.info.size.width >= 2048)
+                : (!watched || image.info.guest_address != watched)) {
         return;
+    }
+    if (shadows && std::strcmp(what, "depth target") == 0) {
+        return; // every draw into a shadow map: the rest (made, refreshed, written) is the story
     }
     static std::atomic<u32> printed{0};
     if (printed.fetch_add(1) < 200000) {
         std::printf("Image watch %#llx: frame %llu %s, flags %#x, %ux%u fmt %u, image %p\n",
-                    (unsigned long long)watched,
+                    (unsigned long long)image.info.guest_address,
                     (unsigned long long)BbStats::frame_number.load(std::memory_order_relaxed), what,
                     u32(image.flags), image.info.size.width, image.info.size.height,
                     u32(image.info.pixel_format), static_cast<const void*>(&image));

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "render/vk_frame_capture.h"
 #include "shim/bb_env.h"
+#include "shim/bbport_toggles.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -113,7 +114,8 @@ void Write(VAddr presented) {
         std::printf("Frame capture: cannot write %s\n", path.c_str());
         return;
     }
-    std::fprintf(f, "presented buffer %#llx\n", static_cast<unsigned long long>(presented));
+    std::fprintf(f, "presented buffer %#llx, frame %u\n", static_cast<unsigned long long>(presented),
+                 BbStats::frame_number.load(std::memory_order_relaxed));
     u32 index = 0;
     for (const auto& e : entries) {
         if (e.compute) {
