@@ -175,9 +175,21 @@ void TextureCache::GarbageCollectImages() {
         if (instance.IsIntegrated() || forced_budget) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
-                trigger_gc_memory = budget / 10 * 7;
-                pressure_gc_memory = budget / 100 * 85;
-                critical_gc_memory = budget / 100 * 95;
+                // The marks apply to the images' share of the budget. The usage also holds the
+                // game's memory in place (GTT) and the rest of the process, which evicting images
+                // never lowers: on an APU with a 2 GB budget and 3.5 GB in place the collector
+                // stayed past its critical mark with 300 MiB of images, evicting 300-550 textures
+                // in use every 5 s and uploading them again (Discord report, 0.7, 2026-10-29).
+                // The share is what the budget leaves past that fixed part, at least a quarter of
+                // the budget (BB_GC_IMAGE_FLOOR_MB=N: another floor).
+                static const u64 floor_override = bb_env_int("BB_GC_IMAGE_FLOOR_MB", 0) << 20;
+                const u64 images = BbStats::vk_image_bytes.load(std::memory_order_relaxed);
+                const u64 fixed = total_used_memory > images ? total_used_memory - images : 0;
+                const u64 floor = floor_override ? floor_override : budget / 4;
+                const u64 room = std::max(budget > fixed ? budget - fixed : u64{0}, floor);
+                trigger_gc_memory = fixed + room / 10 * 7;
+                pressure_gc_memory = fixed + room / 100 * 85;
+                critical_gc_memory = fixed + room / 100 * 95;
             }
         }
     }
