@@ -173,6 +173,8 @@ struct Values {
     std::atomic<unsigned> fsr4_models_available{0};
     /// The model the replay runs, for the menu ("INT8 (RDNA2)"); null before its first frame.
     std::atomic<const char*> fsr4_model_active{nullptr};
+    /// The FSR version of that model ("FSR 4.1.2"), for the menu and the FPS line; null before.
+    std::atomic<const char*> fsr4_version_active{nullptr};
     /// What anti_aliasing comes to (SyncAntiAliasing): the game's FXAA forced (effects[GameAaEffect]
     /// holds the game's own AA).
     std::atomic<bool> fxaa_forced{false};

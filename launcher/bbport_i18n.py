@@ -113,6 +113,8 @@ EN = {
     "Ослабление на светлых поверхностях": "Damping on bright surfaces",
     "0 — везде одинаково; 4 — яркие сцены почти без изменений":
         "0: the same everywhere; 4: bright scenes almost unchanged",
+    "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "AMD FSR SDK 2.4's DLL (amd_fidelityfx_upscaler_dx12.dll 4.1.2), the Adrenalin installer (.exe) or amdxcffx64.dll",
+    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "The INT8 RDNA2 and INT8 Lite models: amd_fidelityfx_upscaler_dx12.dll 4.1.2 from AMD FSR SDK 2.4 (it holds every model), or the AMD Adrenalin 26.10.1+ installer (.exe) / amdxcffx64.dll together with an FSR 4.1.x DLL; ~4 minutes. Without FP8 and matrix cores (RDNA2) Auto takes INT8 RDNA2",
     "Качество изображения": "Image quality",
     "Библиотеки AMD и NVIDIA": "AMD and NVIDIA libraries",
     "Свои файлы AMD и NVIDIA: порт их не распространяет": "Your own AMD and NVIDIA files: the port does not ship them",
@@ -567,6 +569,8 @@ EN = {
 }
 
 PT_BR = {
+    "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "DLL do AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), o instalador do Adrenalin (.exe) ou amdxcffx64.dll",
+    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "Modelos INT8 RDNA2 e INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 do AMD FSR SDK 2.4 (contém todos os modelos), ou o instalador do AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll junto com uma DLL do FSR 4.1.x; ~4 minutos. Sem FP8 e núcleos de matriz (RDNA2), o Automático usa INT8 RDNA2",
     "Добавить ещё одну": "Adicionar mais uma",
     "Ярлык создан: {}": "Atalho criado: {}",
     "Не удалось создать ярлык: {}": "Não foi possível criar o atalho: {}",
@@ -851,6 +855,8 @@ PT_BR = {
 
 
 ZH_CN = {
+    "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "AMD FSR SDK 2.4 的 DLL（amd_fidelityfx_upscaler_dx12.dll 4.1.2）、Adrenalin 安装程序（.exe）或 amdxcffx64.dll",
+    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "INT8 RDNA2 和 INT8 Lite 模型：AMD FSR SDK 2.4 中的 amd_fidelityfx_upscaler_dx12.dll 4.1.2（包含全部模型），或 AMD Adrenalin 26.10.1+ 安装程序（.exe）/ amdxcffx64.dll 加上一个 FSR 4.1.x DLL；约 4 分钟。没有 FP8 和矩阵核心（RDNA2）时，“自动”使用 INT8 RDNA2",
     "Добавить ещё одну": "再添加一个",
     "Ярлык создан: {}": "已创建快捷方式：{}",
     "Не удалось создать ярлык: {}": "无法创建快捷方式：{}",
@@ -1230,6 +1236,8 @@ ZH_CN = {
 
 # New French Translation by @Sarxzer
 FR_FR = {
+    "DLL AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), установщик Adrenalin (.exe) или amdxcffx64.dll": "La DLL de l'AMD FSR SDK 2.4 (amd_fidelityfx_upscaler_dx12.dll 4.1.2), l'installateur Adrenalin (.exe) ou amdxcffx64.dll",
+    "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 (в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2": "Modèles INT8 RDNA2 et INT8 Lite : amd_fidelityfx_upscaler_dx12.dll 4.1.2 de l'AMD FSR SDK 2.4 (elle contient tous les modèles), ou l'installateur AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll avec une DLL FSR 4.1.x ; ~4 minutes. Sans FP8 ni cœurs matriciels (RDNA2), Auto prend INT8 RDNA2",
     # Fenêtre, pages, boutons
     "Запустить": "Jouer",
     "Остановить": "Arrêter",

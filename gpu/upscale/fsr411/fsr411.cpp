@@ -315,9 +315,12 @@ const Rules* Choose(const std::string& dir, const Features& f) {
     if (wanted == "navi2" && Built(dir, kNavi2)) return &kNavi2;
     if (wanted == "lite" && Built(dir, kLite)) return &kLite;
     if (wanted == "int8" && Built(dir, kInt8)) return &kInt8;
-    // Auto (or a model not built): FP8 with FP8 matrices, else INT8. (Not yet the 4.1.2 models as
-    // AMD's driver picks them: the Lite model drew garbage on a Steam Deck, 2026-10-23.)
+    // Auto (or a model not built): FP8 with FP8 matrices; a discrete GPU without matrix cores (RDNA2:
+    // no cooperative matrices at all) the RDNA2 model when it is built, as AMD's driver and SDK 2.4
+    // pick it; else INT8. (Not the Lite model by itself: it drew garbage on a Steam Deck,
+    // 2026-10-23; the menu picks it.)
     if (fp8) return &kFp8;
+    if (!f.fp16_matrices && !f.integrated && Built(dir, kNavi2)) return &kNavi2;
     if (!Built(dir, kInt8)) {
         for (const Rules* r : {&kNavi2, &kLite}) {
             if (Built(dir, *r)) return r;
@@ -1009,6 +1012,10 @@ const std::string& Upscaler::Error() const noexcept {
 
 const char* Upscaler::ModelName() const {
     return impl->rules->name;
+}
+
+const char* Upscaler::VersionName() const {
+    return impl->rules == &kNavi2 || impl->rules == &kLite ? "FSR 4.1.2" : "FSR 4.1.1";
 }
 
 std::string Upscaler::Describe() const {

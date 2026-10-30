@@ -369,9 +369,9 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.fsr412_button.connect("clicked", self.on_fsr412_button)
         self.fsr412_row.add_suffix(self.fsr412_button)
         self.fsr412_row.set_subtitle(tr(
-            "Модели INT8 RDNA2 и INT8 Lite: установщик AMD Adrenalin 26.10.1+ (.exe) или "
-            "amdxcffx64.dll из него. Нужна и DLL FSR 4.1.x (как для FSR 4.1.1); ~4 минуты. "
-            "Модель выбирается в меню игры"))
+            "Модели INT8 RDNA2 и INT8 Lite: amd_fidelityfx_upscaler_dx12.dll 4.1.2 из AMD FSR SDK 2.4 "
+            "(в ней все модели), или установщик AMD Adrenalin 26.10.1+ (.exe) / amdxcffx64.dll вместе "
+            "с DLL FSR 4.1.x; ~4 минуты. Без FP8 и матричных ядер (RDNA2) «Авто» берёт INT8 RDNA2"))
         self.fsr412_row.set_visible((FSR4CAP_DIR / "driver_model.py").is_file())
         libraries.add(self.fsr412_row)
         self.update_fsr411_row()
