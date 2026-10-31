@@ -50,6 +50,9 @@ EN = {
         "frame on an RX 9070 XT; the values also change live through user/rtao.txt.",
     "Затенение трассировкой лучей (RTAO)": "Ray-traced ambient occlusion (RTAO)",
     "Тень луны лучами": "Moon shadow by ray tracing",
+    "Трассировка лучей: {}": "Ray tracing: {}",
+    "Трассировка лучей: часть эффектов не работает, см. журнал":
+        "Ray tracing: some effects are not running, see the log",
     "Вместо каскадной тени игры там, где луч что-то находит":
         "In place of the game's cascaded shadow wherever a ray finds something",
     "Тень луны в половинном разрешении": "Moon shadow at half resolution",

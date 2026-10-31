@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "render/rt_status.h"
 #include "render/vk_rtao.h"
 #include "render/vk_rtao_internal.h"
 
@@ -30,6 +31,7 @@ namespace Vulkan {
 using namespace RtaoInternal;
 
 void RayTracedAO::OnFrameStart() {
+    ReportStatus();
     if (!enabled) {
         return;
     }
@@ -42,6 +44,7 @@ void RayTracedAO::OnFrameStart() {
         }
         if (!CreateAccelerationStructures()) {
             std::puts("RTAO: acceleration structure setup failed, off");
+            RtStatus::Get().rtao_off = "its acceleration structures could not be made";
             enabled = false;
             return;
         }
@@ -137,6 +140,85 @@ void RayTracedAO::OnFrameStart() {
     if (Active() && hold_enabled) {
         buffer_cache.HoldRetirements();
     }
+}
+
+/// "RT status:" (ticket 89, render/rt_status.h): every 600 frames in the world, the effects asked
+/// for, each running with its count or OFF with the reason. RTAO off for the whole run (driver,
+/// memory): said once. Nothing while RTAO is not asked for, nor in menus and loading.
+void RayTracedAO::ReportStatus() {
+    if (!Rtao::Requested()) {
+        return;
+    }
+    auto& st = RtStatus::Get();
+    if (const char* off = st.rtao_off.load(); off && !enabled) {
+        if (!status_off_reported) {
+            status_off_reported = true;
+            std::printf("RT status: RTAO OFF (%s): no ray-traced effect runs\n", off);
+        }
+        return;
+    }
+    status_world += draws.empty() ? 0u : 1u; // the previous frame's G-buffer draws
+    if (++status_frames < 600) {
+        return;
+    }
+    const u32 world = std::exchange(status_world, 0u);
+    status_frames = 0;
+    const u32 ao = st.rtao_passes.exchange(0), gather = st.gather_rt.exchange(0), march = st.gather_march.exchange(0);
+    const u32 sun_on = st.sun_wanted.exchange(0), sun = st.sun_traced.exchange(0);
+    const u32 reflect = st.reflect_passes.exchange(0), probes = st.probe_passes.exchange(0);
+    if (world < 60) {
+        return; // menus, loading screens: nothing to say
+    }
+    std::string line = "RT status: ";
+    char part[200];
+    if (ao > 0) {
+        std::snprintf(part, sizeof(part), "RTAO on (%u of %u frames)", ao, world);
+    } else if (!upsample_seen) {
+        std::snprintf(part, sizeof(part), "RTAO OFF (the game's AO pass never ran: SSAO patched out, or a mod "
+                                          "removes it)");
+    } else {
+        std::snprintf(part, sizeof(part), "RTAO OFF (no pass in %u frames)", world);
+    }
+    line += part;
+    const bool scene = ao > 0;
+    if (gather + march > 0) {
+        if (gather > 0) {
+            std::snprintf(part, sizeof(part), "; RT bounce on (%u of %u gathers)", gather, gather + march);
+        } else {
+            std::snprintf(part, sizeof(part), "; RT bounce OFF (%s)", scene ? "fell back to the screen march"
+                                                                             : "no RTAO scene");
+        }
+        line += part;
+    }
+    if (sun_on > 0) {
+        if (sun > 0) {
+            std::snprintf(part, sizeof(part), "; moon shadow on (%u of %u frames)", sun, sun_on);
+        } else {
+            std::snprintf(part, sizeof(part), "; moon shadow OFF (%s)", scene ? "not traced" : "no RTAO scene");
+        }
+        line += part;
+    }
+    if (const char* off = st.reflect_off.load()) {
+        line += std::string("; reflections OFF (") + off + ")";
+    } else if (st.reflect_wanted.load()) {
+        if (reflect > 0) {
+            std::snprintf(part, sizeof(part), "; reflections on (%u passes)", reflect);
+            line += part;
+        } else {
+            line += "; reflections OFF (the game's SSR pass did not run: turn on SSR)";
+        }
+    }
+    if (const char* off = st.probes_off.load()) {
+        line += std::string("; probes OFF (") + off + ")";
+    } else if (st.probes_wanted.load()) {
+        if (probes > 0) {
+            std::snprintf(part, sizeof(part), "; probes on (%u passes)", probes);
+            line += part;
+        } else {
+            line += "; probes OFF (no RTAO scene)";
+        }
+    }
+    std::printf("%s\n", line.c_str());
 }
 
 void RayTracedAO::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal) {
@@ -271,6 +353,7 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     }
     ++recorded;
     ++recorded_total;
+    ++RtStatus::Get().rtao_passes;
 
     // Static cache. The probes of the pass that last used this ring slot are read back first
     // (four passes ago: long finished), then the frame's draws are sorted: cached ones become

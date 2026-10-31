@@ -349,6 +349,9 @@ private:
     bool mask_unusable_reported = false; // an AO target the apply cannot write (reported once)
     bool heuristic_reported = false; // an R8 scene-size target without it (reported once)
     u32 world_frames = 0;            // frames with G-buffer draws
+    void ReportStatus();             // "RT status:" (ticket 89, render/rt_status.h)
+    u32 status_frames = 0, status_world = 0;
+    bool status_off_reported = false;
     bool missing_pass_reported = false;
     bool pass_missing = false;    // the game's AO pass did not run for 600 frames (SSAO patched
                                   // out): nothing is captured until its shader is seen

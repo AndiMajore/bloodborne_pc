@@ -26,6 +26,19 @@ RTAO off, or no effect wanting them, the rasterizer runs as without them (a flag
 | Ray-traced shadows (64) | `sun_shadow=`, `spot_shadow=` in `rtlighting.txt` (0) | the game's sun shadow in its screen mask; the shadowed spot's 512x512 shadow map | sun: before the global pass and the sun's light read the mask, one ray per pixel towards the sun (its direction from the shadow resolve's constants) writes the shadow in the mask's region channel with the game's scale; where a ray finds nothing in the RT scene the game's shadow stays, shrunk by `sun_erode` over the same surface (neighbours within 5% view depth: a lit fence does not light the far wall between its bars). Spot: from the light list's record of the shadowed spot (the frame before), a `spot_res` map ray traced from the light (depth and its square as the game's variance map stores them), blurred (`spot_blur`) with the variance capped (`spot_soft`), swapped in for the game's at bind time. The two most invasive hooks on the branch (a game target written; a bound texture replaced by address) |
 | The game's light list (59) | (a consumer: the spot shadow, `lights_dump`) | (none) | the game's light passes draw screen tiles per pixel-shader variant, each binding a buffer of light records (`gpu/render/rt_light_records.h`); decoded once a frame per buffer into world-space points and spots. Not used for lighting yet |
 
+## What actually runs: the `RT status:` line (ticket 89)
+
+Every 600 frames in the world (not in menus or loading screens) the log has one line naming each
+effect that was asked for, running with its count or OFF with the reason, for example:
+
+    RT status: RTAO on (600 of 600 frames); RT bounce on (600 of 600 gathers); moon shadow on (600 of 600 frames); reflections OFF (the game's SSR pass did not run: turn on SSR); probes on (491 passes)
+
+RTAO off for the whole run (driver, video memory, no object motion) is said once: `RT status:
+RTAO OFF (...): no ray-traced effect runs`. The effects feed `render/rt_status.h` where they count
+their own passes; `RayTracedAO::ReportStatus` prints. The launcher shows the last line in a banner
+on its Log page and, the first time in a run that an effect is OFF, a notice on any page. The
+first line after a load can count the moon shadow's frames from before the RTAO's scene existed.
+
 ## Live settings (re-read while the game runs)
 
 Each file's reload logs the keys it skipped ("keys in ... skipped (unknown, or no number)"): a

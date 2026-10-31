@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "render/rt_status.h"
 #include "render/vk_rt_probes.h"
 #include "shim/bb_env.h"
 #include "render/vk_rt_lighting.h"
@@ -73,9 +74,11 @@ RtProbes::RtProbes(const Instance& instance_, Scheduler& scheduler_,
     if (!enabled) {
         if (env && env[0] == '1') {
             std::printf("RT probes: off (needs the RTAO with ray queries)\n");
+            RtStatus::Get().probes_off = "needs the RTAO with ray queries";
         }
         return;
     }
+    RtStatus::Get().probes_wanted = true;
     if (const char* file = bb_env("BB_RT_PROBES_FILE")) {
         settings_path = file;
     } else {
@@ -94,6 +97,7 @@ RtProbes::RtProbes(const Instance& instance_, Scheduler& scheduler_,
     if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &raw, &probe_allocation, nullptr) !=
         VK_SUCCESS) {
         std::printf("RT probes: buffer failed, off\n");
+        RtStatus::Get().probes_off = "its buffer could not be made";
         enabled = false;
         return;
     }
@@ -280,6 +284,7 @@ void RtProbes::OnOpaqueScene(VideoCore::ImageId color_id) {
         return;
     }
     ++passes;
+    ++RtStatus::Get().probe_passes;
     scheduler.EndRendering();
     const auto compute = vk::PipelineStageFlagBits2::eComputeShader;
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;

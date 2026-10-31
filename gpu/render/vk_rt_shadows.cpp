@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "render/rt_status.h"
 #include "render/vk_rt_shadows.h"
 
 #include <cmath>
@@ -128,6 +129,9 @@ void RtShadows::OnDraw(VideoCore::ImageId color, u64 ps_hash) {
         return;
     }
     done_frame = frame; // before the light passes: once a frame
+    if (settings.sun_shadow) {
+        ++RtStatus::Get().sun_wanted;
+    }
     if (++report_frames == 600) {
         std::printf("RT shadows: sun ray traced in %u of 600 frames (sun %d: (%.3f %.3f %.3f), mask regions %u: "
                     "channel %.0f, %.0f); spot map in %u (spot %d)\n",
@@ -205,6 +209,7 @@ void RtShadows::RecordSun() {
         return;
     }
     ++sun_traced;
+    ++RtStatus::Get().sun_traced;
     scheduler.EndRendering();
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
     runtime.Transit(&depth, vk::ImageLayout::eGeneral, Compute, vk::AccessFlagBits2::eShaderRead);

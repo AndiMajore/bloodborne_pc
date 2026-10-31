@@ -10,6 +10,10 @@ class LogPage:
 
     def build_log_page(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # The game's last "RT status:" line (ticket 89): which ray-traced effects really run.
+        self.rt_banner = Adw.Banner(revealed=False)
+        box.append(self.rt_banner)
+        self.rt_status_warned = getattr(self, "rt_status_warned", False)
         self.log_view = Gtk.TextView(editable=False, monospace=True, cursor_visible=False,
                                      wrap_mode=Gtk.WrapMode.WORD_CHAR)
         self.log_view.set_top_margin(8)
@@ -65,7 +69,26 @@ class LogPage:
             self.toasts.add_toast(Adw.Toast(title=tr("Журнал сохранён: {}").format(chosen.get_path())))
         dialog.save(self, None, finish)
 
+    def reset_rt_status(self):
+        """A new run: no status yet, and the OFF notice may come again."""
+        self.rt_status_warned = False
+        self.rt_banner.set_revealed(False)
+
+    def show_rt_status(self, line):
+        """The game's "RT status: ..." line (every 600 frames in the world) in the banner; the first
+        one in a run with an effect OFF also as a notice, whatever page is open."""
+        status = line[len("RT status:"):].strip()
+        self.rt_banner.set_title(GLib.markup_escape_text(tr("Трассировка лучей: {}").format(status)))
+        self.rt_banner.set_revealed(True)
+        if " OFF " in f" {status} " and not self.rt_status_warned:
+            self.rt_status_warned = True
+            self.toasts.add_toast(Adw.Toast(
+                title=tr("Трассировка лучей: часть эффектов не работает, см. журнал"), timeout=8))
+
     def append_log(self, text):
+        for line in text.splitlines():
+            if line.startswith("RT status:"):
+                self.show_rt_status(line)
         buffer = self.log_view.get_buffer()
         buffer.insert(buffer.get_end_iter(), text)
         extra = buffer.get_line_count() - MAX_LOG_LINES

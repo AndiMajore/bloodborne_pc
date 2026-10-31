@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "render/rt_status.h"
 #include "upscale/vk_ssgi.h"
 #include "shim/bb_env.h"
 #include "render/vk_rt_lighting.h"
@@ -567,6 +568,7 @@ void ScreenSpaceGI::Record(VideoCore::ImageId color_id) {
         RtOn() && gather_rt_pipeline && rtao ? rtao->FrameTlas() : vk::AccelerationStructureKHR{};
     if (RtOn()) {
         ++(tlas ? rt_passes : rt_fallbacks);
+        ++(tlas ? RtStatus::Get().gather_rt : RtStatus::Get().gather_march);
         if ((rt_passes + rt_fallbacks) % 600 == 0) {
             std::printf("SSGI: ray-traced gather in %u of 600 passes (%u fell back to the march)\n",
                         rt_passes, rt_fallbacks);

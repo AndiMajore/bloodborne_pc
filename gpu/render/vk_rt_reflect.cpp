@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "render/rt_status.h"
 #include "render/vk_rt_reflect.h"
 #include "shim/bb_env.h"
 #include "render/vk_rt_lighting.h"
@@ -66,9 +67,11 @@ RtReflections::RtReflections(const Instance& instance_, Scheduler& scheduler_,
         if (env && env[0] == '1') {
             std::printf("RT reflections: off (needs the RTAO with ray queries and 256 bytes of push "
                         "constants)\n");
+            RtStatus::Get().reflect_off = "needs the RTAO with ray queries and 256 bytes of push constants";
         }
         return;
     }
+    RtStatus::Get().reflect_wanted = true;
     if (const char* file = bb_env("BB_RT_REFLECT_FILE")) {
         settings_path = file;
     } else {
@@ -386,6 +389,7 @@ void RtReflections::Record(VideoCore::ImageId ssr_id) {
         return;
     }
     ++passes;
+    ++RtStatus::Get().reflect_passes;
     static u32 first = 0;
     if (first++ == 0) {
         std::printf("RT reflections: first pass: SSR target %ux%u, depth %ux%u, copy %ux%u\n",

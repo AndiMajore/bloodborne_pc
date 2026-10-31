@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: ray-traced AO, buffers, pipelines, acceleration structures and the static cache's bookkeeping (see vk_rtao.cpp).
+#include "render/rt_status.h"
 #include "render/vk_rtao.h"
 #include "render/rtao_bluenoise.h"
 #include "render/vk_rtao_internal.h"
@@ -271,6 +272,7 @@ bool RayTracedAO::CreateAccelerationStructures() {
                         "%llu MiB is %llu MiB\n", (unsigned long long)((u64(full * Rtao::MinScale)) >> 20),
                         Rtao::HeapShare * 100.0, (unsigned long long)(heap >> 20),
                         (unsigned long long)(u64(heap * Rtao::HeapShare) >> 20));
+            RtStatus::Get().rtao_off = "not enough video memory for its buffers";
             return false;
         }
         if (scale < 1.0) {

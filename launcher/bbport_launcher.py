@@ -1251,6 +1251,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         launcher.set_cwd(str(PORT_DIR))
         try:
             # setsid: the game and its helpers form one process group, stopped together.
+            self.reset_rt_status()
             self.process = launcher.spawnv(["setsid", "bash", str(PORT_DIR / "run.sh")])
         except GLib.Error as error:
             self.toasts.add_toast(Adw.Toast(title=tr("Не удалось запустить: {}").format(error.message)))

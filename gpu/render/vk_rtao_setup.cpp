@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: ray-traced AO, construction (pipelines, settings), the settings re-read and
 // destruction (see vk_rtao.cpp and docs/rtao.md).
+#include "render/rt_status.h"
 #include "render/vk_rtao.h"
 #include "render/vk_rtao_internal.h"
 
@@ -52,10 +53,12 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     }
     if (!object_motion.Enabled() || !camera_motion.Enabled()) {
         std::puts("RTAO: needs the object motion vectors (menu: object motion, with an upscaler), off");
+        RtStatus::Get().rtao_off = "needs an upscaler with object motion vectors";
         return;
     }
     if (!instance.IsRayQuerySupported() || !ObjectMotion::RtaoCapture()) {
         std::puts("RTAO: ray queries unsupported by the driver, off");
+        RtStatus::Get().rtao_off = "ray queries unsupported by the driver";
         return;
     }
     settings.debug = std::min(EnvU32("BB_RTAO_DEBUG", 0), 4u);
