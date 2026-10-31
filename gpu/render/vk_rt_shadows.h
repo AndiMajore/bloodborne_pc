@@ -21,6 +21,8 @@
 #include "textures/types.h"
 #include "vulkan/vk_common.h"
 
+struct VmaAllocation_T; // vk_mem_alloc.h
+
 namespace VideoCore {
 class TextureCache;
 }
@@ -78,6 +80,14 @@ private:
     Runtime& runtime;
     CameraMotion& camera_motion;
     const RayTracedAO& rtao;
+    // Ticket 74's one-pixel probe (sun_probe_x/y): a small host-visible buffer the shader writes.
+    vk::Buffer probe_buffer{};
+    VmaAllocation_T* probe_alloc = nullptr;
+    const float* probe_mapped = nullptr;
+    u64 probe_address = 0;
+    u32 probe_frames = 0;
+    bool EnsureProbe();
+    void ReportProbe();
     const RtLights& lights;
     const RtLightingSettings::Settings& settings;
     RtViewCache views;

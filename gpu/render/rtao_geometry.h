@@ -165,6 +165,18 @@ struct Settings {
     u32 static_interval = 30;    // frames between rebuilds for a changed set (not for a move); 0: every pass // > 0: meshes bigger than cache_max_size are cached in pieces of this size
     bool include_alpha = false, include_nowrite = false, ring_test = false, build_fast_trace = false;
     float foliage = 0.0f; // > 0: alpha-tested draws occlude with this probability per hit (0: left out)
+    // Ticket 96: capture_pass 1 (default since 2026-10-31, Andreas): only the draws of the main
+    // G-buffer pass (the one the camera motion takes); a planar water reflection's pass, drawn from
+    // a mirrored camera, is left out (unprojected with the main camera it was a phantom copy of the
+    // scene: dark bands and lines that moved with the view). 0: every G-buffer pass, as before.
+    // A/B switches of tickets 74/96 (defaults keep the capture as it was): skip_weapons:
+    // small-skeleton draws (weapons, some props) left out; cache_weapons 0: never cached.
+    u32 capture_pass = 1;
+    bool skip_weapons = false;
+    bool cache_weapons = true;
+    // Ticket 74 (A/B): 1 keeps per-frame triangles with a vertex behind the camera's plane (their
+    // view position is right for clip.w <= 0 too); 0 drops them whole, as before.
+    bool keep_behind = false;
     bool surface = false;        // experimental: the surface cache (radiance per static pool triangle)
     u32 surface_budget = 131072; // static triangles looked at per frame
     float dump_request = 0.0f;

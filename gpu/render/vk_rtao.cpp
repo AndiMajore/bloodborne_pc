@@ -96,6 +96,14 @@ void RayTracedAO::OnFrameStart() {
                     "%u not stable yet, %u copies of a mesh not all cached, %u cache off\n",
                     per_frame_reasons[0], per_frame_reasons[1], per_frame_reasons[2], per_frame_reasons[3],
                     per_frame_reasons[4], per_frame_reasons[5]);
+        std::printf("RTAO: last pass's draws by G-buffer pass (first, second, more): %u / %u / %u draws, "
+                    "%u / %u / %u triangles, the camera's pass %d; %u small-skeleton draws (%u triangles); "
+                    "left out: %u triangles of other passes (capture_pass=%u), %u of small skeletons "
+                    "(skip_weapons=%d, cache_weapons=%d)\n",
+                    pass_draws[0], pass_draws[1], pass_draws[2], pass_triangles[0], pass_triangles[1],
+                    pass_triangles[2], main_pass == ~0u ? -1 : int(main_pass + 1), small_draws, small_triangles,
+                    side_skipped_triangles, settings.capture_pass, weapon_skipped_triangles,
+                    int(settings.skip_weapons), int(settings.cache_weapons));
         std::printf("RTAO: memory: fixed %llu MiB (the static pool and BLAS included)\n",
                     (unsigned long long)(static_bytes >> 20));
         promotions = 0;
@@ -120,6 +128,8 @@ void RayTracedAO::OnFrameStart() {
     }
     draws.clear();
     occurrences.clear();
+    gbuffer_passes = 0;
+    pass_depth = {};
     index_ring_state = -1;
     index_ring_used = 0;
     dropped_triangles = 0;
@@ -222,6 +232,10 @@ void RayTracedAO::ReportStatus() {
 }
 
 void RayTracedAO::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal) {
+    if (depth != pass_depth) { // a new G-buffer pass (a planar reflection draws its own first)
+        pass_depth = depth;
+        ++gbuffer_passes;
+    }
     depth_id = depth;
     normal_id = normal;
 }

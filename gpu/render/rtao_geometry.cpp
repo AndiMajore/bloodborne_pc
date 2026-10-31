@@ -286,6 +286,10 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "surface") flag(s.surface);
     else if (key == "surface_budget") s.surface_budget = std::clamp(u32(std::max(value, 0.0f)), 1024u, 4000000u);
     else if (key == "decals") flag(s.include_nowrite);
+    else if (key == "capture_pass") s.capture_pass = value != 0.0f ? 1u : 0u;
+    else if (key == "skip_weapons") flag(s.skip_weapons);
+    else if (key == "cache_weapons") flag(s.cache_weapons);
+    else if (key == "keep_behind") flag(s.keep_behind);
     else if (key == "ringtest") flag(s.ring_test);
     else if (key == "build") flag(s.build_fast_trace);
     else if (key == "dump") s.dump_request = value;

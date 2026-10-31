@@ -62,7 +62,14 @@ struct Settings {
     float sun_far = 200.0f;       // metres a sun ray reaches
     bool governor = false;        // the frame-time governor (vk_rt_governor.h): RT steps down near the budget
     float governor_budget = 15.5f; // ms of GPU time a frame may take before it steps down (of 16.67)
-    uint32_t sun_debug = 0;       // 1 the rays alone, 2 reversed, 4 the mask in full shadow (a write test), 8 cached geometry only, 16 per-frame geometry from the camera
+    uint32_t sun_debug = 0;       // 1 the rays alone, 2 reversed, 4 the mask in full shadow (a write test), 8 cached geometry only, 16 per-frame geometry from the camera, 32 rays against per-frame geometry only, 64 the game's own shadow removed (RT alone; ticket 74)
+    // Ticket 74: one pixel's moon ray logged every 60 frames (its origin, normal, direction, hit,
+    // the hit's static part and world point, the camera). 0, 0: off. Full-resolution pixel.
+    uint32_t sun_probe_x = 0, sun_probe_y = 0;
+    // Ticket 74: the moon rays' normal from the depth buffer (default; Andreas, 2026-10-31). 0 reads
+    // colour target 0 of the G-buffer instead, which is not a world normal on every material: flipped
+    // to face the camera it made a false self-shadow along a view-dependent line (a sliding wedge).
+    bool sun_depth_normals = true;
     bool spot_shadow = false;     // the shadowed spot's 512x512 map replaced by a ray-traced one
     uint32_t spot_res = 1024;     // its size
     uint32_t spot_blur = 3;       // texels of Gaussian on its moments (soft edges)

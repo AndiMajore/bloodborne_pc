@@ -444,6 +444,7 @@ void RayTracedAO::RebuildStatic(float reach) {
         float d2;
         u32 offset, triangles;
         u64 key;
+        Rtao::Box box;
     };
     std::vector<Candidate> parts;
     for (auto& [key, e] : cache) {
@@ -455,7 +456,7 @@ void RayTracedAO::RebuildStatic(float reach) {
         for (const auto& part : e.parts) {
             const float d2 = part.box.Distance2(camera_world);
             if (reach <= 0.0f || d2 <= reach * reach) {
-                parts.push_back({d2, part.pool_offset, part.triangles, key});
+                parts.push_back({d2, part.pool_offset, part.triangles, key, part.box});
             }
         }
         e.in_static = true; // unless a part is left out below
@@ -515,8 +516,10 @@ void RayTracedAO::RebuildStatic(float reach) {
         chosen.resize(keep);
     }
     static_build.clear();
+    static_build_info.clear();
     for (const auto& part : chosen) {
         static_build.push_back({part.offset, part.triangles});
+        static_build_info.push_back({part.key, part.box});
     }
     static_triangles = triangles;
     static_geometries = u32(static_build.size());

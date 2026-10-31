@@ -26,7 +26,7 @@ layout(push_constant) uniform Constants {
     uint num_geometries;
     uint total_triangles;
     float far_cut;        // triangles entirely beyond this distance stay out (sky, far terrain)
-    uint pad1;
+    uint keep_behind;     // 1: per-frame triangles behind the camera's plane are kept (ticket 74)
     vec4 inv_view[3];     // view -> world rows (world-space entries)
 };
 
@@ -70,8 +70,12 @@ void main() {
             break;
         }
         const vec4 clip = positions.p[g.store + uint(vertex) + instance * g.vertices];
-        // Behind the camera is fine for a world-space cache build (the BLAS outlives this view).
-        if ((!world && !(clip.w > 1e-4)) || any(isnan(clip)) || any(isinf(clip))) {
+        // Behind the camera is fine for a world-space cache build (the BLAS outlives this view), and
+        // for per-frame geometry too: (clip.xy / |scale|, clip.w) is the view position for w <= 0
+        // as well. keep_behind=0 drops such triangles whole, as before (ticket 74: a caster near
+        // the camera then loses the triangles crossing its plane, and its shadow is cut along a
+        // line that moves with the camera).
+        if ((!world && keep_behind == 0u && !(clip.w > 1e-4)) || any(isnan(clip)) || any(isinf(clip))) {
             valid = false;
             break;
         }

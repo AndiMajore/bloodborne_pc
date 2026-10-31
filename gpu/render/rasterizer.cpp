@@ -592,6 +592,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // A character-size skeleton: the RT cache never keeps such draws. Small palettes are on
         // static world pieces too (the motion gate above); the cache's own check sorts them out.
         bool skinned = false;
+        bool small_skeleton = false; // weapons and some props (tickets 74/96)
         u64 palette = 0, instance_data = 0;
         Motion::Anchor anchor{};
         {
@@ -619,6 +620,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 instance_data = XXH3_64bits_withSeed(data, std::min<u64>(size, u64(instances) * 48),
                                                      instance_data | 1);
             }
+            small_skeleton |= role == Motion::BufferRole::SmallSkeleton;
             if (role == Motion::BufferRole::Skeleton) {
                 gated = false;
                 skinned = true;
@@ -736,6 +738,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                                     (u64(instances) << 8) ^
                                                     u64(u32(base_vertex)) ^ (u64(first_instance) << 48)),
                     .skinned = skinned,
+                    .small_skeleton = small_skeleton,
                     .index_guest = is_indexed ? index_address : 0,
                     .index_bytes = is_indexed ? u32(index_bytes) : 0u,
                 });

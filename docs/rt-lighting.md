@@ -102,7 +102,14 @@ typo, or a key that belongs in another of these files.
     `sun_debug` (1 rays only, 2 reversed, 4 the mask in full shadow: a write test; 8 the moon rays
     hit the cached static geometry only, the per-frame (characters, cloth, not yet cached) left out;
     16 the per-frame geometry's distance along camera rays against the depth buffer, written as
-    the shadow: 0.5 where it sits on the visible surface, darker in front, brighter behind, 1 none);
+    the shadow: 0.5 where it sits on the visible surface, darker in front, brighter behind, 1 none;
+    32 the moon rays against the per-frame geometry only; 64 the game's own cascade shadow removed
+    (it lives in the mask's alpha, which the RT pass otherwise never touches): the RT shadow alone),
+    `sun_depth_normals` (1: the rays' normal from four depth taps, as the RTAO's; 0: colour target
+    0 of the G-buffer, which is not a world normal on every material and, flipped to face the
+    camera, cast a false shadow along a line that moved with the view: ticket 74),
+    `sun_probe_x`, `sun_probe_y` (a full-resolution pixel: its moon ray logged every 60 frames:
+    origin, normal, direction, hit distance, the static part and world point hit; 0, 0 off);
     `spot_shadow` (0/1), `spot_res` (1024), `spot_blur` (3 texels), `spot_soft` (0.2 m),
     `spot_near` (0.3 m).
   - light list: `lights_dump` (a new value logs the next frame's list; every 600 frames a summary).

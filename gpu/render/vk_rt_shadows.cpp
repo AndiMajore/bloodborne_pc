@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vk_mem_alloc.h>
 #include "bbgpu/shaders/rt_spot_map_comp.h"
 #include "bbgpu/shaders/rt_sun_shadow_comp.h"
@@ -39,8 +40,10 @@ struct SunConstants {
     float tmax;
     u32 frame;
     u32 mode;
+    u64 probe_address;               // ticket 74: 0 off
+    std::array<s32, 2> probe_px;     // the probed full-resolution pixel
 };
-static_assert(sizeof(SunConstants) == 144);
+static_assert(sizeof(SunConstants) == 160);
 
 struct SpotMapConstants {
     std::array<float, 4> row_x;
@@ -80,7 +83,80 @@ RtShadows::RtShadows(const Instance& instance, Scheduler& scheduler, VideoCore::
     : instance{instance}, scheduler{scheduler}, texture_cache{texture_cache}, runtime{runtime},
       camera_motion{camera_motion}, rtao{rtao}, lights{lights}, settings{settings}, views{instance, scheduler} {}
 
-RtShadows::~RtShadows() = default;
+RtShadows::~RtShadows() {
+    if (probe_buffer) {
+        vmaDestroyBuffer(instance.GetAllocator(), VkBuffer(probe_buffer), probe_alloc);
+    }
+}
+
+bool RtShadows::EnsureProbe() {
+    if (probe_buffer) {
+        return true;
+    }
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = 64 * sizeof(float),
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    VkBuffer raw{};
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &raw, &probe_alloc, &info) != VK_SUCCESS) {
+        std::printf("RT shadows: the probe buffer failed\n");
+        return false;
+    }
+    probe_buffer = vk::Buffer(raw);
+    probe_mapped = static_cast<const float*>(info.pMappedData);
+    std::memset(info.pMappedData, 0, 64 * sizeof(float));
+    probe_address = instance.GetDevice().getBufferAddress({.buffer = probe_buffer});
+    return true;
+}
+
+/// Ticket 74: what the probed pixel's moon ray saw (written by a recent frame's mode 0).
+void RtShadows::ReportProbe() {
+    const float* v = probe_mapped;
+    if (!v || v[0] == 0.0f) {
+        std::printf("RT sun probe (%u, %u): no write yet (the pixel is sky, or not traced)\n", settings.sun_probe_x,
+                    settings.sun_probe_y);
+        return;
+    }
+    const auto iv = camera_motion.InvView(); // view -> world rows
+    const auto to_world = [&](const float* x, bool point) {
+        std::array<float, 3> w{};
+        for (int r = 0; r < 3; ++r) {
+            w[r] = iv[r * 4] * x[0] + iv[r * 4 + 1] * x[1] + iv[r * 4 + 2] * x[2] + (point ? iv[r * 4 + 3] : 0.0f);
+        }
+        return w;
+    };
+    const auto P = to_world(v + 1, true), N = to_world(v + 4, false), L = to_world(v + 7, false);
+    std::printf("RT sun probe (%u, %u) frame %.0f: camera (%.2f %.2f %.2f) forward (%.3f %.3f %.3f); surface world "
+                "(%.3f %.3f %.3f) view z %.3f, normal world (%.3f %.3f %.3f), moon world (%.3f %.3f %.3f), N.L %.3f%s\n",
+                settings.sun_probe_x, settings.sun_probe_y, v[0], iv[3], iv[7], iv[11], iv[2], iv[6], iv[10], P[0], P[1],
+                P[2], v[3], N[0], N[1], N[2], L[0], L[1], L[2], v[22], v[26] != 0.0f ? " (facing away: not traced)" : "");
+    if (v[13] == 0.0f) {
+        std::printf("RT sun probe: no hit; shadow value %.3f\n", v[21]);
+        return;
+    }
+    const bool world = v[15] >= 0.5f; // custom index 1: the static (world-space) instance
+    std::array<float, 3> hit{v[18], v[19], v[20]};
+    if (!world) {
+        hit = to_world(v + 18, true); // the per-frame BLAS is in view space
+    }
+    std::printf("RT sun probe: hit at t %.3f m, %s, geometry %.0f, primitive %.0f, world point (%.3f %.3f %.3f); "
+                "shadow value %.3f\n", v[14], world ? "static" : "per-frame", v[16], v[17], hit[0], hit[1], hit[2], v[21]);
+    if (world) {
+        if (const auto* part = rtao.StaticPart(u32(v[16]))) {
+            std::printf("RT sun probe: static part key %016llx, box (%.2f %.2f %.2f) - (%.2f %.2f %.2f)\n",
+                        (unsigned long long)part->key, part->box.min[0], part->box.min[1], part->box.min[2],
+                        part->box.max[0], part->box.max[1], part->box.max[2]);
+        }
+    }
+}
 
 void RtShadows::OnFrameStart(u32 next_frame) {
     frame = next_frame;
@@ -220,6 +296,10 @@ void RtShadows::RecordSun() {
     const vk::ImageView normal_view = views.Get(normal, normal.info.pixel_format, vk::ImageAspectFlagBits::eColor);
     const vk::ImageView mask_view = views.Get(mask, vk::Format::eR8G8B8A8Unorm, vk::ImageAspectFlagBits::eColor);
 
+    const bool probe = (settings.sun_probe_x || settings.sun_probe_y) && EnsureProbe();
+    if (probe && ++probe_frames % 60 == 0) {
+        ReportProbe();
+    }
     const auto view = camera_motion.View();
     std::array<float, 3> sun_view{};
     for (int r = 0; r < 3; ++r) {
@@ -237,7 +317,9 @@ void RtShadows::RecordSun() {
         .erode = float(settings.sun_erode),
         .tmax = settings.sun_far,
         .frame = frame,
-        .mode = settings.sun_debug << 4 | (half_res ? 4096u : 0u),
+        .mode = settings.sun_debug << 4 | (half_res ? 4096u : 0u) | (settings.sun_depth_normals ? 8192u : 0u),
+        .probe_address = probe ? probe_address : 0,
+        .probe_px = {s32(settings.sun_probe_x), s32(settings.sun_probe_y)},
     };
     const vk::ImageMemoryBarrier2 to_write{
         .srcStageMask = Compute,

@@ -170,6 +170,9 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 | `staticbuild` | | 2 | static BLAS build: 0 fast trace, 1 fast build, 2 fast build + ALLOW_DATA_ACCESS |
 | `build` | | 0 | 1: per-frame BLAS built for trace speed (no difference on RADV) |
 | `alpha`, `decals` | | 0 | 1: keep alpha-tested draws (as solid quads) / draws without depth write |
+| `capture_pass` | | 1 | 1: only the draws of the camera's G-buffer pass (a planar water reflection's pass, drawn from a mirrored camera, left out: it was a phantom copy of the scene; ticket 96); 0: every G-buffer pass, as before 2026-10-31 |
+| `skip_weapons` | | 0 | 1: draws with a small bone palette (weapons, some props) left out of the BVH (A/B) |
+| `cache_weapons` | | 1 | 0: such draws never enter the static cache, cached ones are evicted (A/B) |
 | `foliage` | 0-1 | 0 | alpha-tested draws occlude with this probability per hit (0: left out); about +0.7 ms |
 | | `BB_RTAO_MAX_TRIANGLES` | 1500000 | per-frame triangle budget (buffers are sized for it; 3000000 for `cache=0` or `chunk=0`); set, it also switches off the growth below |
 | `stage` | `BB_RTAO_STAGE` | 5 | stop after: 1 expand, 2 BLAS, 3 TLAS, 4 trace, 5 apply |

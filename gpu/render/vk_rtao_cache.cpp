@@ -46,6 +46,11 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
     frame_triangles = 0;
     foliage_triangles = 0;
     per_frame_reasons = {};
+    pass_draws = {};
+    pass_triangles = {};
+    main_pass = ~0u;
+    small_draws = small_triangles = side_skipped_triangles = weapon_skipped_triangles = 0;
+    const VideoCore::ImageId main_depth = camera_motion.Depth(); // the camera's (largest) pass
     // The foliage last: its triangles end the per-frame range, the BLAS's non-opaque geometry.
     std::stable_partition(draws.begin(), draws.end(), [](const Draw& d) { return !d.foliage; });
     out.opaque_triangles = ~0u;
@@ -60,7 +65,8 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
         CacheEntry& e = cache[d.key];
         e.base = d.base;
         e.last_seen = frame;
-        if (!e.parts.empty() && (!use_cache || (e.chunked ? !chunking || !too_big(e) : too_big(e)))) {
+        if (!e.parts.empty() && (!use_cache || (e.chunked ? !chunking || !too_big(e) : too_big(e)) ||
+                                 (d.small_skeleton && !settings.cache_weapons))) {
             Evict(e); // the settings changed: cached the other way, or not at all
         }
     }
@@ -149,6 +155,26 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
         split_meshes.clear();
     }
     for (const Draw& d : draws) {
+        { // tickets 74/96: which pass and palette the frame's draws come from, and the A/B filters
+            const u32 p = std::min(d.pass, 2u);
+            ++pass_draws[p];
+            pass_triangles[p] += d.gpu.triangles;
+            if (main_depth && d.depth == main_depth) {
+                main_pass = d.pass;
+            }
+            if (d.small_skeleton) {
+                ++small_draws;
+                small_triangles += d.gpu.triangles;
+            }
+            if (settings.capture_pass == 1 && main_depth && d.depth != main_depth) {
+                side_skipped_triangles += d.gpu.triangles;
+                continue;
+            }
+            if (settings.skip_weapons && d.small_skeleton) {
+                weapon_skipped_triangles += d.gpu.triangles;
+                continue;
+            }
+        }
         CacheEntry& e = cache[d.key];
         GpuGeometry gpu = d.gpu;
         const u32 probe_flag = probe_now(d, e) ? GeoProbe : 0u;
@@ -196,7 +222,8 @@ void RayTracedAO::ClassifyDraws(FrameDraws& out, bool use_cache, u32 probe_id) {
         }
         const bool big = too_big(e);
         if (!use_cache || e.split_pending || !e.parts.empty() ||
-            !Rtao::Promotable(e, d.skinned, big && !chunking, settings.promote_after) ||
+            !Rtao::Promotable(e, d.skinned || (d.small_skeleton && !settings.cache_weapons), big && !chunking,
+                              settings.promote_after) ||
             gpu.triangles == 0 || promo_used + gpu.triangles > PromoTriangles) {
             continue;
         }
@@ -382,6 +409,9 @@ void RayTracedAO::AddGeometry(const Geometry& g) {
     draw.base = g.key;
     draw.occurrence = occurrence;
     draw.skinned = g.skinned;
+    draw.small_skeleton = g.small_skeleton;
+    draw.depth = depth_id;
+    draw.pass = gbuffer_passes ? gbuffer_passes - 1 : 0;
     draw.foliage = g.alpha_test && !settings.include_alpha;
     draw.gpu = GpuGeometry{.store = g.store,
                           .vertices = g.vertices,

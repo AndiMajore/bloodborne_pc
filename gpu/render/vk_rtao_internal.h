@@ -28,7 +28,7 @@ struct ExpandConstants {
     u32 num_geometries;
     u32 total_triangles;
     float far_cut;
-    u32 pad1;
+    u32 keep_behind; // 1: per-frame triangles behind the camera's plane kept (ticket 74)
     std::array<float, 12> inv_view; // view -> world rows (world-space entries)
 };
 struct ProbeConstants {

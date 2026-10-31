@@ -666,6 +666,7 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
         .num_geometries = in.num_geometries,
         .total_triangles = in.dispatch_triangles,
         .far_cut = settings.ao_far > 0.0f ? settings.ao_far + settings.radius : 0.0f,
+        .keep_behind = settings.keep_behind ? 1u : 0u,
         .inv_view = inv_view,
     };
     const auto& expand = in.expand;

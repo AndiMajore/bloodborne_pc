@@ -58,6 +58,7 @@ public:
         bool depth_write; // off: decals and overlays hugging other surfaces
         u64 key;          // identity across frames (shader, buffers, ranges); the occurrence is added
         bool skinned;     // a bone palette: never cached
+        bool small_skeleton = false; // a small palette (weapons, some props; tickets 74/96)
         // The guest range of the indices (0: not indexed). Small ranges (the buffer cache streams
         // them through a ring reused once the draw's tick is done) are copied at draw time into
         // the RTAO's own ring through the runtime's backing view; the others are read by address
@@ -204,6 +205,9 @@ private:
         u32 occurrence;
         bool skinned;
         bool foliage; // alpha-tested (foliage=): per frame only, in the BLAS's non-opaque geometry
+        bool small_skeleton = false;
+        VideoCore::ImageId depth{}; // the G-buffer pass's depth target it was drawn into
+        u32 pass = 0;               // that pass's order in the frame (0: the first)
     };
 
     struct Buffer {
@@ -292,6 +296,18 @@ private:
     std::array<float, 3> static_anchor{}; // the camera when it was built
     u32 static_frame = 0;
     u32 static_triangles = 0, static_geometries = 0, static_rebuilds = 0; // (rebuilds per report)
+public:
+    /// Ticket 74's probe: the static BLAS's geometry `index` of the last build: its draw key and
+    /// world box (nullptr: no such geometry).
+    struct StaticPartInfo {
+        u64 key;
+        Rtao::Box box;
+    };
+    [[nodiscard]] const StaticPartInfo* StaticPart(u32 index) const noexcept {
+        return index < static_build_info.size() ? &static_build_info[index] : nullptr;
+    }
+private:
+    std::vector<StaticPartInfo> static_build_info;
     u32 promotions = 0, evictions_total = 0, pool_evictions = 0;
     u32 chunk_groups_built = 0, chunked_meshes_built = 0, split_skipped = 0; // (per report)
     float split_ms = 0.0f;                                                    // (per report)
@@ -300,6 +316,13 @@ private:
     // Why per-frame triangles are not cached (the last pass): skinned, too big, blacklisted,
     // not stable yet, part of a mesh whose copies are not all cached, cache off.
     std::array<u32, 6> per_frame_reasons{};
+    // Tickets 74/96: the G-buffer passes of this frame (a new depth target starts one), and the
+    // last pass's draws by pass and by palette (reported every 600 frames).
+    u32 gbuffer_passes = 0;
+    VideoCore::ImageId pass_depth{};
+    std::array<u32, 3> pass_draws{}, pass_triangles{};
+    u32 main_pass = ~0u, small_draws = 0, small_triangles = 0;
+    u32 side_skipped_triangles = 0, weapon_skipped_triangles = 0;
     std::array<float, 3> camera_world{};
     static constexpr u32 ProbeSlots = 4;
     std::array<std::vector<u64>, ProbeSlots> probe_keys; // table index -> key (0: not probed)
