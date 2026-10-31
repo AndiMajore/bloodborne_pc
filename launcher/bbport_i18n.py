@@ -49,6 +49,11 @@ EN = {
         "tracing, an upscaler with object motion vectors and SSAO turned on. 0.6-1.6 ms per "
         "frame on an RX 9070 XT; the values also change live through user/rtao.txt.",
     "Затенение трассировкой лучей (RTAO)": "Ray-traced ambient occlusion (RTAO)",
+    "Тени в углах и под предметами лучами; не вместе с GT-VBAO":
+        "Shadows in corners and under objects by ray tracing; not together with GT-VBAO",
+    "Поверх отражений SSR игры; включает их": "On top of the game's SSR reflections; turns them on",
+    "Сетка проб вокруг камеры, лучи по сцене; вместо отражённого света лучами":
+        "A grid of probes around the camera, rays through the scene; instead of the ray-traced bounce",
     "Недоступно: нужна трассировка лучей Vulkan (AMD RX 6000+, NVIDIA RTX, Intel Arc).":
         "Not available: needs Vulkan ray tracing (AMD RX 6000+, NVIDIA RTX, Intel Arc).",
     "Недоступно: эта видеокарта только эмулирует трассировку лучей, это отняло бы большую "

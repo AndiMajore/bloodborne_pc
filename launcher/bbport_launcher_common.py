@@ -835,6 +835,8 @@ def rt_capability():
     return run.stdout.split("\t", 1)[0].strip() if run.returncode == 0 else ""
 
 
+# The RTAO switch's subtitle when nothing stands in its way.
+RTAO_SUBTITLE = "Тени в углах и под предметами лучами; не вместе с GT-VBAO"
 # The RTAO switch's subtitle by GPU class (ticket 43): True where the switch is disabled.
 RTAO_GPU_NOTES = {
     "none": (True, "Недоступно: нужна трассировка лучей Vulkan (AMD RX 6000+, NVIDIA RTX, Intel Arc)."),

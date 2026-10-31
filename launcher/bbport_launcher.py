@@ -504,7 +504,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
                            "включённое затенение SSAO. 0,6–1,6 мс на кадр (RX 9070 XT); значения меняются и на "
                            "лету через user/rtao.txt."))
         self.rtao_row = Adw.SwitchRow(title=tr("Затенение трассировкой лучей (RTAO)"),
-                                      subtitle="BB_RTAO", active=self.settings.get("rtao", False))
+                                      subtitle=tr(RTAO_SUBTITLE), active=self.settings.get("rtao", False))
         rtao.add(self.rtao_row)
         self.rtao_preset_row = combo_row(tr("Качество"), None, RTAO_PRESET_CHOICES,
                                          self.settings.get("rtao_preset", "medium"))
@@ -572,7 +572,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
                                        active=self.settings.get("rt_gi", False))
         rtao.add(self.rt_gi_row)
         self.rt_reflect_row = Adw.SwitchRow(title=tr("Отражения лучами (эксперимент)"),
-                                            subtitle="BB_RT_REFLECT",
+                                            subtitle=tr("Поверх отражений SSR игры; включает их"),
                                             active=self.settings.get("rt_reflect", False))
         rtao.add(self.rt_reflect_row)
         self.rt_reflect_mode_row = combo_row(tr("Отражения: где"), None, RT_REFLECT_MODES,
@@ -583,7 +583,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
                                             active=self.settings.get("rt_surface", False))
         rtao.add(self.rt_surface_row)
         self.rt_probes_row = Adw.SwitchRow(title=tr("Отражённый свет из проб (эксперимент)"),
-                                           subtitle=tr("Сетка проб вокруг камеры, лучи по сцене; вместо SSGI, не вместе"),
+                                           subtitle=tr("Сетка проб вокруг камеры, лучи по сцене; вместо отражённого света лучами"),
                                            active=self.settings.get("rt_probes", False))
         rtao.add(self.rt_probes_row)
 
@@ -641,6 +641,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.rt_reflect_row.connect("notify::active", rt_extra_sensitive)
         self.rt_governor_row.connect("notify::active", rt_extra_sensitive)
         rt_extra_sensitive()
+        self.connect_rt_gates()
         sec["graphics"].add(rtao)
         self.update_rtao_gate()
 
@@ -802,6 +803,42 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.update_user_status()
         self.store()
 
+    def connect_rt_gates(self):
+        """Pairs of switches that cannot work together, or one needs the other (ticket 88): the
+        launcher resolves them as the user flips one, so no combination silently does nothing.
+        - RTAO and GT-VBAO both write the game's AO target (they would multiply): one of them.
+        - The RT reflections run after the game's SSR pass: they turn SSR on; SSR off turns them off.
+        - The RT bounce is the SSGI's gather: it turns SSGI on; SSGI off turns it off.
+        - The RT bounce and the probes are two sources of the same bounce: one of them.
+        Saved settings that break a rule are resolved at start to what actually ran in the game:
+        reflections without SSR never ran (off), probes beside the RT bounce added a second bounce
+        (probes off), VBAO beside RTAO stacked (VBAO off)."""
+        ssr_row = self.effect_rows["effect_ssr"]
+
+        def when_on(row, action):
+            row.connect("notify::active", lambda r, *_: r.get_active() and action())
+
+        def when_off(row, action):
+            row.connect("notify::active", lambda r, *_: not r.get_active() and action())
+
+        when_on(self.rtao_row, lambda: self.vbao_row.set_active(False))
+        when_on(self.vbao_row, lambda: self.rtao_row.set_active(False))
+        when_on(self.rt_reflect_row, lambda: ssr_row.set_active(True))
+        when_off(ssr_row, lambda: self.rt_reflect_row.set_active(False))
+        when_on(self.rt_gi_row, lambda: self.ssgi_row.set_active(True))
+        when_off(self.ssgi_row, lambda: self.rt_gi_row.set_active(False))
+        when_on(self.rt_gi_row, lambda: self.rt_probes_row.set_active(False))
+        when_on(self.rt_probes_row, lambda: self.rt_gi_row.set_active(False))
+        # Saved settings from before these rules.
+        if self.rt_reflect_row.get_active() and not ssr_row.get_active():
+            self.rt_reflect_row.set_active(False)
+        if self.rt_gi_row.get_active() and not self.ssgi_row.get_active():
+            self.rt_gi_row.set_active(False)
+        if self.rt_gi_row.get_active() and self.rt_probes_row.get_active():
+            self.rt_probes_row.set_active(False)
+        if self.rtao_row.get_active() and self.vbao_row.get_active():
+            self.vbao_row.set_active(False)
+
     def update_rtao_gate(self):
         """The RTAO switch: off and disabled when the GPU cannot run it or a requirement (an
         upscaler with object motion, the game's SSAO) is off; the subtitle says why."""
@@ -816,7 +853,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         if disabled:
             self.rtao_row.set_active(False)
         self.rtao_row.set_sensitive(not disabled)
-        self.rtao_row.set_subtitle(tr(note) if note else "BB_RTAO")
+        self.rtao_row.set_subtitle(tr(note) if note else tr(RTAO_SUBTITLE))
 
     def update_upscaler_status(self):
         value = combo_value(self.upscaler_row)
