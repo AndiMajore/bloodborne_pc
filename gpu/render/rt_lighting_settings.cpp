@@ -38,6 +38,9 @@ bool Apply(Settings& s, std::string_view key, float value) {
     else if (key == "fire_base_height") s.fire_base_height = std::clamp(value, 0.0f, 10.0f);
     else if (key == "fire_base_smooth") s.fire_base_smooth = std::clamp(value, 0.0f, 0.995f);
     else if (key == "fire_base_fade") s.fire_base_fade = std::clamp(value, 0.0f, 0.999f);
+    else if (key == "fire_base_free_fade") s.fire_base_free_fade = std::clamp(value, 0.0f, 1.0f);
+    else if (key == "fire_glow_min") s.fire_glow_min = std::clamp(value, 0.0f, 25.5f);
+    else if (key == "fire_glow_reach") s.fire_glow_reach = std::clamp(value, 0.0f, 25.5f);
     else if (key == "fire_base_merge") s.fire_base_merge = std::clamp(value, 0.1f, 10.0f);
     else if (key == "fire_spark_size") s.fire_spark_size = std::clamp(value, 0.0f, 5.0f);
     else if (key == "sun_shadow") flag(s.sun_shadow);

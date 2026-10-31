@@ -85,7 +85,14 @@ typo, or a key that belongs in another of these files.
     The bases: `fire_base` (1: x the averaged power: the brightness), `fire_base_size` (0.2 m
     radius), `fire_base_height` (2 m, 40 % below the fire's place), `fire_base_lift` (0 m: the base
     moved up, negative down, from the game's fire light it is anchored to), `fire_base_smooth` (0.98 a frame),
-    `fire_base_fade` (0.985 a frame off screen), `fire_base_merge` (1.5 m: sparks within this
+    `fire_base_fade` (0.985 a frame: a game fire's base off screen), `fire_base_free_fade` (0.8 a frame:
+    for a base that is no game fire, i.e. not lined up with a warm game fire light, such as a weapon's
+    or spell's glow: the share of its power and place kept, lit or not; 0.985 gives the old
+    seconds-long afterglow on the wall behind it, ticket 101),
+    `fire_glow_min` (1: a light that no game fire light lines up with, a weapon's or spell's glow,
+    needs this peak with no hysteresis; the game's faint sparkles that linger where it started and
+    where it hit make none; 0: as any light), `fire_glow_reach` (8 m: such a light's power is
+    reckoned at most this far away instead of at the wall behind it; 0: no cap), `fire_base_merge` (1.5 m: sparks within this
     sideways join a base even when their depth is off along the line of sight).
     Large fires (the pyres): a fire whose game light (a warm light within 2.5 m of its anchor) is
     brighter than `fire_large` (7: the light's colour as luminance; the Central Yharnam stakes

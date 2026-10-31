@@ -32,7 +32,8 @@
 // distance: a flicker puts a light on the stake one frame and on the wall behind the next), its
 // summed power and place averaged over seconds (`base_smooth`; lights that agree in depth move the
 // place ten times as much as the others); a light near no base starts one (faded in from nothing);
-// a base whose fire is not on screen fades (`base_fade` a frame). A base lined up with one of the
+// a game fire's base (lined up with a game fire light, warm) whose fire is not on screen fades
+// (`base_fade` a frame); any other base is averaged and fades at `base_free_fade` (a passing glow, 101). A base lined up with one of the
 // game's own fire lights (`anchors`, its light list) takes that light's place: exact and fixed.
 // Large fires (the pyres): a base anchored to a game light the CPU marks as large (anchor w 1: a
 // warm light of its fire brighter than fire_large) is large from then on (row 1's w of its slot);
@@ -77,9 +78,22 @@ layout(push_constant) uniform Constants {
     float spark_strength; // the list: x a spark's power
     float base_lift;      // the list: metres a base is moved up (the world's up is y)
     float large_base_strength, large_spark_strength, large_base_lift; // the list, large fires
-    float pad;
+    // Glows (ticket 101; the block is at its 256 bytes, so three settings in 8 bits each): x / 255 the
+    // share a base that is no game fire keeps a frame (its average and its fade), y / 10 the peak a light
+    // no game fire light lines up with must reach (no hysteresis: the game's lingering sparkles of a
+    // weapon or spell make none), z / 10 the metres at most its power is reckoned at (0: no cap).
+    uint glow;
     vec4 anchors[5];    // world position, w 1: a large fire's light
 };
+float BaseFreeFade() {
+    return float(glow & 255u) / 255.0;
+}
+float GlowMin() {
+    return float((glow >> 8) & 255u) * 0.1;
+}
+float GlowReach() {
+    return float((glow >> 16) & 255u) * 0.1;
+}
 
 const uint MaxBases = 32u;
 
@@ -308,14 +322,29 @@ void Bases() {
         if (!alive[b]) {
             continue;
         }
+        // A game fire: lined up with one of the game's own fire lights and warm (a weapon's or a
+        // spell's glow next to a wall lamp is green or blue, ticket 101). Its power and place are
+        // averaged over seconds and, off screen, it fades over seconds and is there again when the
+        // camera turns back. Any other base (a passing glow taken for a fire) follows its lights and
+        // fades at base_free_fade instead, so it does not keep lighting the wall behind it for seconds.
+        const vec3 colour = weight[b] > 0.0 ? sum_power[b] : power[b];
+        bool anchored = false;
+        for (uint a = 0u; a < anchor_count && !anchored; ++a) {
+            const vec2 d = FromBase(position[b], ray[b], anchors[a].xyz);
+            anchored = d.x < base_merge && d.y < reach[b];
+        }
+        const bool game_fire = anchored && colour.r >= colour.b && colour.r >= 0.8 * colour.g;
+        const float keep = game_fire ? base_smooth : min(BaseFreeFade(), base_smooth);
         if (weight[b] > 0.0) {
             if (place_weight[b] > 0.0) {
                 position[b] = fresh[b] ? sum_position[b] / place_weight[b]
-                                       : mix(sum_position[b] / place_weight[b], position[b], base_smooth);
+                                       : mix(sum_position[b] / place_weight[b], position[b], keep);
             }
-            power[b] = mix(sum_power[b], power[b], base_smooth);
+            power[b] = mix(sum_power[b], power[b], keep);
         } else {
-            power[b] *= base_fade;
+            const ivec2 t = QuarterTexel(position[b]);
+            const bool on_screen = all(greaterThanEqual(t, ivec2(0))) && all(lessThan(t, quarter_size));
+            power[b] *= game_fire && !on_screen ? base_fade : min(BaseFreeFade(), base_fade);
         }
         alive[b] = Luma(power[b]) > 1e-4 || fresh[b];
     }
@@ -522,6 +551,7 @@ void main() {
         }
         if (depth < 1.0) {
             vec3 v = ViewPos(vec2(fp) + 0.5, depth);
+            bool anchored = false;
             // A game fire light on the line of sight: the spark is at its distance.
             {
                 const vec3 dir_view = normalize(v);
@@ -541,15 +571,25 @@ void main() {
                 if (along > 0.0) {
                     v = dir_view * along;
                 }
+                anchored = along > 0.0;
             }
             const float len = length(v);
             v *= max(len - pull, 0.1) / len;
-            const vec4 h = vec4(v, 1.0);
-            position = vec4(dot(inv_view[0], h), dot(inv_view[1], h), dot(inv_view[2], h),
-                            s_peak[0] >= min_peak ? 1.0 : 0.5);
-            // A quarter-size texel's width and height in the world at this distance.
-            const vec2 texel = 8.0 * abs(v.z) / (abs(proj.xy) * full_size);
-            power = vec4(s_sum[0] * (texel.x * texel.y * Calibration), len);
+            // A glow (ticket 101): no game fire light on its line of sight, e.g. a weapon's or a spell's
+            // light. It needs GlowMin() with no hysteresis (the game's faint sparkles that linger where
+            // it started and where it hit kept lights alive for seconds), and its power is reckoned at
+            // most GlowReach() away: it floats in front of the wall its depth is taken from, and the
+            // power grows with the distance squared.
+            if (anchored || s_peak[0] >= max(GlowMin(), min_peak)) {
+                const vec4 h = vec4(v, 1.0);
+                position = vec4(dot(inv_view[0], h), dot(inv_view[1], h), dot(inv_view[2], h),
+                                s_peak[0] >= min_peak ? 1.0 : 0.5);
+                const float reach = GlowReach();
+                const float z = anchored || reach <= 0.0 ? abs(v.z) : abs(v.z) * min(1.0, reach / max(len, 1e-3));
+                // A quarter-size texel's width and height in the world at this distance.
+                const vec2 texel = 8.0 * z / (abs(proj.xy) * full_size);
+                power = vec4(s_sum[0] * (texel.x * texel.y * Calibration), len);
+            }
         }
     }
     imageStore(raw_img, index, position);

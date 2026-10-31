@@ -42,6 +42,16 @@ struct Settings {
     float fire_base_height = 2.0f;  // metres: its height, 40 % below the fire's place
     float fire_base_smooth = 0.98f; // 0..0.995: the share of last frame's base power and place
     float fire_base_fade = 0.985f;  // 0..0.999: per frame without its fire on screen (fades over seconds)
+    // 0..0.999: a base that is no game fire (not lined up with a game fire light, or not warm: a
+    // weapon's or spell's glow taken for a fire, ticket 101): the share of last frame's power and place
+    // it keeps, lit or not (0.985 with fire_base_smooth 0.98 = as before, the seconds-long afterglow).
+    float fire_base_free_fade = 0.8f;
+    // A glow: a light that no game fire light lines up with (a weapon's or spell's light, ticket 101).
+    // It needs this peak (0..25.5, no hysteresis; 0: fire_min as any light; 1 and 8 m below: chosen by
+    // Andreas at the spider castle, 2026-11-01) ...
+    float fire_glow_min = 1.0f;
+    // ... and its power is reckoned at most this many metres away (0..25.5; 0: no cap).
+    float fire_glow_reach = 8.0f;
     float fire_base_merge = 1.5f;   // metres (horizontal): tile lights within this are one fire
     float fire_spark_size = 0.5f;   // metres: a spark sphere's radius
     // Large fires (the pyres): a fire whose own game light is brighter than fire_large (the

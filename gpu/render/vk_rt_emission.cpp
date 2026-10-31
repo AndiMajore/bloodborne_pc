@@ -53,11 +53,17 @@ struct FireLightConstants {
     float spark_strength; // the gather's list: x a spark's power
     float base_lift;      // the gather's list: metres a base is moved up
     float large_base_strength, large_spark_strength, large_base_lift; // the list, large fires
-    float pad;
+    u32 glow; // ticket 101, 8 bits each: base free fade x 255, glow min x 10, glow reach x 10
     std::array<std::array<float, 4>, 5> anchors; // world position, w 1: a large fire's light
 };
 static_assert(sizeof(FireLightConstants) == 256);
 constexpr u32 MaxAnchors = 5;
+// The glow settings of ticket 101 in 8 bits each (the push block is at its 256 bytes).
+u32 GlowBits(const RtLightingSettings::Settings& s) {
+    const auto bits = [](float v, float scale) { return u32(std::clamp(v * scale + 0.5f, 0.0f, 255.0f)); };
+    return bits(s.fire_base_free_fade, 255.0f) | (bits(s.fire_glow_min, 10.0f) << 8) |
+           (bits(s.fire_glow_reach, 10.0f) << 16);
+}
 float Luma(const std::array<float, 3>& c) {
     return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
 }
@@ -329,6 +335,7 @@ void RtEmission::RecordFireLights() {
         .large_base_strength = settings.fire_large_base,
         .large_spark_strength = settings.fire_large_spark,
         .large_base_lift = settings.fire_large_base_lift,
+        .glow = GlowBits(settings),
     };
     {
         // The game's warm point lights nearest the camera (its own fire lights: orange, not the
