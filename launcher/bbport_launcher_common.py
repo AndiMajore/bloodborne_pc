@@ -163,23 +163,22 @@ RTAO_PRESETS = {
     "high": {"rays": 4, "radius": 2.0, "strength": 1.0, "distance": 60.0, "foliage": 0.35},
 }
 RT_REFLECT_MODES = [("Только там, где SSR ничего не нашёл", "1"), ("Везде, где луч попал", "2")]
-# The effects on the RTAO's scene as a ladder (frame-time audit 2026-10-18, section 7): what holds
-# 60 fps in the heavy parts of Central Yharnam (lite), in the lighter areas (balanced), everything
-# (full). The switches below and user/rtlighting.txt's sun and spot shadows; the probes stay
-# their own choice (a second bounce source, not with the RT bounce).
+# The effects on the RTAO's scene (ticket 90, decision 2026-10-31): Lite is the public set, the
+# rest is Custom. A preset is the value of every switch it owns (the launcher's rows); choosing it
+# sets them, and the launcher writes them all at each start. Lite: RTAO (its own quality row), the
+# moon's shadow at half resolution and the adaptive quality at 16.5 ms; the effects not judged
+# yet off. Measured on main-0.7 (RX 9070 XT, 2560x1440): about 1.7 ms.
 RT_PRESETS = {
-    "lite": {"rt_gi": False, "rt_reflect": False, "rt_surface": False,
-             "light": {"sun_shadow": 1, "sun_half": 1, "spot_shadow": 0}},
-    "balanced": {"rt_gi": True, "rt_reflect": True, "rt_surface": True,
-                 "light": {"sun_shadow": 1, "sun_half": 1, "spot_shadow": 0}},
-    "full": {"rt_gi": True, "rt_reflect": True, "rt_surface": True,
-             "light": {"sun_shadow": 1, "sun_half": 0, "spot_shadow": 1}},
+    "lite": {"rt_sun_shadow": True, "rt_sun_half": True, "rt_governor": True, "rt_governor_budget": 16.5,
+             "rt_gi": False, "rt_reflect": False, "rt_probes": False},
 }
-RT_PRESET_CHOICES = [("Лёгкий", "lite", "RTAO и тени луны лучами; держит 60 к/с и в тяжёлых местах"),
-                     ("Сбалансированный", "balanced", "И отражённый свет, отражения, кэш поверхностей; "
-                      "для более лёгких мест"),
-                     ("Полный", "full", "Всё, тени луны в полном разрешении и тень фонаря; ниже 60 к/с "
-                      "в Центральном Ярнаме"),
+# Presets of before (Balanced, Full): load as Custom; switches they set that had no row then.
+RT_LEGACY_PRESETS = {
+    "balanced": {"rt_sun_shadow": True, "rt_sun_half": True},
+    "full": {"rt_sun_shadow": True, "rt_sun_half": False},
+}
+RT_PRESET_CHOICES = [("Лёгкий", "lite", "RTAO, тень луны в половинном разрешении и адаптивное качество; "
+                      "около 1,7 мс на RX 9070 XT, 60 к/с в большинстве мест"),
                      ("Своё", "custom", "Переключатели ниже")]
 RTAO_PRESET_CHOICES = [("Низкое", "low", "1 луч, радиус 1 м, до 25 м; около 0,6 мс"),
                        ("Среднее", "medium", "2 луча, радиус 1,5 м, до 40 м; около 1 мс"),
@@ -231,11 +230,10 @@ DEFAULTS = {
     "rt_gi": False,
     "rt_reflect": False,
     "rt_reflect_mode": "1",
-    "rt_surface": False,
     "rt_probes": False,
-    "rt_preset": "custom",
-    "rt_governor": False,
-    "rt_governor_budget": 15.5,
+    "rt_preset": "lite",
+    "rt_governor": True,
+    "rt_governor_budget": 16.5,
     "patches_dir": "",
     "language": "1",
     "fullscreen": False,
@@ -495,8 +493,12 @@ def game_environment(s):
         write_live_settings(settings_user_dir(s) / "rtao.txt",
                             {"rays": int(s.get("rtao_rays", 2)), "radius": float(s.get("rtao_radius", 1.5)),
                              "strength": float(s.get("rtao_strength", 1.0)), "far": distance,
-                             "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)),
-                             "surface": 1 if s.get("rt_surface") else 0, "enabled": 1})
+                             "snap": distance, "foliage": float(s.get("rtao_foliage", 0.0)), "enabled": 1})
+        # The surface cache and the lantern's shadow have no row any more (ticket 90): Lite turns
+        # them off, Custom leaves what user/rtao.txt and user/rtlighting.txt say.
+        lite = s.get("rt_preset") == "lite"
+        if lite:
+            write_live_settings(settings_user_dir(s) / "rtao.txt", {"surface": 0})
         # Experimental, on the RTAO's scene: reflections (vk_rt_reflect.cpp) after the game's SSR.
         if s.get("rt_reflect"):
             env["BB_RT_REFLECT"] = "1"
@@ -506,10 +508,14 @@ def game_environment(s):
         if s.get("rt_probes"):
             env["BB_RT_PROBES"] = "1"
             write_live_settings(settings_user_dir(s) / "rtprobes.txt", {"enabled": 1})
-        # The RT lighting's live file: the preset's shadows, the frame-time governor (ticket 71).
+        # The RT lighting's live file: the moon's shadow and the frame-time governor (71), every
+        # key the rows own, whatever the preset (a Custom no longer keeps an earlier preset's).
         light = {"governor": 1 if s.get("rt_governor") else 0,
-                 "governor_budget": float(s.get("rt_governor_budget", 15.5))}
-        light.update(RT_PRESETS.get(s.get("rt_preset"), {}).get("light", {}))
+                 "governor_budget": float(s.get("rt_governor_budget", 16.5)),
+                 "sun_shadow": 1 if s.get("rt_sun_shadow") else 0,
+                 "sun_half": 1 if s.get("rt_sun_half", True) else 0}
+        if lite:
+            light["spot_shadow"] = 0
         write_live_settings(settings_user_dir(s) / "rtlighting.txt", light)
     # The SSGI's ray-traced gather (experimental) traces the RTAO's scene: both must be on.
     if s.get("ssgi"):
@@ -824,12 +830,19 @@ def connected_displays():
             for number, (name, size, primary) in enumerate(rows, 1)]
 
 
-def rt_capability():
-    """The RTAO class of the game's GPU (bb-gpu-capabilities --rt: none, emulated, nomem,
-    untested, slow, ok), "" if unknown."""
+def rt_capability(gpu_name=""):
+    """The RTAO class of the GPU the game will run on (bb-gpu-capabilities --rt: none, emulated,
+    nomem, untested, slow, ok), "" if unknown. gpu_name: the launcher's GPU choice ("" = the
+    port's own), passed on as BB_GPU_ID as at launch."""
     tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+    env = dict(os.environ)
+    if gpu_name and "BB_GPU_ID" not in os.environ:
+        index = next((index for index, _vendor, _kind, name, _best in connected_gpus()
+                      if name == gpu_name), None)
+        if index is not None:
+            env["BB_GPU_ID"] = str(index)
     try:
-        run = subprocess.run([str(tool), "--rt"], capture_output=True, text=True, timeout=10)
+        run = subprocess.run([str(tool), "--rt"], capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError):
         return ""
     return run.stdout.split("\t", 1)[0].strip() if run.returncode == 0 else ""
@@ -845,6 +858,7 @@ RTAO_GPU_NOTES = {
     "nomem": (True, "Недоступно: нужно не меньше 4 ГБ видеопамяти."),
     "untested": (False, "Не проверено на этой видеокарте."),
     "slow": (False, "Медленнее на этой видеокарте (2–4 мс на кадр)."),
+    "untested-rdna3": (False, "Не проверено на этой видеокарте; ожидается в 1,5–2 раза дороже, чем на RX 9070 XT."),
 }
 
 

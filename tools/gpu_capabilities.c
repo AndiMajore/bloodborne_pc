@@ -79,8 +79,9 @@ static int live_resolution_suits(VkPhysicalDevice device) {
  * none: no VK_KHR_ray_query and acceleration structures. emulated: the extensions are there but
  * traced in software (a CPU device; RADV before RDNA2 with emulate_rt; NVIDIA GTX): a fraction of
  * the frame rate. nomem: the RTAO's smallest budgets need 12 % of a ~3.8 GiB heap
- * (rtao_geometry.h). untested: NVIDIA, Intel, or AMD without RADV. slow: RDNA2, or under 8 GB
- * (reduced geometry budgets). ok: RDNA3 and RDNA4 on RADV, where it has been measured. */
+ * (rtao_geometry.h). untested: NVIDIA, Intel, or AMD without RADV. untested-rdna3: RDNA3 on
+ * RADV, never measured (estimated 1.5-2x the RX 9070 XT's cost). slow: RDNA2, or under 8 GB
+ * (reduced geometry budgets). ok: RDNA4 on RADV, where it has been measured. */
 static const char *rt_class(VkPhysicalDevice device) {
     if (!has_extension(device, "VK_KHR_ray_query") ||
         !has_extension(device, "VK_KHR_acceleration_structure") ||
@@ -100,6 +101,7 @@ static const char *rt_class(VkPhysicalDevice device) {
     if (largest_local_heap(device) < (VkDeviceSize)3800 << 20) return "nomem";
     if (!chip) return "untested";
     if (chip < 1100 || largest_local_heap(device) < (VkDeviceSize)7680 << 20) return "slow";
+    if (chip < 1200) return "untested-rdna3";
     return "ok";
 }
 

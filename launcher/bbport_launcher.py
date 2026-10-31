@@ -189,6 +189,7 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.gpu_row.add_suffix(flat_button("view-refresh-symbolic", tr("Обновить список"),
                                             lambda _button: self.fill_gpus()))
         self.fill_gpus()
+        self.gpu_row.connect("notify::selected", lambda *_: self.gpu_changed())
         mode.add(self.gpu_row)
 
         self.mods_group = Adw.PreferencesGroup(
@@ -565,31 +566,30 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.rtao_row.connect("notify::active", rtao_rows_sensitive)
         rtao_value_changed()
         rtao_rows_sensitive()
-        self.rt_class = rt_capability()
-        # Experimental effects on the RTAO's scene (branch rt-lighting-exp).
-        self.rt_gi_row = Adw.SwitchRow(title=tr("Отражённый свет лучами (эксперимент)"),
-                                       subtitle=tr("SSGI ищет свет лучами вместо поиска по экрану; нужен SSGI"),
-                                       active=self.settings.get("rt_gi", False))
-        rtao.add(self.rt_gi_row)
-        self.rt_reflect_row = Adw.SwitchRow(title=tr("Отражения лучами (эксперимент)"),
-                                            subtitle=tr("Поверх отражений SSR игры; включает их"),
-                                            active=self.settings.get("rt_reflect", False))
-        rtao.add(self.rt_reflect_row)
-        self.rt_reflect_mode_row = combo_row(tr("Отражения: где"), None, RT_REFLECT_MODES,
-                                             self.settings.get("rt_reflect_mode", "1"))
-        rtao.add(self.rt_reflect_mode_row)
-        self.rt_surface_row = Adw.SwitchRow(title=tr("Кэш поверхностей (эксперимент)"),
-                                            subtitle=tr("Свет для попаданий лучей вне кадра; около 23 МБ"),
-                                            active=self.settings.get("rt_surface", False))
-        rtao.add(self.rt_surface_row)
-        self.rt_probes_row = Adw.SwitchRow(title=tr("Отражённый свет из проб (эксперимент)"),
-                                           subtitle=tr("Сетка проб вокруг камеры, лучи по сцене; вместо отражённого света лучами"),
-                                           active=self.settings.get("rt_probes", False))
-        rtao.add(self.rt_probes_row)
-
-        self.rt_preset_row = combo_row(tr("Набор эффектов лучами"), None, RT_PRESET_CHOICES,
-                                       self.settings.get("rt_preset", "custom"))
+        self.rt_class = rt_capability(self.settings.get("gpu", ""))
+        # The ladder (ticket 90): Lite, the public set (RTAO, the moon's shadow at half resolution,
+        # the adaptive quality), or Custom. Choosing Lite sets every switch below; changing one
+        # makes it Custom. The launcher writes every switch's key each start (common.py), so a
+        # preset is a reproducible state. Balanced and Full of before load as Custom with the
+        # switches they had set.
+        saved_preset = self.settings.get("rt_preset", "lite")
+        if saved_preset not in RT_PRESETS:
+            legacy = RT_LEGACY_PRESETS.get(saved_preset, {})
+            for key, value in legacy.items():
+                self.settings.setdefault(key, value)  # switches saved before they had rows
+            saved_preset = "custom"
+        self.rt_preset_row = combo_row(tr("Набор эффектов лучами"), None, RT_PRESET_CHOICES, saved_preset)
         rtao.add(self.rt_preset_row)
+        self.rt_sun_row = Adw.SwitchRow(
+            title=tr("Тень луны лучами"),
+            subtitle=tr("Вместо каскадной тени игры там, где луч что-то находит"),
+            active=self.settings.get("rt_sun_shadow", False))
+        rtao.add(self.rt_sun_row)
+        self.rt_sun_half_row = Adw.SwitchRow(
+            title=tr("Тень луны в половинном разрешении"),
+            subtitle=tr("Четверть лучей, около 0,2 мс вместо 0,5–2,7 мс"),
+            active=self.settings.get("rt_sun_half", True))
+        rtao.add(self.rt_sun_half_row)
         self.rt_governor_row = Adw.SwitchRow(
             title=tr("Адаптивное качество лучей (эксперимент)"),
             subtitle=tr("Когда кадр приближается к пределу, эффекты лучами упрощаются ступенями, "
@@ -600,49 +600,81 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.rt_budget_row.set_title(tr("Предел кадра для GPU, мс"))
         self.rt_budget_row.set_subtitle(tr("Из 16,7 мс при 60 к/с; меньше — больше запаса"))
         self.rt_budget_row.set_digits(1)
-        self.rt_budget_row.set_value(float(self.settings.get("rt_governor_budget", 15.5)))
+        self.rt_budget_row.set_value(float(self.settings.get("rt_governor_budget", 16.5)))
         rtao.add(self.rt_budget_row)
+
+        # Effects not judged yet (ticket 90): their own group, off in Lite.
+        advanced = Adw.PreferencesGroup(
+            title=tr("Ещё эффекты лучами (не оценены)"),
+            description=tr("Экспериментальные, ещё не проверены в игре: могут мерцать, отставать или "
+                           "стоить кадров. Включение любого делает набор «Своим»."))
+        self.rt_gi_row = Adw.SwitchRow(title=tr("Отражённый свет лучами (эксперимент)"),
+                                       subtitle=tr("SSGI ищет свет лучами вместо поиска по экрану; включает SSGI"),
+                                       active=self.settings.get("rt_gi", False))
+        advanced.add(self.rt_gi_row)
+        self.rt_reflect_row = Adw.SwitchRow(title=tr("Отражения лучами (эксперимент)"),
+                                            subtitle=tr("Поверх отражений SSR игры; включает их"),
+                                            active=self.settings.get("rt_reflect", False))
+        advanced.add(self.rt_reflect_row)
+        self.rt_reflect_mode_row = combo_row(tr("Отражения: где"), None, RT_REFLECT_MODES,
+                                             self.settings.get("rt_reflect_mode", "1"))
+        advanced.add(self.rt_reflect_mode_row)
+        self.rt_probes_row = Adw.SwitchRow(title=tr("Отражённый свет из проб (эксперимент)"),
+                                           subtitle=tr("Сетка проб вокруг камеры, лучи по сцене; вместо отражённого света лучами"),
+                                           active=self.settings.get("rt_probes", False))
+        advanced.add(self.rt_probes_row)
+        self.rt_advanced_group = advanced
+
         self.rt_preset_applying = False
-        preset_rows = {"rt_gi": self.rt_gi_row, "rt_reflect": self.rt_reflect_row,
-                       "rt_surface": self.rt_surface_row}
+        self.rt_preset_rows = {"rt_sun_shadow": self.rt_sun_row, "rt_sun_half": self.rt_sun_half_row,
+                               "rt_governor": self.rt_governor_row, "rt_governor_budget": self.rt_budget_row,
+                               "rt_gi": self.rt_gi_row, "rt_reflect": self.rt_reflect_row,
+                               "rt_probes": self.rt_probes_row}
+
+        def row_value(row):
+            return row.get_value() if isinstance(row, Adw.SpinRow) else row.get_active()
 
         def rt_preset_chosen(*_):
             preset = RT_PRESETS.get(combo_value(self.rt_preset_row))
             if preset is None:
                 return
             self.rt_preset_applying = True
-            for key, row in preset_rows.items():
-                row.set_active(preset[key])
-            if preset["rt_gi"]:
-                self.ssgi_row.set_active(True)  # the RT bounce is the SSGI's gather
+            for key, row in self.rt_preset_rows.items():
+                if isinstance(row, Adw.SpinRow):
+                    row.set_value(preset[key])
+                else:
+                    row.set_active(preset[key])
             self.rt_preset_applying = False
 
         def rt_switch_changed(*_):
             if self.rt_preset_applying:
                 return
-            current = combo_value(self.rt_preset_row)
-            preset = RT_PRESETS.get(current)
-            if preset and any(row.get_active() != preset[key] for key, row in preset_rows.items()):
+            preset = RT_PRESETS.get(combo_value(self.rt_preset_row))
+            if preset and any(row_value(row) != preset[key] for key, row in self.rt_preset_rows.items()):
                 self.rt_preset_row.set_selected(self.rt_preset_row.values.index("custom"))
 
         self.rt_preset_row.connect("notify::selected", rt_preset_chosen)
-        for row in preset_rows.values():
-            row.connect("notify::active", rt_switch_changed)
+        for row in self.rt_preset_rows.values():
+            row.connect("notify::value" if isinstance(row, Adw.SpinRow) else "notify::active", rt_switch_changed)
+        rt_preset_chosen()  # a preset's rows as the preset says (a fresh start: Lite)
 
         def rt_extra_sensitive(*_):
             on = self.rtao_row.get_active()
-            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_surface_row, self.rt_probes_row,
-                        self.rt_preset_row, self.rt_governor_row):
+            for row in (self.rt_gi_row, self.rt_reflect_row, self.rt_probes_row, self.rt_preset_row,
+                        self.rt_governor_row, self.rt_sun_row):
                 row.set_sensitive(on)
+            self.rt_sun_half_row.set_sensitive(on and self.rt_sun_row.get_active())
             self.rt_reflect_mode_row.set_sensitive(on and self.rt_reflect_row.get_active())
             self.rt_budget_row.set_sensitive(on and self.rt_governor_row.get_active())
 
         self.rtao_row.connect("notify::active", rt_extra_sensitive)
         self.rt_reflect_row.connect("notify::active", rt_extra_sensitive)
         self.rt_governor_row.connect("notify::active", rt_extra_sensitive)
+        self.rt_sun_row.connect("notify::active", rt_extra_sensitive)
         rt_extra_sensitive()
         self.connect_rt_gates()
         sec["graphics"].add(rtao)
+        sec["graphics"].add(advanced)
         self.update_rtao_gate()
 
         frames = Adw.PreferencesGroup(title=tr("Частота кадров"))
@@ -802,6 +834,13 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         self.settings["user_dir"] = ""
         self.update_user_status()
         self.store()
+
+    def gpu_changed(self):
+        """The RTAO switch's GPU class is that of the GPU the game will run on (ticket 90)."""
+        if not hasattr(self, "rtao_row"):
+            return  # the list is filled before the ray-tracing rows exist
+        self.rt_class = rt_capability(combo_value(self.gpu_row))
+        self.update_rtao_gate()
 
     def connect_rt_gates(self):
         """Pairs of switches that cannot work together, or one needs the other (ticket 88): the
@@ -1107,9 +1146,10 @@ class LauncherWindow(ContentPages, OnlinePage, TrophiesPage, LogPage, UpscalerFi
         s["rt_gi"] = self.rt_gi_row.get_active()
         s["rt_reflect"] = self.rt_reflect_row.get_active()
         s["rt_reflect_mode"] = combo_value(self.rt_reflect_mode_row)
-        s["rt_surface"] = self.rt_surface_row.get_active()
         s["rt_probes"] = self.rt_probes_row.get_active()
         s["rt_preset"] = combo_value(self.rt_preset_row)
+        s["rt_sun_shadow"] = self.rt_sun_row.get_active()
+        s["rt_sun_half"] = self.rt_sun_half_row.get_active()
         s["rt_governor"] = self.rt_governor_row.get_active()
         s["rt_governor_budget"] = float(self.rt_budget_row.get_value())
         s["online"] = self.online_row.get_active()

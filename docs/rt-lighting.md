@@ -108,13 +108,19 @@ normal and snapped origin instead of the G-buffer normal.
 
 ## Presets and the frame-time governor (ticket 71)
 
-The launcher's "Ray-tracing preset" sets the switches and `rtlighting.txt`'s shadows as a ladder
-(frame-time audit 2026-10-18, section 7: the game's own passes take 9-12.7 ms in Central
-Yharnam, so what fits depends on the place): **Lite** (RTAO, the moon's shadow at half
-resolution) holds 60 fps in the heavy parts of Central Yharnam; **Balanced** adds the RT bounce
-(with the fire lights), the reflections and the surface cache, for the lighter areas; **Full**
-adds the moon's shadow at full resolution and the lantern's; **Custom** leaves the switches as
-they are. The probes are not in any preset (a second bounce source).
+The launcher's "Ray-tracing preset" (ticket 90, 2026-10-31) is **Lite** or **Custom**. Lite is
+the public set: RTAO (its quality row on its own), the moon's shadow at half resolution and the
+adaptive quality at 16.5 ms; the effects not judged yet are off. Choosing it sets every row;
+changing a row makes it Custom. The launcher writes every row's key at each start (`sun_shadow`,
+`sun_half`, `governor`, `governor_budget` in rtlighting.txt, `rt` in ssgi.txt, the reflections'
+and probes' env), so a Custom no longer keeps an earlier preset's values; Lite also resets
+`spot_shadow` and the surface cache (`surface` in rtao.txt) to off, which have no row and are
+otherwise left to the files. The RT bounce, the reflections and the probes sit in a group of their
+own, "More ray-traced effects (not judged yet)", off by default; the reflections turn the game's
+SSR on, the bounce turns SSGI on, and the bounce and the probes exclude each other (ticket 88).
+Balanced and Full of before load as Custom with the switches they had set. Frame-time context
+(audit 2026-10-18, section 7): the game's own passes take 9-12.7 ms in Central Yharnam, so
+anything beyond Lite is for the lighter areas.
 
 `governor=1` in `rtlighting.txt` (the launcher's "Adaptive ray-tracing quality") steps the RT
 effects down when the GPU's share of the frame nears `governor_budget` (15.5 ms of 16.67) and

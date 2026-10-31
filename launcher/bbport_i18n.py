@@ -49,6 +49,24 @@ EN = {
         "tracing, an upscaler with object motion vectors and SSAO turned on. 0.6-1.6 ms per "
         "frame on an RX 9070 XT; the values also change live through user/rtao.txt.",
     "Затенение трассировкой лучей (RTAO)": "Ray-traced ambient occlusion (RTAO)",
+    "Тень луны лучами": "Moon shadow by ray tracing",
+    "Вместо каскадной тени игры там, где луч что-то находит":
+        "In place of the game's cascaded shadow wherever a ray finds something",
+    "Тень луны в половинном разрешении": "Moon shadow at half resolution",
+    "Четверть лучей, около 0,2 мс вместо 0,5–2,7 мс": "A quarter of the rays, about 0.2 ms instead of 0.5-2.7 ms",
+    "Ещё эффекты лучами (не оценены)": "More ray-traced effects (not judged yet)",
+    "Экспериментальные, ещё не проверены в игре: могут мерцать, отставать или "
+    "стоить кадров. Включение любого делает набор «Своим».":
+        "Experimental and not yet checked in play: they may flicker, lag or cost frames. Turning "
+        "any of them on makes the set Custom.",
+    "SSGI ищет свет лучами вместо поиска по экрану; включает SSGI":
+        "SSGI finds light with rays instead of searching the screen; turns SSGI on",
+    "RTAO, тень луны в половинном разрешении и адаптивное качество; "
+    "около 1,7 мс на RX 9070 XT, 60 к/с в большинстве мест":
+        "RTAO, the moon's shadow at half resolution and adaptive quality; about 1.7 ms on an "
+        "RX 9070 XT, 60 fps in most areas",
+    "Не проверено на этой видеокарте; ожидается в 1,5–2 раза дороже, чем на RX 9070 XT.":
+        "Untested on this GPU; expected to cost 1.5-2x what it does on an RX 9070 XT.",
     "Тени в углах и под предметами лучами; не вместе с GT-VBAO":
         "Shadows in corners and under objects by ray tracing; not together with GT-VBAO",
     "Поверх отражений SSR игры; включает их": "On top of the game's SSR reflections; turns them on",
