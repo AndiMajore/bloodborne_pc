@@ -1,10 +1,17 @@
 # Experimental ray-traced lighting (on the RTAO's scene)
 
 Effects that reuse the acceleration structures the ray-traced AO builds every frame
-(`docs/rtao.md`). All experimental and **all off by default**; they need the RTAO on a GPU with
-Vulkan ray queries. Prototypes on the branch `rt-lighting-exp`, none in `fork-0.6` (ticket 65).
-Two are judged and on by default (2026-10-18): the fire lights (`fire_light` 0.3) and the RT
-bounce light's colour denoiser (`rt_denoise`); both act only with the RT bounce light (`rt=1`).
+(`docs/rtao.md`). All experimental; they need the RTAO on a GPU with Vulkan ray queries. On
+`main-0.7` (merged from `rt-lighting-0.7`); the user-facing page is `docs/RAYTRACING.md`.
+
+Compiled defaults: every effect off, except two that act only once the RT bounce light is on
+(`rt=1` in ssgi.txt): the fire lights (`fire_light` 0.3) and the bounce's colour denoiser
+(`rt_denoise`). The launcher's Lite preset (ticket 90) turns on the moon's shadow at half
+resolution and the governor; the bounce, the reflections and the probes are in its "not judged
+yet" group, off by default.
+
+Numbers below are from 0.6 unless marked (0.6 carried ticket 53's regression); the 0.7 labels are
+in `.scratch/rt-ao/RT_RELEASE_AUDIT_2026-10-31.md`.
 
 The RTAO exports its scene and nothing else: `RayTracedAO::FrameTlas` (the TLAS of this frame in
 view space, valid after the AO pass until the next frame's) and `FrameSurface` (the surface

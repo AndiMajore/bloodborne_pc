@@ -100,6 +100,8 @@ GeForce 930MX; other NVIDIA and Intel GPUs by players.
   - **Anti-aliasing** separate from the upscalers: *auto* (the game's AA only without an
     upscaler), the game's, FXAA (Kyo's *Force FXAA2*), SMAA 1x (the port's own, before the UI), off;
     sharpening (RCAS) also without an upscaler. **GT-VBAO** can replace the game's SSAO.
+  - **Ray tracing (experimental, Linux):** ray-traced ambient occlusion and the moon's shadow by
+    ray tracing, about 1.7 ms per frame on an RX 9070 XT; see [docs/RAYTRACING.md](docs/RAYTRACING.md).
   - Faster than AMD's own shaders on RDNA3: the final passes of FSR 4 and 4.1.1 were rewritten
     to store through workgroup memory (3.5× and 2.3× faster, bit-exact); FSR 4 costs ~4 ms at
     4K on an RX 7800 XT instead of ~6 ms.

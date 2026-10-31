@@ -180,6 +180,10 @@ re-read within a second of a change. `~/.local/bin/rtao key=value` edits the fil
 
 ## Measurements (RX 9070 XT, RADV, 2560x1440 render, FSR to 4K)
 
+These were taken on 0.51 (2026-10-14/15). On 0.7 (Andreas's sessions of 2026-10-30/31, profile
+medians at 2560x1440): rtao trace 0.7-0.9 ms at 2 rays, blas 0.35-0.6, expand 0.14, static 0.16,
+apply 0.10; with the half-res moon shadow (0.23) the Lite preset's RT is about 1.7 ms.
+
 Measure with the camera still, `BB_GPU_PROFILE=1` (per-stage segments `rtao expand`, `rtao blas`,
 `rtao tlas`, `rtao trace`, `rtao blur`, `rtao apply`) and the frame cap off (`BB_FPS_LIMIT=0`,
 `BB_PRESENT_MODE=Mailbox`). The game paces itself to the 60 Hz vblank even then, so judge "GPU
