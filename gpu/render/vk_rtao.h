@@ -142,11 +142,17 @@ public:
     void PollSettings();
     void OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId normal);
     void AddGeometry(const Geometry& geometry);
-    /// Every draw's first color target and fragment shader: the end of the game's AO upsample
-    /// pass (pixel shader 0xc45c51cb into an R8 target of the scene size) is where the mask is
-    /// rewritten. Nothing else is ever written.
+    /// Every draw's first color target and fragment shader: the end of the game's AO pass is
+    /// where the mask is rewritten. The game takes one of two paths (docs/vbao.md): the temporal
+    /// one ends in the upsample shader 0xc45c51cb into an R8 target of the scene size (with the
+    /// bloodborne_remaster mod), the cheaper one in 0xcbbca5dc into an RGBA8 target of half the
+    /// size whose red channel is the AO (the unmodded game; ticket 87). Nothing else is written.
     void OnColorTarget(VideoCore::ImageId color, u64 ps_hash);
     static constexpr u64 AoUpsampleShader = 0xc45c51cbull;
+    static constexpr u64 AoHalfShader = 0xcbbca5dcull;
+    static constexpr bool IsAoShader(u64 ps_hash) {
+        return ps_hash == AoUpsampleShader || ps_hash == AoHalfShader;
+    }
 
 private:
     using GpuGeometry = Rtao::GpuGeometry;
@@ -338,7 +344,9 @@ private:
     u32 recorded_total = 0;
     VideoCore::ImageId depth_id{}, normal_id{};
     VideoCore::ImageId last_color{}, mask_candidate{};
-    bool upsample_seen = false;   // the game's upsample shader was seen
+    bool upsample_seen = false;   // one of the game's AO shaders was seen
+    bool half_path_seen = false;  // ... the half-size one (logged once when first seen)
+    bool mask_unusable_reported = false; // an AO target the apply cannot write (reported once)
     bool heuristic_reported = false; // an R8 scene-size target without it (reported once)
     u32 world_frames = 0;            // frames with G-buffer draws
     bool missing_pass_reported = false;
@@ -362,6 +370,7 @@ private:
     vk::UniquePipelineLayout expand_layout, trace_layout, apply_layout, blur_layout, probe_layout, temporal_layout;
     vk::UniquePipeline expand_pipeline, trace_pipeline, apply_pipeline, blur_pipeline, probe_pipeline,
         temporal_pipeline;
+    vk::UniquePipeline apply_rgba_pipeline; // the apply into the half-size RGBA8 AO target (87)
     vk::UniquePipeline rt_trace_pipeline; // ray-tracing pipeline variant of the trace
     Buffer sbt_buffer;
     vk::StridedDeviceAddressRegionKHR sbt_rgen{}, sbt_miss{}, sbt_hit{};

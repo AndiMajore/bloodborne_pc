@@ -28,7 +28,9 @@ preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far`,
   the same with RTAO on and off. Without `BB_RTAO=1` the device, the capture and every pipeline
   key are as without the feature.
 - The game's own SSAO pass must run: the "Disable SSAO" game patch (launcher, Game effects,
-  SSAO unchecked) removes the mask RTAO writes into. The log says so once.
+  SSAO unchecked) and some mods (bb_enhanced) remove the mask RTAO writes into. The log says so
+  once. Either of the game's two AO paths works (data flow, step 2); before ticket 87 only the
+  remaster mod's path did, so the unmodded game had no RT at all.
 
 ## Data flow per frame
 
@@ -43,7 +45,10 @@ preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far`,
    triangle (`rtao_trace_constants.glsl`; the any-hit shader in the pipeline variant, a candidate
    loop with ray queries). Over the temporal accumulation a grass card occludes at about that
    coverage instead of as a solid quad. The surface snap and the primary-ray test skip it.
-2. The game's AO upsample pass (pixel shader `0xc45c51cb` into an R8 scene-size target) ends;
+2. The game's AO pass ends: the game takes one of two paths (docs/vbao.md), the upsample shader
+   `0xc45c51cb` into an R8 scene-size target (with the bloodborne_remaster mod) or the half-size
+   shader `0xcbbca5dc` into an RGBA8 target of half the size, its red channel the AO (the unmodded
+   game, and with only the visual upgrade mod; ticket 87);
    `Record()` (`vk_rtao.cpp`) runs; the draws' intake and classification are `AddGeometry()`,
    `ClassifyDraws()` and `BuildTable()` (`vk_rtao_cache.cpp`), the GPU work `RecordImageSetup()`,
    `FillConstants()` and `RecordPasses()` (`vk_rtao_passes.cpp`); construction, the settings
@@ -71,7 +76,9 @@ preset (low, medium, high or custom) writes `rays`, `radius`, `strength`, `far`,
    - `rtao_blur.comp`: separable 7-tap depth-aware blur (`sigma`; with denoiser 2 twice as wide
      where N is 1, half as wide from N = 16);
    - `rtao_apply.comp`: depth-aware 4x4 upsample, `ao^power`, written as
-     `min(game mask, lerp(1, ao, strength))` (or ours alone with `replace=1`).
+     `min(game mask, lerp(1, ao, strength))` (or ours alone with `replace=1`); on the half-size
+     path one mask texel per trace texel (the tent still smooths), into the red channel only
+     (variant `OUTPUT_RGBA`, pipeline `rtao apply rgba`).
 
 ### Static cache
 
@@ -316,5 +323,5 @@ motion is known to be off).
 - The capture's positions are post-vertex-shader: anything the game moves in a later stage is not
   seen.
 - With the game's SSAO patched out there is nothing to write into. RTAO writes only into the mask
-  of the pass identified by its upsample shader (0xc45c51cb); if a game update or a pack changed
-  that hash, the log says so once and nothing is written.
+  of the pass identified by one of its two shaders (0xc45c51cb, 0xcbbca5dc); if a game update or a
+  pack changed those hashes, the log says so once and nothing is written.

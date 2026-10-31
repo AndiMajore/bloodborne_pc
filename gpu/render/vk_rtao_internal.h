@@ -84,6 +84,7 @@ struct ApplyConstants {
     u32 blur;
     u32 replace;
     u32 edge_fill; // 1: an edge without samples of its own takes the neighbourhood's AO, not none
+    u32 mask_scale; // 1: the mask is scene size (R8), 2: half size (the RGBA8 path, 87)
 };
 static_assert(sizeof(ExpandConstants) == 96 && offsetof(ExpandConstants, inv_view) == 48);
 static_assert(sizeof(TraceConstants) == 156 && offsetof(TraceConstants, foliage) == 144);
@@ -93,7 +94,7 @@ struct BlurConstants {
     float sigma;
     u32 use_n;
 };
-static_assert(sizeof(ApplyConstants) == 56);
+static_assert(sizeof(ApplyConstants) == 60);
 static_assert(sizeof(BlurConstants) == 24);
 /// The pass's one helper thread (bb:RtaoSplit, on otherwise idle cores): jobs run in order,
 /// each hands its result back through a future. Started with the first job, joined on
@@ -159,6 +160,8 @@ struct PassInputs {
     u32 w, h, write, dispatch_triangles, num_chunks, num_geometries, num_instances, total_triangles;
     u32 opaque_triangles; // the rest of total_triangles: the foliage, non-opaque
     bool do_dump, do_readback, split_fetch_now, v2;
+    bool mask_half = false; // the game's half-size RGBA8 AO target (87)
+    u32 mask_w = 0, mask_h = 0;
     vk::Buffer chunks_handle, ranges_handle, partials_handle, constants_handle, dump_handle, probe_handle, readback_handle, split_fetch_handle, split_staging_handle, pool_handle, table_handle, triangles_handle;
     vk::DeviceSize chunks_offset, ranges_offset, constants_offset, dump_offset, probe_bytes, probe_offset, split_fetch_bytes, split_fetch_src, table_bytes, table_offset, triangles_bytes;
     vk::DeviceAddress blas_scratch_address, tlas_scratch_address, instances_address, pool_address, triangles_address;

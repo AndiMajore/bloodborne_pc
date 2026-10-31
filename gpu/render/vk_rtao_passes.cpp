@@ -564,7 +564,8 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
     profile(0x47A05ull, "rtao apply");
     scheduler.RecordCrumb(
         {.name = "rtao apply"},
-        [=, apply_pipeline = *apply_pipeline, apply_layout = *apply_layout](vk::CommandBuffer cmdbuf) {
+        [=, apply_pipeline = in.mask_half ? *apply_rgba_pipeline : *apply_pipeline, apply_layout = *apply_layout,
+         mask_w = in.mask_w, mask_h = in.mask_h](vk::CommandBuffer cmdbuf) {
             const auto a = info(ao_write), d = info(depth_view), mk = info(mask_view);
             const std::array writes = {
                 vk::WriteDescriptorSet{.dstBinding = 0, .descriptorCount = 1,
@@ -576,7 +577,7 @@ void RayTracedAO::RecordPasses(const PassInputs& in) {
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, apply_pipeline);
             cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, apply_layout, 0, writes);
             cmdbuf.pushConstants(apply_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(apply), &apply);
-            cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            cmdbuf.dispatch((mask_w + 7) / 8, (mask_h + 7) / 8, 1);
         });
 }
 
@@ -745,6 +746,7 @@ void RayTracedAO::FillConstants(PassInputs& in, u32 slot, u32 read, u32 probe_id
         .blur = settings.blur ? 1u : 0u,
         .replace = settings.replace_mask ? 1u : 0u,
         .edge_fill = settings.edge_fill ? 1u : 0u,
+        .mask_scale = in.mask_half ? 2u : 1u,
     };
     in.ao_read = *ao_views[read];
     in.ao_write = *ao_views[write];

@@ -20,6 +20,7 @@
 #include <vk_mem_alloc.h>
 
 #include "bbgpu/shaders/rtao_apply_comp.h"
+#include "bbgpu/shaders/rtao_apply_rgba_comp.h"
 #include "bbgpu/shaders/rtao_blur_comp.h"
 #include "bbgpu/shaders/rtao_expand_comp.h"
 #include "bbgpu/shaders/rtao_probe_comp.h"
@@ -153,6 +154,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     expand_pipeline = make_pipeline(RTAO_EXPAND_COMP, *expand_layout);
     trace_pipeline = make_pipeline(RTAO_TRACE_COMP, *trace_layout);
     apply_pipeline = make_pipeline(RTAO_APPLY_COMP, *apply_layout);
+    apply_rgba_pipeline = make_pipeline(RTAO_APPLY_RGBA_COMP, *apply_layout); // the half-size path (87)
     if (rt_pipeline_supported) {
         CreateTracePipeline();
         // Measured at the Doll: trace 1.40-1.44 ms as a pipeline vs 1.62-1.64 ms with ray queries.
@@ -164,6 +166,7 @@ RayTracedAO::RayTracedAO(const Instance& instance_, Scheduler& scheduler_,
     SetObjectName(device, *trace_pipeline, "rtao trace");
     SetObjectName(device, *blur_pipeline, "rtao blur");
     SetObjectName(device, *apply_pipeline, "rtao apply");
+    SetObjectName(device, *apply_rgba_pipeline, "rtao apply rgba");
     SetObjectName(device, *temporal_pipeline, "rtao temporal");
 
     // The buffers (over a GiB) are made at the first frame with a scene camera, not here: made

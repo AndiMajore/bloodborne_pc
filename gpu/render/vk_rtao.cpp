@@ -102,9 +102,10 @@ void RayTracedAO::OnFrameStart() {
         }
         if (recorded == 0 && !draws.empty() && settings.active && !missing_pass_reported) {
             missing_pass_reported = true;
-            std::puts("RTAO: OFF in practice: the game's AO pass never ran, so there is no AO mask to "
-                      "write into. The \"Disable SSAO\" game patch (launcher: Game effects, SSAO "
-                      "unchecked) removes it; RTAO needs that pass. (Reported once.)");
+            std::puts("RTAO: OFF in practice: the game's AO pass never ran (neither its upsample shader "
+                      "c45c51cb nor its half-size shader cbbca5dc), so there is no AO mask to write into. "
+                      "The \"Disable SSAO\" game patch (launcher: Game effects, SSAO unchecked) and some "
+                      "mods (bb_enhanced) remove it; RTAO needs that pass. (Reported once.)");
         }
         recorded = 0;
         ++reports;
@@ -146,11 +147,12 @@ void RayTracedAO::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId nor
 void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
     // Which gate the game's AO pass meets (ticket 86): once, the first times its shader comes by.
     static int ao_pass_reports = 0;
-    if (ps_hash == AoUpsampleShader && ao_pass_reports < 3) {
+    if (IsAoShader(ps_hash) && ao_pass_reports < 3) {
         ++ao_pass_reports;
-        std::printf("RTAO: the AO upsample shader at a pass: enabled %d, resources %d, color %d, "
-                    "depth %d, candidate %d, active %d\n", int(enabled), int(resources_ready),
-                    int(bool(color)), int(bool(depth_id)), int(bool(mask_candidate)), int(settings.active));
+        std::printf("RTAO: the AO shader 0x%llx at a pass: enabled %d, resources %d, color %d, "
+                    "depth %d, candidate %d, active %d\n", (unsigned long long)ps_hash, int(enabled),
+                    int(resources_ready), int(bool(color)), int(bool(depth_id)), int(bool(mask_candidate)),
+                    int(settings.active));
     }
     if (!enabled || !resources_ready) {
         return;
@@ -164,11 +166,11 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
         buffer_cache.DemoteAllMirrors();
         scheduler.Flush();
     }
-    if (test_move && ps_hash == AoUpsampleShader && Active()) {
+    if (test_move && IsAoShader(ps_hash) && Active()) {
         test_move_pending = true;
     }
     if (color != last_color) {
-        // The previous pass ended. Was it the game's AO upsample (into the R8 mask)?
+        // The previous pass ended. Was it the game's AO pass (the R8 mask or the half-size RGBA8)?
         if (last_color && last_color == mask_candidate && !done_this_frame && depth_id && settings.active &&
             !draws.empty()) {
             done_this_frame = true;
@@ -184,13 +186,17 @@ void RayTracedAO::OnColorTarget(VideoCore::ImageId color, u64 ps_hash) {
     if (!color || !depth_id || mask_candidate) {
         return;
     }
-    if (ps_hash == AoUpsampleShader) {
+    if (IsAoShader(ps_hash)) {
         pass_missing = false;
-        if (!upsample_seen) {
-            upsample_seen = true;
-            std::printf("RTAO: the game's AO pass found by its upsample shader 0x%llx\n",
-                        (unsigned long long)AoUpsampleShader);
+        const bool half = ps_hash == AoHalfShader;
+        if (!upsample_seen || (half && !half_path_seen)) {
+            // Keep the wording: playtests look for "the game's AO pass found by its upsample shader".
+            std::printf("RTAO: the game's AO pass found by its upsample shader 0x%llx (%s)\n",
+                        (unsigned long long)ps_hash,
+                        half ? "the half-size path, RGBA8: the unmodded game" : "the temporal path, R8 scene size");
         }
+        upsample_seen = true;
+        half_path_seen |= half;
         mask_candidate = color;
         return;
     }
@@ -235,7 +241,24 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
 
     const auto depth_view = CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
     const auto normal_view = CachedView(normal, normal.info.pixel_format, vk::ImageAspectFlagBits::eColor);
-    const auto mask_view = CachedView(mask, vk::Format::eR8Unorm, vk::ImageAspectFlagBits::eColor);
+    // The game's AO target: R8 of the scene size, or (the half-size path, 87) RGBA8 of half the
+    // depth's size rounded up, its red channel the AO. Anything else is left alone.
+    const bool mask_half = mask.info.pixel_format == vk::Format::eR8G8B8A8Unorm;
+    const u32 mask_scale = mask_half ? 2u : 1u;
+    const u32 mask_w = (w + mask_scale - 1) / mask_scale, mask_h = (h + mask_scale - 1) / mask_scale;
+    if ((mask.info.pixel_format != vk::Format::eR8Unorm && !mask_half) ||
+        !(mask.usage_flags & vk::ImageUsageFlagBits::eStorage) || mask.info.size.width < mask_w ||
+        mask.info.size.height < mask_h) {
+        if (!mask_unusable_reported) {
+            mask_unusable_reported = true;
+            std::printf("RTAO: the game's AO target is %s %ux%u%s (depth %ux%u): not written\n",
+                        vk::to_string(mask.info.pixel_format).c_str(), mask.info.size.width,
+                        mask.info.size.height,
+                        (mask.usage_flags & vk::ImageUsageFlagBits::eStorage) ? "" : " without storage use", w, h);
+        }
+        return;
+    }
+    const auto mask_view = CachedView(mask, mask.info.pixel_format, vk::ImageAspectFlagBits::eColor);
 
     // The history pair swaps once the trace is recorded (the stage limiter may stop before it).
     const u32 read = ao_index, write = ao_index ^ 1;
@@ -318,6 +341,9 @@ void RayTracedAO::Record(VideoCore::ImageId mask_id) {
     in.depth_view = depth_view;
     in.normal_view = normal_view;
     in.mask_view = mask_view;
+    in.mask_half = mask_half;
+    in.mask_w = mask_w;
+    in.mask_h = mask_h;
     in.split_fetch_now = split_fetch_now;
     in.split_fetch_handle = split_fetch.buffer;
     in.split_staging_handle = split_staging.buffer;
